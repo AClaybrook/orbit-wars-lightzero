@@ -1,0 +1,43 @@
+# Python & virtual environments
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# External dependencies (cloned separately)
+external/
+
+# Training outputs, checkpoints, logs, and replays
+data_az*/
+data_mz*/
+data_gmz*/
+data_lightzero*/
+outputs/
+checkpoints/
+ckpts/
+*.pth
+*.pth.tar
+*.pt
+*.onnx
+runs/
+wandb/
+replays/
+*.html
+*.gif
+*.mp4
+*.log
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

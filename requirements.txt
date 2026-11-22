@@ -1,0 +1,30 @@
+# Core scientific & RL stack
+numpy==1.26.4
+torch>=2.1
+gymnasium>=0.29
+easydict>=1.10
+pytest>=8.0
+
+# OpenDILab DI-engine / LightZero dependencies
+DI-engine==0.5.3
+DI-toolkit
+DI-treetensor
+tensorboardX
+einops
+imageio
+wandb
+xxhash
+simple-parsing
+nltk
+line_profiler
+psutil
+pympler
+transformers
+
+# Kaggle Environments (install with --no-deps on Windows if orbax-checkpoint hits MAX_PATH)
+jsonschema
+requests
+scipy
+pettingzoo
+shimmy
+kaggle-environments==1.33.3

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orbit-wars-lightzero"
+version = "0.1.0"
+description = "Kaggle Orbit Wars AI built with LightZero (AlphaZero, MuZero, Gumbel MuZero) and an exact fast physics simulator"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26,<2.0",
+    "torch>=2.1",
+    "gymnasium>=0.29",
+    "easydict>=1.10",
+    "DI-engine>=0.5.3",
+    "DI-toolkit>=0.2.0",
+    "DI-treetensor>=0.5.0",
+    "tensorboardX>=2.6",
+    "einops>=0.7",
+    "imageio>=2.31",
+    "xxhash>=3.4",
+    "simple-parsing>=0.1.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "wandb>=0.16",
+]
+
+[tool.setuptools.packages.find]
+include = ["orbit_wars_bot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
