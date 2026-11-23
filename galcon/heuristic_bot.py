@@ -374,3 +374,304 @@ class GalconTacticalBot:
                         best_score = sc
                         best_id = p.id
         return best_id
+
+
+class GalconRusherBot:
+    """Hyper-aggressive Galcon home-rusher and tempo-pressure sparring bot.
+
+    Supports three realistic competitive rush styles:
+    - ``"all_in"``: Punishes early neutral over-expansion immediately with a heavy
+      opening home-rush wave and relentless continuous reinforcements at the enemy home.
+    - ``"blitz"``: Grabs at most 1 ultra-cheap nearby neutral if available on tick 0,
+      then pivots instantly into an overwhelming multi-planet blitz on enemy planets.
+    - ``"adaptive"``: Waits 2-6 ticks to read enemy opening spend; the moment the enemy
+      drops garrison below our strike force, fires an immediate lethal rush.
+    """
+
+    def __init__(
+        self,
+        *,
+        style: str = "all_in",
+        aggression: float = 1.0,
+        enable_redirect: bool = True,
+    ) -> None:
+        self.style = style
+        self.aggression = float(aggression)
+        self.enable_redirect = bool(enable_redirect)
+
+    def act(self, sim: GalconSim, player: int) -> List[Order]:
+        orders: List[Order] = []
+        planets = list(sim.planets.values())
+        mine = [p for p in planets if p.owner == player]
+        enemies = [p for p in planets if p.owner != 0 and p.owner != player]
+        neutrals = [p for p in planets if p.owner == 0]
+        if not mine:
+            return orders
+
+        horizon = 24
+        futures: Dict[int, Tuple] = {
+            p.id: project_planet_future(sim, p.id, player, horizon=horizon) for p in planets
+        }
+
+        # 1. Aggressive mid-flight redirect: pivot wasted/doomed fleets onto vulnerable enemy planets
+        if self.enable_redirect and sim.allow_redirect and sim.fleets:
+            for fl in sim.fleets.values():
+                if fl.owner != player:
+                    continue
+                cur_dst = sim.planets.get(fl.target)
+                if cur_dst is None:
+                    continue
+                _, _, po, ps = futures[cur_dst.id]
+                eta_cur = sim.eta_ticks(fl.x, fl.y, cur_dst)
+                t_cur = min(horizon - 1, max(0, eta_cur - 1))
+                wasted_friendly = cur_dst.owner == player and po[-1] > 0 and ps[-1] > fl.ships + 12.0
+                doomed_attack = cur_dst.owner != player and po[t_cur] <= 0 and fl.ships < ps[t_cur] * 0.75
+                if wasted_friendly or doomed_attack:
+                    best_alt = None
+                    best_sc = 0.0
+                    for cand in enemies + neutrals:
+                        if cand.id == cur_dst.id:
+                            continue
+                        eta = sim.eta_ticks(fl.x, fl.y, cand)
+                        _, _, cpo, cps = futures[cand.id]
+                        t_idx = min(horizon - 1, max(0, eta - 1))
+                        if cpo[t_idx] <= 0 and fl.ships > cps[t_idx] + 1.0:
+                            mult = 2.6 if cand.owner != 0 else 0.9
+                            sc = (cand.production * mult) / max(2.0, cps[t_idx] + eta * 1.4)
+                            if sc > best_sc:
+                                best_sc = sc
+                                best_alt = cand.id
+                    if best_alt is not None:
+                        orders.append(RedirOrder(fl.id, best_alt))
+
+        if not enemies:
+            # Cleanup any remaining neutrals if opponent only has flying fleets
+            if neutrals:
+                target_n = min(neutrals, key=lambda n: n.ships / max(10.0, n.production))
+                for src in mine:
+                    if src.ships >= 8.0:
+                        orders.append(SendOrder(src.id, target_n.id, 60))
+            return orders
+
+        # Identify primary enemy target (weakest / highest-prod killable enemy planet)
+        def enemy_target_score(src: Planet, e: Planet) -> float:
+            eta = sim.planet_eta_ticks(src, e)
+            _, _, po, ps = futures[e.id]
+            t_idx = min(horizon - 1, max(0, eta - 1))
+            if po[t_idx] > 0:
+                return -1e6
+            extra = (e.production / PRODUCTION_DIVISOR) * sim.tick_dt * max(0, eta - horizon)
+            def_ships = float(ps[t_idx]) + extra
+            return (e.production * 2.2 + 30.0) / max(4.0, def_ships + 1.1 * eta)
+
+        # Opening phase (first ~16 ticks)
+        if sim.tick <= 16 and len(mine) == 1:
+            home = mine[0]
+            en_home = max(enemies, key=lambda e: e.production)
+            eta_home = sim.planet_eta_ticks(home, en_home)
+            _, _, _, ps_en = futures[en_home.id]
+            t_idx = min(horizon - 1, max(0, eta_home - 1))
+            en_ships_at_land = float(ps_en[t_idx]) + (en_home.production / PRODUCTION_DIVISOR) * sim.tick_dt * max(
+                0, eta_home - horizon
+            )
+
+            # Check if our own home is currently being rushed
+            _, en_arr_home, po_home, _ = futures[home.id]
+            incoming_on_home = float(en_arr_home.sum())
+
+            if self.style == "blitz" and sim.tick == 0 and neutrals:
+                # Grab 1 ultra-cheap high-prod neutral nearby before rushing
+                cheap = [
+                    n
+                    for n in neutrals
+                    if n.ships <= 18.0 and n.production >= 45.0 and sim.planet_eta_ticks(home, n) <= 10
+                ]
+                if cheap:
+                    best_n = max(cheap, key=lambda n: n.production / max(3.0, n.ships + sim.planet_eta_ticks(home, n)))
+                    pct = _ships_to_percent(home.ships, best_n.ships + 3.0)
+                    if 5 <= pct <= 30:
+                        orders.append(SendOrder(home.id, best_n.id, pct))
+                        rem = home.ships - math.floor(home.ships * pct / 100.0)
+                        if rem >= 45.0:
+                            orders.append(SendOrder(home.id, en_home.id, min(90, int(75 * self.aggression))))
+                        return orders
+
+            if self.style == "all_in":
+                if sim.tick == 0 and home.ships >= 50.0:
+                    pct = min(92, max(65, int(round(82 * self.aggression))))
+                    orders.append(SendOrder(home.id, en_home.id, pct))
+                    return orders
+                if incoming_on_home <= home.ships * 0.4 and home.ships >= 12.0:
+                    orders.append(SendOrder(home.id, en_home.id, min(85, max(50, int(round(72 * self.aggression))))))
+                    return orders
+
+            elif self.style == "adaptive":
+                # Wait briefly; punish the instant enemy spends ships or has less than us
+                if en_home.ships < home.ships * 0.85 or sim.tick >= 6:
+                    if incoming_on_home <= home.ships * 0.5 and home.ships >= 20.0:
+                        desired = min(home.ships * 0.90, max(home.ships * 0.65, en_ships_at_land + 8.0))
+                        pct = _ships_to_percent(home.ships, desired)
+                        if pct >= 20:
+                            orders.append(SendOrder(home.id, en_home.id, pct))
+                        return orders
+
+        # Mid/late rush & continuous pressure
+        for src in mine:
+            _, en_arr, po, ps = futures[src.id]
+            lost_idx = next((t for t in range(horizon) if po[t] <= 0), -1)
+            if lost_idx >= 0:
+                # If doomed in <= 3 ticks, counter-rush enemy! Otherwise hold to defend.
+                if lost_idx <= 3 and src.ships >= 5.0:
+                    tgt = max(enemies, key=lambda e: enemy_target_score(src, e))
+                    orders.append(SendOrder(src.id, tgt.id, 100))
+                continue
+
+            min_hold = float(ps.min())
+            avail = max(0.0, min(src.ships, min_hold) - 2.0)
+            if avail < 7.0:
+                continue
+
+            # Snag an ultra-cheap neutral right next door if it's basically free
+            free_neutrals = [
+                n
+                for n in neutrals
+                if n.ships <= 10.0
+                and n.production >= 50.0
+                and sim.planet_eta_ticks(src, n) <= 7
+                and futures[n.id][2][-1] <= 0
+                and avail > n.ships + 5.0
+            ]
+            if free_neutrals and len(mine) < 5:
+                bn = max(free_neutrals, key=lambda n: n.production / max(2.0, n.ships + 1.0))
+                pct = _ships_to_percent(src.ships, bn.ships + 2.5)
+                if 5 <= pct <= 45:
+                    orders.append(SendOrder(src.id, bn.id, pct))
+                    continue
+
+            # Otherwise hammer the best enemy target relentlessly
+            best_en = max(enemies, key=lambda e: enemy_target_score(src, e))
+            eta = sim.planet_eta_ticks(src, best_en)
+            _, _, po_e, ps_e = futures[best_en.id]
+            t_idx = min(horizon - 1, max(0, eta - 1))
+            if po_e[t_idx] > 0:
+                # Already capturing this target; pick next enemy or reinforce frontline
+                other_en = [e for e in enemies if e.id != best_en.id]
+                if not other_en:
+                    continue
+                best_en = max(other_en, key=lambda e: enemy_target_score(src, e))
+            send_ratio = min(0.92, max(0.55, 0.72 * self.aggression))
+            pct = _ships_to_percent(src.ships, avail * send_ratio)
+            if pct >= 15:
+                orders.append(SendOrder(src.id, best_en.id, pct))
+
+        return orders
+
+
+class GalconMacroBot:
+    """Economic expansion & late-game snowball sparring bot.
+
+    Prioritizes fast high-ROI neutral expansion while keeping a strict defensive
+    garrison against enemy rushes, then transitions into heavy multi-planet waves
+    once holding a production advantage.
+    """
+
+    def __init__(self, *, expand_bias: float = 1.35) -> None:
+        self.expand_bias = float(expand_bias)
+
+    def act(self, sim: GalconSim, player: int) -> List[Order]:
+        orders: List[Order] = []
+        planets = list(sim.planets.values())
+        mine = [p for p in planets if p.owner == player]
+        enemies = [p for p in planets if p.owner != 0 and p.owner != player]
+        if not mine:
+            return orders
+
+        horizon = 24
+        futures = {p.id: project_planet_future(sim, p.id, player, horizon=horizon) for p in planets}
+        opp = 2 if player == 1 else 1
+        my_prod = sim.total_production(player)
+        en_prod = sim.total_production(opp)
+        my_ships = sim.total_ships(player)
+        en_ships = sim.total_ships(opp)
+
+        claimed: Dict[int, float] = {}
+        threatened: Dict[int, Tuple[float, int]] = {}
+        surplus: Dict[int, float] = {}
+
+        for p in mine:
+            _, _, po, ps = futures[p.id]
+            lost_idx = next((t for t in range(horizon) if po[t] <= 0), -1)
+            if lost_idx >= 0:
+                threatened[p.id] = (float(ps[lost_idx]) + 2.0, lost_idx + 1)
+                surplus[p.id] = 0.0
+            else:
+                garrison = 2.0
+                if len(mine) <= 2 and enemies:
+                    nearest_en = min(enemies, key=lambda e: sim.planet_eta_ticks(e, p))
+                    eta_e = sim.planet_eta_ticks(nearest_en, p)
+                    growth = (p.production / PRODUCTION_DIVISOR) * sim.tick_dt * eta_e
+                    garrison = max(2.0, min(p.ships * 0.45, nearest_en.ships * 0.55 - growth))
+                surplus[p.id] = max(0.0, min(p.ships, float(ps.min())) - garrison)
+
+        # Defend threatened planets first
+        for pid, (deficit, urg_eta) in sorted(threatened.items(), key=lambda kv: -sim.planets[kv[0]].production):
+            dst = sim.planets[pid]
+            need = deficit
+            for h in sorted(mine, key=lambda x: sim.planet_eta_ticks(x, dst)):
+                if h.id == pid or h.id in threatened or surplus[h.id] < 3.0:
+                    continue
+                if sim.planet_eta_ticks(h, dst) <= urg_eta:
+                    send_amt = min(surplus[h.id], need + 1.0)
+                    pct = _ships_to_percent(h.ships, send_amt)
+                    if pct >= 5:
+                        orders.append(SendOrder(h.id, pid, pct))
+                        surplus[h.id] -= send_amt
+                        need -= send_amt
+                    if need <= 0:
+                        break
+
+        # Expand to high-ROI neutrals or crush enemies once ahead on economy
+        boom_phase = (my_prod < en_prod * 1.30) and (sim.tick < 110)
+        for src in mine:
+            avail = surplus.get(src.id, 0.0)
+            if avail < 6.0:
+                continue
+            best_t: Optional[Planet] = None
+            best_need = 0.0
+            best_sc = 0.25
+            for dst in planets:
+                if dst.id == src.id or dst.owner == player:
+                    continue
+                eta = sim.planet_eta_ticks(src, dst)
+                _, _, po, ps = futures[dst.id]
+                t_idx = min(horizon - 1, max(0, eta - 1))
+                if po[t_idx] > 0:
+                    continue
+                extra = (
+                    (dst.production / PRODUCTION_DIVISOR) * sim.tick_dt * max(0, eta - horizon)
+                    if po[t_idx] < 0
+                    else 0.0
+                )
+                need = float(ps[t_idx]) + extra + 2.0 - claimed.get(dst.id, 0.0)
+                if need <= 0.0 or avail < need:
+                    continue
+                prod_rate = dst.production / PRODUCTION_DIVISOR
+                if dst.owner == 0 and po[t_idx] == 0:
+                    mult = self.expand_bias if boom_phase else 0.85
+                elif dst.owner == 0 and po[t_idx] < 0:
+                    mult = 2.0
+                else:
+                    mult = 2.4 if (my_ships > en_ships * 0.95 or not boom_phase) else 1.1
+                sc = (prod_rate * 30.0 * mult) / max(3.0, need + 0.65 * eta)
+                if sc > best_sc:
+                    best_sc = sc
+                    best_t = dst
+                    best_need = need
+            if best_t is not None:
+                pct = _ships_to_percent(src.ships, best_need)
+                if pct >= 5:
+                    orders.append(SendOrder(src.id, best_t.id, pct))
+                    claimed[best_t.id] = claimed.get(best_t.id, 0.0) + best_need
+                    surplus[src.id] = max(0.0, avail - best_need)
+        return orders
+

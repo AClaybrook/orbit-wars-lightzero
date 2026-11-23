@@ -211,11 +211,17 @@ def run_gbots_loop(
 
 def _build_bot(bot_kind: str, checkpoint: Optional[str]) -> Callable[[GalconSim, int], List[Order]]:
     if bot_kind == "classic":
-        b = GalconClassicBot()
-        return b.act
+        return GalconClassicBot().act
     if bot_kind == "tactical":
-        b = GalconTacticalBot()
-        return b.act
+        return GalconTacticalBot().act
+    if bot_kind == "rusher":
+        from galcon.heuristic_bot import GalconRusherBot
+
+        return GalconRusherBot().act
+    if bot_kind == "macro":
+        from galcon.heuristic_bot import GalconMacroBot
+
+        return GalconMacroBot().act
     if bot_kind in ("transformer", "search"):
         from galcon.transformer_bot import GalconSearchTransformerAgent, GalconTransformerAgent
 
@@ -230,7 +236,11 @@ def _build_bot(bot_kind: str, checkpoint: Optional[str]) -> Callable[[GalconSim,
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Run our Galcon bot over Phil Hassey's gbots pipe protocol.")
-    parser.add_argument("--bot", choices=["tactical", "classic", "transformer", "search"], default="transformer")
+    parser.add_argument(
+        "--bot",
+        choices=["tactical", "classic", "rusher", "macro", "transformer", "search"],
+        default="transformer",
+    )
     parser.add_argument("--checkpoint", default="checkpoints/galcon_transformer_best.pt")
     args = parser.parse_args(argv)
     act_fn = _build_bot(args.bot, args.checkpoint)

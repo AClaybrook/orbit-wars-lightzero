@@ -1,4 +1,4 @@
-"""Unit tests for the Galcon simulator, tactical solver, PlanetTimelineTransformer, and gbots adapter."""
+"""Unit tests for the Galcon simulator, sparring suite, Gen 2 PlanetTimelineTransformer, and gbots adapter."""
 
 from __future__ import annotations
 
@@ -9,18 +9,24 @@ import numpy as np
 import torch
 
 from galcon.gbots_client import GbotsProtocolState, format_gbots_orders, run_gbots_loop
-from galcon.heuristic_bot import GalconClassicBot, GalconTacticalBot
-from galcon.sim import GalconSim, RedirOrder, SendOrder, evaluate_galcon_state, project_planet_future
+from galcon.heuristic_bot import GalconClassicBot, GalconMacroBot, GalconRusherBot, GalconTacticalBot
+from galcon.sim import Fleet, GalconSim, Planet, RedirOrder, SendOrder, evaluate_galcon_state, project_planet_future
 from galcon.transformer_bot import (
     GALCON_EDGE_DIM,
+    GALCON_EDGE_DIM_V2,
     GALCON_PLANET_DIM,
+    GALCON_PLANET_DIM_V2,
+    GALCON_REDIR_DIM,
     GALCON_TIMELINE_DIM,
     GALCON_TIMELINE_HORIZON,
     GalconSearchTransformerAgent,
     GalconTransformerAgent,
     apply_galcon_d4,
+    build_galcon_gen2_transformer,
     build_galcon_transformer,
+    compute_smart_redirects,
     extract_galcon_features,
+    extract_galcon_redir_features,
     pad_galcon_state,
 )
 
@@ -69,9 +75,31 @@ def test_galcon_tactical_bot_beats_classic_baseline():
     assert wins >= 4, f"Expected GalconTacticalBot to dominate GalconClassicBot, got {wins}/6"
 
 
+def test_galcon_sparring_suite_rusher_and_macro():
+    sim = GalconSim.create(seed=55, num_planets=14, width=320.0, height=200.0, max_ticks=120)
+    rusher_allin = GalconRusherBot(style="all_in")
+    rusher_blitz = GalconRusherBot(style="blitz")
+    rusher_adapt = GalconRusherBot(style="adaptive")
+    macro = GalconMacroBot()
+
+    # All-in rusher must fire a heavy tick-0 home-rush straight at enemy home (planet 2)
+    o0 = rusher_allin.act(sim, 1)
+    assert any(isinstance(o, SendOrder) and o.src_id == 1 and o.dst_id == 2 and o.percent >= 65 for o in o0)
+
+    # All sparring bots run cleanly over full matches
+    for opp in (rusher_blitz, rusher_adapt, macro):
+        s2 = GalconSim.create(seed=56, num_planets=12, width=260.0, height=160.0, max_ticks=80)
+        while not s2.done:
+            if s2.tick % 2 == 0:
+                s2.step({1: rusher_allin.act(s2, 1), 2: opp.act(s2, 2)})
+            else:
+                s2.step({})
+        assert s2.done
+
+
 def test_galcon_transformer_d4_invariance_and_search(tmp_path: Path):
     sim = GalconSim.create(seed=77, num_planets=12, width=260.0, height=160.0)
-    enc = extract_galcon_features(sim, player=1)
+    enc = extract_galcon_features(sim, player=1, feature_version=1)
     n = len(enc.planet_ids)
     assert enc.planet_feats.shape == (n, GALCON_PLANET_DIM)
     assert enc.timeline_feats.shape == (n, GALCON_TIMELINE_HORIZON, GALCON_TIMELINE_DIM)
@@ -80,8 +108,9 @@ def test_galcon_transformer_d4_invariance_and_search(tmp_path: Path):
     assert np.isfinite(enc.edge_feats).all()
 
     pad = pad_galcon_state(enc)
+    assert pad["planet_feats"].shape[1] == GALCON_PLANET_DIM
     model = build_galcon_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
-    ckpt = tmp_path / "galcon_test.pt"
+    ckpt = tmp_path / "galcon_test_v1.pt"
     torch.save({"model_config": model.config, "model_state_dict": model.state_dict()}, ckpt)
 
     ag = GalconTransformerAgent(ckpt, launch_threshold=0.10, use_d4_tta=True)
@@ -91,7 +120,7 @@ def test_galcon_transformer_d4_invariance_and_search(tmp_path: Path):
     assert -1.0 <= val <= 1.0
 
     # Exact D4 reflection + rotation invariance
-    enc_ref = extract_galcon_features(sim, player=1)
+    enc_ref = extract_galcon_features(sim, player=1, feature_version=1)
     enc_ref.planet_feats = apply_galcon_d4(enc_ref.planet_feats, k_rot=3, flip_x=True)
     probs_ref, _, val_ref = ag.predict_probs_and_value(enc_ref)
     assert np.allclose(probs, probs_ref, atol=1e-4)
@@ -106,7 +135,72 @@ def test_galcon_transformer_d4_invariance_and_search(tmp_path: Path):
     assert len(my_arr) == 12 and po[-1] == 1.0
 
 
-def test_gbots_wire_protocol_roundtrip():
+def test_galcon_gen2_world_model_native_redir_and_d4(tmp_path: Path):
+    sim = GalconSim.create(seed=88, num_planets=14, width=320.0, height=200.0)
+    sim.step({1: [SendOrder(1, 3, 35)], 2: [SendOrder(2, 4, 35)]})
+    enc = extract_galcon_features(sim, player=1, feature_version=2)
+    n = len(enc.planet_ids)
+    assert enc.planet_feats.shape == (n, GALCON_PLANET_DIM_V2)
+    assert enc.edge_feats.shape == (n, n, GALCON_EDGE_DIM_V2)
+
+    renc = extract_galcon_redir_features(sim, enc)
+    assert len(renc.fleet_ids) == 1
+    assert renc.redir_feats.shape == (1, n, GALCON_REDIR_DIM)
+    assert np.isfinite(renc.redir_feats).all()
+
+    model = build_galcon_gen2_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
+    logits, fracs, val, aux = model(
+        torch.from_numpy(enc.planet_feats[None]),
+        torch.from_numpy(enc.timeline_feats[None]),
+        torch.from_numpy(enc.edge_feats[None]),
+        torch.ones((1, n), dtype=torch.bool),
+        return_aux=True,
+    )
+    assert logits.shape == (1, n, n + 1)
+    assert fracs.shape == (1, n, n)
+    assert val.shape == (1,)
+    assert aux.shape == (1, n, 4)
+
+    ckpt = tmp_path / "galcon_gen2_test.pt"
+    torch.save(
+        {"model_config": model.config, "model_state_dict": model.state_dict(), "has_trained_redir": True},
+        ckpt,
+    )
+    ag = GalconTransformerAgent(ckpt, launch_threshold=0.10, use_d4_tta=True)
+    p1, _, v1, r1 = ag.predict_probs_value_and_redir(enc, renc)
+    assert r1 is not None and r1.shape == (1, n)
+    assert np.allclose(r1.sum(axis=-1), 1.0, atol=1e-4)
+
+    # Exact 8x D4 invariance on policy, value, AND native /REDIR head
+    enc_ref = extract_galcon_features(sim, player=1, feature_version=2)
+    enc_ref.planet_feats = apply_galcon_d4(enc_ref.planet_feats, k_rot=1, flip_x=True)
+    p2, _, v2, r2 = ag.predict_probs_value_and_redir(enc_ref, renc)
+    assert np.allclose(p1, p2, atol=1e-4)
+    assert abs(v1 - v2) < 1e-4
+    assert r2 is not None and np.allclose(r1, r2, atol=1e-4)
+
+    # Batched search with search info
+    s_ag = GalconSearchTransformerAgent(ckpt, launch_threshold=0.10, rollout_horizon=6, time_budget_sec=0.20)
+    best_plan, cands, scores, best_sc = s_ag.act_with_search_info(sim, 1)
+    assert isinstance(best_plan, list)
+    assert len(cands) == len(scores) >= 1
+    assert -1.0 <= best_sc <= 1.0
+
+    # Smart redirect oracle rescues a doomed fleet attacking a heavily fortified enemy planet
+    custom_planets = [
+        Planet(id=1, owner=1, ships=40.0, x=40.0, y=100.0, production=100.0, radius=28.0),
+        Planet(id=2, owner=2, ships=95.0, x=260.0, y=100.0, production=100.0, radius=28.0),
+        Planet(id=3, owner=0, ships=8.0, x=150.0, y=120.0, production=90.0, radius=25.0),
+    ]
+    doomed_fleet = Fleet(id=500, owner=1, ships=20.0, x=140.0, y=100.0, source=1, target=2)
+    sim_r = GalconSim(custom_planets, [doomed_fleet], width=300.0, height=200.0)
+    enc_r = extract_galcon_features(sim_r, 1, feature_version=2)
+    redirs, labels = compute_smart_redirects(sim_r, enc_r, verify_rollout=True)
+    assert any(r.fleet_id == 500 and r.dst_id == 3 for r in redirs)
+    assert labels[500] == 2
+
+
+def test_gbots_wire_protocol_roundtrip(tmp_path: Path):
     wire_input = "\n".join(
         [
             "/RESET",
@@ -145,3 +239,15 @@ def test_gbots_wire_protocol_roundtrip():
     assert lines.count("/TOCK") == 2
     assert any(l.startswith("/SEND ") for l in lines)
     assert format_gbots_orders([SendOrder(1, 3, 50), RedirOrder(99, 2)]) == ["/SEND 50 1 3", "/REDIR 99 2"]
+
+    # End-to-end stdin/stdout loop with Gen 2 GalconTransformerAgent
+    m = build_galcon_gen2_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
+    ck = tmp_path / "gen2_gbots.pt"
+    torch.save({"model_config": m.config, "model_state_dict": m.state_dict(), "has_trained_redir": True}, ck)
+    ag = GalconTransformerAgent(ck, launch_threshold=0.05, use_d4_tta=True)
+    out2 = io.StringIO()
+    ticks2 = run_gbots_loop(ag.act, in_stream=io.StringIO(wire_input), out_stream=out2)
+    assert ticks2 == 2
+    lines2 = [l for l in out2.getvalue().splitlines() if l]
+    assert lines2.count("/TOCK") == 2
+    assert any(l.startswith("/SEND ") for l in lines2)

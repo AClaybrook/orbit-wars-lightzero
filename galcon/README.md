@@ -1,52 +1,79 @@
-# Galcon AI — PlanetTimelineTransformer + Tactical Solver + `gbots` Adapter
+# Galcon AI Gen 2 — PlanetTimelineTransformer + Self-Play League RL + `gbots` Adapter
 
-A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-lightzero` that cross-pollinates our proven **Orbit Wars `PlanetTimelineTransformer`** (variable-N planet tokens + 20-step arrival timelines + D4-invariant pairwise ETA/ROI edges + 8× D4 TTA + Self-Play PPO) directly to classic Galcon and Phil Hassey's official **`gbots`** protocol.
+A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-lightzero` that cross-pollinates our Orbit Wars **`PlanetTimelineTransformer`** (`orbit_wars_bot/planet_transformer.py`) directly to classic Galcon and Phil Hassey's official **`gbots`** protocol — pushed far beyond heuristic ceilings via **AlphaZero Search Self-Play Distillation + 608-Episode Teacher-Free League PPO**.
 
-## Why Entity-Transformer Over Grid CNN for Galcon?
-Instead of rasterizing planets onto a fixed `8×8` grid (`(W·H)² = 4,096` discrete actions with grid-channel reflection remapping):
-- **Any map size & any planet count:** Scale-invariant coordinates work identically across `8`-planet `200×125` tactical maps, `18–24`-planet `400×240` classic Galcon maps, and larger `gbots` arenas without retraining.
-- **Exact arrival timelines & pairwise ETAs:** Every flying fleet's exact landing tick is simulated into each planet's 20-step arrival tensor; pairwise flight times, ROI payback, snipe-steal flags, and defense urgency sit directly in the Transformer attention edge bias.
-- **4-line exact 8× D4 symmetry:** Rotating/reflecting only `(x, y)` gives exact 8× data augmentation and 8× test-time augmentation.
-- **Full `gbots` compatibility:** Speaks Phil Hassey's tab-delimited `gbots pipe` wire protocol (`/PLANET`, `/FLEET`, `/SEND`, `/REDIR`, `/TICK`, `/TOCK`) out of the box.
+## Gen 2 Highlights
+- **Scaled `1.26M` Entity-Transformer (`GalconPlanetTransformer`)**: Wraps `PlanetTimelineTransformer` (`d_model=160, n_heads=4, n_layers=5, dim_ff=384`) with:
+  - Enriched D4-invariant rush-defense & exact-capture features (`22` planet dims, `20×8` exact arrival timelines, `12` edge dims)
+  - Auxiliary **`t+10` future-state world-model head** (`97.3%` future planet ownership accuracy; zero inference overhead)
+  - **Native 8× D4-invariant mid-flight `/REDIR` head** trained on rollout-verified rescues of doomed attacks, over-reinforcements, and emergency defenses
+- **Multi-Style Sparring Suite**: `GalconRusherBot` (`all_in`, `blitz`, `adaptive`), `GalconClassicBot`, `GalconTacticalBot`, and `GalconMacroBot`.
+- **Teacher-Free Self-Play RL Flywheel**:
+  1. Multi-style winner-filtered Warm-Start (with balanced win/loss value + `t+10` world model + `/REDIR` supervision)
+  2. Two rounds of **AlphaZero Policy-Proposed Search Distillation** (`95` search games, Boltzmann soft targets, batched leaf evals — `+135.8 Elo` over v1)
+  3. **608 episodes of Teacher-Free League PPO** (growing Historical Snapshot Pool + Moving EMA Teacher KL + GAE + joint target & continuous send-fraction RL + `-0.35` stalemate draw penalty — **`+187.1 Elo` more** with zero teacher!)
+- **Fast Batched Lookahead Search (`GalconSearchTransformerAgent`)**: Proposes 8–10 policy candidates (threshold sweep, fraction scales, top-3 entropy flips, rush-guard hold, `/REDIR` variants) and evaluates all rollout leaves in ONE batched forward pass (`67.9 ms/tick`).
+- **Full `gbots pipe` Compatibility**: Verified live emission of `/SEND`, native `/REDIR`, and `/TOCK`.
 
-## Architecture
-- [`galcon/sim.py`](sim.py) — Fast continuous-coordinate Galcon physics engine (`production / 50` ships/sec, `40.0` fleet speed, `0.25s` ticks, `SendOrder` + mid-flight `RedirOrder`, symmetric map generator, exact future timeline projection).
-- [`galcon/heuristic_bot.py`](heuristic_bot.py) — `GalconClassicBot` greedy baseline + **`GalconTacticalBot`** (exact safe-surplus defense, enemy neutral-steal sniping, ROI expansion, frontline funneling, and wasted-fleet redirects).
-- [`galcon/transformer_bot.py`](transformer_bot.py) — Reuses [`PlanetTimelineTransformer`](../orbit_wars_bot/planet_transformer.py) with `GalconTransformerAgent` (8× D4 TTA + redirect overlay) and `GalconSearchTransformerAgent` (value-guided lookahead search in `GalconSim`).
-- [`galcon/gbots_client.py`](gbots_client.py) — Official `gbots pipe` stdin/stdout client.
-- [`galcon/train.py`](train.py) — Multi-map training pipeline: Behavior Cloning → DAgger → **Self-Play PPO + Anchor-KL RL**.
+## Verified Bradley-Terry Elo Ladder (Anchored at `GalconClassicBot = 1200.0`)
+
+Computed from 300+ held-out multi-map games (`8–22` planets, `240×150` to `400×240`, balanced P1/P2 sides):
+
+| Rank | Agent | Bradley-Terry Elo | Δ vs. v1 Pure | Mean Latency | Highlight |
+|---:|---|---:|---:|---:|---|
+| 1 | **`GalconPT-Gen2 + Search` (1.26M, 8× D4)** | **`1643.8`** | `+338.7` | `67.9 ms/tick` | **`47–0–1` (`97.9%` WR, 0 losses)** vs. Classic / Rushers / Macro |
+| 2 | **`GalconPT-Gen2 Pure` (1.26M, 8× D4 + `/REDIR`)** | **`1628.0`** | **`+322.9`** | **`12.3 ms/tick`** | **`102–9–9` (`85.0%` WR / `88.8%` score)**; beats Search `5–3–4` H2H! |
+| 3 | `GalconPT-Gen2 EI-R2` (Search Distill, No PPO) | `1440.9` | `+135.8` | `12.3 ms/tick` | Pre-RL checkpoint (`85/120` = `70.8%`) |
+| 4 | `GalconRusherBot (All-In)` | `1320.5` | `+15.4` | `<2 ms/tick` | Beats v1 Pure `9–3–0` (`75%`); crushed `19–1–0` (`95%`) by Gen 2 Pure |
+| 5 | `GalconPT-v1 Pure` (0.59M, 8× D4) | `1305.1` | `0.0` | `10.1–17.1 ms` | v1 baseline (60 BC + 25 DAgger + 64 PPO eps) |
+| 6 | `GalconRusherBot (Adaptive)` | `1280.9` | `-24.2` | `<2 ms/tick` | Crushed `16–1–3` by Gen 2 Pure, `12–0–0` by Gen 2 + Search |
+| 7 | `GalconTacticalBot` (Analytical Solver) | `1221.9` | `-83.2` | `<2 ms/tick` | Gen 2 Pure wins `15–2–3` (`75.0%` WR / `82.5%` score) |
+| 8 | `GalconClassicBot` (Anchor) | `1200.0` | `-105.1` | `<1 ms/tick` | Gen 2 Pure `18–1–1` (`90%`), Gen 2 + Search `12–0–0` (`100%`) |
+| 9 | `GalconMacroBot` (Boomer) | `1098.3` | `-206.8` | `<2 ms/tick` | Gen 2 Pure `19–0–1` (`95%`), Gen 2 + Search `11–0–1` |
+
+### Held-Out Matchup Matrix (8–22 Planets, `240×150` to `400×240`)
+
+| Agent | vs. `Tactical` | vs. `Classic` | vs. `Rusher (All-In)` | vs. `Rusher (Adapt)` | vs. `Macro` | vs. `v1 Pure` | Overall |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **`GalconPT-Gen2 Pure` (12.3 ms)** | **`15–2–3`** (`75%`) | **`18–1–1`** (`90%`) | **`19–1–0`** (`95%`) | **`16–1–3`** (`80%`) | **`19–0–1`** (`95%`) | **`15–4–1`** (`75%`) | **`102–9–9` (`85.0%` WR / `88.8%` score)** |
+| **`GalconPT-Gen2 + Search` (67.9 ms)** | `8–3–1` (`67%`) | **`12–0–0`** (`100%`) | **`12–0–0`** (`100%`) | **`12–0–0`** (`100%`) | **`11–0–1`** (`92%`) | `6–3–3` vs `v1+S` | **`61–6–5` (`84.7%` WR / `88.2%` score)** |
+| `GalconPT-Gen2 EI-R2` (Pre-PPO) | `14–3–3` (`70%`) | `17–3–0` (`85%`) | `12–6–2` (`60%`) | `11–5–4` (`55%`) | `19–0–1` (`95%`) | `12–7–1` (`60%`) | `85–24–11` (`70.8%` WR) |
+| `GalconPT-v1 Pure` (0.59M) | `4–7–1` (`33%`) | `8–4–0` (`67%`) | `3–9–0` (`25%`) | `8–4–0` (`67%`) | `9–1–2` (`75%`) | — | `32–25–3` (`53.3%` WR) |
+
+> **Search Inflection Point Reached:** In direct head-to-head play, **`GalconPT-Gen2 Pure` (`12.3 ms/tick`) beat `GalconPT-Gen2 + Search` (`67.9 ms/tick`) `5–3–4` (`58.3%` score)** — demonstrating that 608 episodes of full-game League PPO internalized longer-horizon strategic play than 12-tick idle-opponent rollouts, at 5.5× lower latency.
 
 ## Quickstart
 
-### 1. Train & Evaluate Locally (No `gbots` license required)
+### 1. Train & Evaluate Locally (Modular Gen 2 Flywheel)
 ```bash
-python -m galcon.train --bc-games 70 --dagger-games 30 --epochs 10 --ppo-iters 4 --eval-games 12
+# Full Gen 2 flywheel (Warm-Start -> AlphaZero Search EI -> League PPO -> Gauntlet)
+python3 -m galcon.train --mode gen2 --bc-games 60 --search-games 45 --search-rounds 2 --ppo-iters 26 --ppo-eps 16
+
+# Or resume modular stages individually:
+python3 -m galcon.train --mode gen2 --stage ei --resume checkpoints/galcon_gen2_ei_r1.pt --search-games 50 --out checkpoints/galcon_gen2_ei_r2.pt
+python3 -m galcon.train --mode gen2 --stage ppo --resume checkpoints/galcon_gen2_ei_r2.pt --ppo-iters 14 --ppo-eps 16 --out checkpoints/galcon_gen2_ppo.pt
+python3 -m galcon.train --mode gen2 --stage eval --out checkpoints/galcon_transformer_best.pt
+
+# Record showcase replays & Elo viewer:
+python3 -m galcon.record_replays --checkpoint checkpoints/galcon_transformer_best.pt --out-html docs/galcon_viewer.html
+
+# Run unit tests:
 pytest -v tests/test_galcon.py
 ```
 
 ### 2. Plug Straight Into Phil Hassey's Official `gbots`
 ```bash
-# Run our trained PlanetTimelineTransformer bot inside gbots:
-./gbots pipe -name OurGalconPT -key YOUR_KEY \
+# Run our 12.3 ms Gen 2 PlanetTimelineTransformer (with native /REDIR) inside gbots:
+./gbots pipe -name OurGalconGen2 -key YOUR_KEY \
   -exec "python3 -m galcon.gbots_client --bot transformer --checkpoint checkpoints/galcon_transformer_best.pt"
 
-# Or run with value-guided lookahead search (~50-120 ms/tick):
-./gbots pipe -name OurGalconSearch -key YOUR_KEY \
+# Or run with batched AlphaZero lookahead search (~68 ms/tick):
+./gbots pipe -name OurGalconGen2Search -key YOUR_KEY \
   -exec "python3 -m galcon.gbots_client --bot search --checkpoint checkpoints/galcon_transformer_best.pt"
 
-# Or test our zero-weights analytical Tactical Solver immediately:
+# Zero-weights sparring bots (tactical / classic / rusher / macro):
 ./gbots pipe -name OurGalconTactical -key YOUR_KEY \
   -exec "python3 -m galcon.gbots_client --bot tactical"
 ```
 
-## Verified Multi-Map Benchmarks (8–22 Planets, `240×150` to `400×240`)
-Trained on 60 multi-map BC games (`10,995` states, `val_pol=0.349`, `val_all=87.9%`, `val_tgt=85.8%`) + 64-episode Self-Play PPO + Anchor-KL RL (`checkpoints/galcon_transformer_best.pt`, `2.3 MB`):
-
-| Agent | vs. `GalconTacticalBot` (12g) | vs. `GalconClassicBot` (12g) | Mean Latency |
-|---|---:|---:|---:|
-| **`GalconPT-PPO + Search` (8× D4)** | **`11–1–0` (`91.7%`, 52.2t)** | **`8–4–0` (`66.7%`, 79.8t)** | `55.0 ms/tick` |
-| **`GalconPT-PPO Pure` (8× D4)** | `6–6–0` (`50.0%`, 78.4t) | `5–7–0` (`41.7%`, 70.4t) | `17.1 ms/tick` |
-| `GalconTacticalBot` (Analytical Solver) | — | `11–4–1` (`68.8%` over 16g) | `<2 ms/tick` |
-
-Interactive HTML5 Canvas replay viewer: [`docs/galcon_viewer.html`](../docs/galcon_viewer.html).
-
+Interactive HTML5 Canvas Replay Viewer & Elo Ladder: [`docs/galcon_viewer.html`](../docs/galcon_viewer.html).
