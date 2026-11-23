@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Orbit Wars LightZero — v3 Status &amp; Benchmark Report</title>
+  <title>Orbit Wars LightZero — Elo Ladders &amp; Benchmark Report</title>
   <style>
     :root {
       --bg: #0f172a; --card: #1e293b; --border: #334155; --text: #f1f5f9;
@@ -35,20 +35,25 @@
     .kpi-val { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; margin: 4px 0; }
     .ok { color: var(--success); } .warn { color: var(--warning); } .err { color: var(--error); } .pri { color: var(--primary); }
     .tabs { display: flex; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 18px; }
-    .tab-btn, .suite-btn { font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--muted); }
-    .tab-btn.active, .suite-btn.active { background: var(--primary); color: var(--primary-fg); border-color: var(--primary); }
+    .tab-btn, .suite-btn, .elo-btn { font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--muted); }
+    .tab-btn.active, .suite-btn.active, .elo-btn.active { background: var(--primary); color: var(--primary-fg); border-color: var(--primary); }
     .panel { display: none; } .panel.active { display: block; }
     .stack { display: flex; flex-direction: column; gap: 16px; }
     .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
-    .bar-row { display: grid; grid-template-columns: 185px 1fr 125px; align-items: center; gap: 10px; font-size: 12.5px; margin: 8px 0; }
+    .bar-row { display: grid; grid-template-columns: 185px 1fr 140px; align-items: center; gap: 10px; font-size: 12.5px; margin: 8px 0; }
     .bar-track { height: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
     .bar-fill { height: 100%; border-radius: 5px; }
-    .fill-ok { background: var(--success); } .fill-pri { background: var(--primary); } .fill-err { background: var(--error); }
+    .fill-ok { background: var(--success); } .fill-pri { background: var(--primary); } .fill-err { background: var(--error); } .fill-muted { background: var(--muted); opacity: 0.65; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 12px; }
     th, td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; }
     th { color: var(--muted); font-weight: 600; }
     td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    td.ctr, th.ctr { text-align: center; font-variant-numeric: tabular-nums; }
+    tr.ours-row { background: rgba(56, 189, 248, 0.08); }
+    .cell-hi { color: var(--success); background: rgba(52, 211, 153, 0.12); font-weight: 600; }
+    .cell-lo { color: var(--error); background: rgba(248, 113, 113, 0.12); font-weight: 600; }
+    .cell-mid { color: var(--warning); background: rgba(251, 191, 36, 0.12); font-weight: 600; }
     ul { margin: 8px 0 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
     li { margin: 4px 0; }
     pre { margin: 8px 0 0; padding: 12px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); overflow-x: auto; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -59,51 +64,101 @@
   <div class="wrap">
     <header>
       <div>
-        <div class="meta">AClaybrook/orbit-wars-lightzero • main • LightZero v3 (Expert Iteration + 8× D4)</div>
-        <h1>Orbit Wars AI — v3 Status &amp; Benchmark Report</h1>
-        <p>LightZero v3 (search-distilled Expert Iteration, exact 8× D4 symmetry augmentation, multi-opponent 2P/4P training, neural-prior active MCTS) is now our #1 agent in both 2P 1v1 and 4P FFA.</p>
+        <div class="meta">AClaybrook/orbit-wars-lightzero • main • 6-Bot Elo Tournament (60 2P + 18 4P FFA)</div>
+        <h1>Orbit Wars AI — Elo Ladders &amp; Benchmark Report</h1>
+        <p>Official <span class="mono">kaggle_environments</span> 2P Round-Robin (Bradley-Terry MLE) &amp; 4P FFA Mixed-Table (Plackett-Luce MLE) Elo ratings across our LightZero v3, Heuristic v2, and open-source benchmark bots.</p>
       </div>
       <div class="badges">
-        <a href="gameplay_viewer.html" class="badge info" style="text-decoration:none;">▶ Watch Live Gameplay (LZ v3 vs. Heuristic)</a>
-        <span class="badge ok">24/24 Tests Passing</span>
-        <span class="badge info">100% Sim Parity</span>
+        <a href="gameplay_viewer.html" class="badge info" style="text-decoration:none;">▶ Watch Live Gameplay</a>
+        <span class="badge ok">28/28 Tests Passing</span>
+        <span class="badge info">LightZero v3: 2300 2P Elo</span>
       </div>
     </header>
 
     <section class="kpis">
       <div class="card highlight-card">
-        <div class="meta">LightZero v3 — 4P vs. 3× wd_bestv6</div>
-        <div class="kpi-val ok">50.0%</div>
-        <p>4–4 (rank 2.06 • 2.0× par) • 101 ms mean</p>
+        <div class="meta">2P Elo #1 — LightZero v3</div>
+        <div class="kpi-val ok">2300 Elo</div>
+        <p>19–0–1 (95.0%) • 3–1 vs. Heuristic v2</p>
+      </div>
+      <div class="card">
+        <div class="meta">2P Elo #2 — Heuristic v2</div>
+        <div class="kpi-val pri">2070 Elo</div>
+        <p>16–0–4 (80.0%) • +494 over wd_bestv6</p>
       </div>
       <div class="card highlight-card">
-        <div class="meta">LightZero v3 — 4P vs. 3× Heuristic</div>
-        <div class="kpi-val ok">75.0%</div>
-        <p>3–1 (rank 1.50 • 3.0× par) • 142 ms mean</p>
+        <div class="meta">4P FFA Win Leader — Heuristic v2</div>
+        <div class="kpi-val ok">66.7%</div>
+        <p>8/12 mixed 4P wins (2.7× par) • 1358 Elo</p>
       </div>
       <div class="card">
-        <div class="meta">LightZero v3 — 2P Head-to-Head</div>
-        <div class="kpi-val pri">60% / 100%</div>
-        <p>6–4 vs. Heuristic v2 • 6–0 vs. <span class="mono">wd_bestv6</span></p>
-      </div>
-      <div class="card">
-        <div class="meta">Heuristic v2 — 2P All 9 Bots</div>
-        <div class="kpi-val ok">100.0%</div>
-        <p>48–0 sweep • 5.1–10.8 ms mean</p>
+        <div class="meta">4P FFA Top-3 Cluster</div>
+        <div class="kpi-val pri">1324–1377</div>
+        <p>wd_bestv6, Heuristic v2, LightZero v3</p>
       </div>
     </section>
 
     <nav class="tabs">
-      <button class="tab-btn active" data-tab="results">1. Benchmark Results</button>
-      <button class="tab-btn" data-tab="lz3">2. LightZero v1 → v3 Evolution</button>
-      <button class="tab-btn" data-tab="commands">3. Reproducible Commands</button>
+      <button class="tab-btn active" data-tab="elo">1. Elo Ladders &amp; Win Matrix</button>
+      <button class="tab-btn" data-tab="results">2. Head-to-Head Suites</button>
+      <button class="tab-btn" data-tab="lz3">3. LightZero v1 → v3 Evolution</button>
+      <button class="tab-btn" data-tab="commands">4. Commands &amp; Methodology</button>
     </nav>
 
-    <section id="tab-results" class="panel active stack">
+    <!-- TAB 1: ELO LADDERS & MATRIX -->
+    <section id="tab-elo" class="panel active stack">
       <div class="card">
         <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px;">
           <div>
-            <h2>Head-to-Head Win Rates (Official Kaggle Environment)</h2>
+            <h2>Local Elo Leaderboard (Anchored: Kaggle Starter = 1000)</h2>
+            <p id="elo-subtitle">60 official 2P games (4 slot-balanced games/pair) • Bradley-Terry MLE + 95% bootstrap CI.</p>
+          </div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <button class="elo-btn active" data-elo="2p">2P Round-Robin Elo (60g)</button>
+            <button class="elo-btn" data-elo="4p">4P FFA Mixed-Table Elo (18 tables)</button>
+          </div>
+        </div>
+        <div id="elo-bars"></div>
+        <div style="overflow-x:auto;">
+          <table>
+            <thead id="elo-thead"></thead>
+            <tbody id="elo-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>2P Head-to-Head Win-Rate Matrix (Row Bot vs. Column Bot)</h2>
+        <p>Each cell shows the Row bot's win % and W–L record across 4 slot-balanced official games (2 as P0, 2 as P1).</p>
+        <div style="overflow-x:auto;">
+          <table id="h2h-matrix"></table>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card highlight-card">
+          <h3 class="pri">Key Takeaway: 2P vs. 4P FFA</h3>
+          <ul>
+            <li><strong>2P 1v1:</strong> LightZero v3 is #1 at <strong>2300.3 Elo (95.0% win rate)</strong>, beating Heuristic v2 3–1 (75%) and sweeping all external bots 16–0 (100%).</li>
+            <li><strong>Mixed 4P FFA:</strong> Heuristic v2 wins the most tables outright (<strong>66.7% — 2.7× par</strong>), while <span class="mono">wd_bestv6</span> finishes Top-2 91.7% of the time (1377 survival-ranked Elo) and LightZero v3 sits right with them (1324 Elo, 66.7% Top-2).</li>
+          </ul>
+        </div>
+        <div class="card rec-card">
+          <h3 class="ok">Next Lever for LightZero v4</h3>
+          <ul>
+            <li>LightZero v3 was trained mostly on 1v3 clone tables — training v4 on <strong>heterogeneous mixed-bot 4P tables</strong> with survival-ranked value targets directly closes the mixed-4P gap.</li>
+            <li>Tournament ran LightZero at <span class="mono">sims=10, 0.16s</span> for speed; <span class="mono">submission.py</span> runs deeper search (<span class="mono">sims=16, 0.22s</span>).</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2 -->
+    <section id="tab-results" class="panel stack">
+      <div class="card">
+        <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px;">
+          <div>
+            <h2>Dedicated Matchup Benchmarks (Official Kaggle Environment)</h2>
             <p>Slot-balanced games in <span class="mono">kaggle_environments.make("orbit_wars")</span> under Kaggle's 500 ms/turn cap.</p>
           </div>
           <div style="display:flex; gap:6px; flex-wrap:wrap;">
@@ -133,7 +188,7 @@
           <ul>
             <li><strong>v1 Untrained MCTS vs. old heuristic (2P):</strong> 25.0% (1–3)</li>
             <li><strong>v2 Active MCTS (no NN) vs. heuristic v2 (2P):</strong> 50.0% (3–3)</li>
-            <li><strong>v3 LightZero NN + MCTS vs. heuristic v2 (2P):</strong> <strong>60.0% (6–4, 10 games)</strong></li>
+            <li><strong>v3 LightZero NN + MCTS vs. heuristic v2 (2P):</strong> <strong>60–75% (6–4 &amp; 3–1)</strong></li>
             <li><strong>v3 LightZero NN + MCTS vs. 3× heuristic v2 (4P FFA):</strong> <strong>75.0% (3–1, rank 1.50 — 3× par!)</strong></li>
           </ul>
         </div>
@@ -191,16 +246,50 @@
         <h3>Quick Commands (Synced on origin/main)</h3>
         <pre>git fetch origin &amp;&amp; git checkout -B main origin/main
 python scripts/fetch_opponents.py
+python scripts/tournament_elo.py --bots lightzero_v3 heuristic_v2 wd_bestv6 wd_heuristic kvatsa5 starter --games-2p 4 --games-4p 0 --sims 10 --time-budget 0.16
+python scripts/tournament_elo.py --bots lightzero_v3 heuristic_v2 wd_bestv6 wd_heuristic kvatsa5 starter --games-2p 0 --games-4p 18 --sims 10 --time-budget 0.16
 python scripts/pretrain_alphazero.py --games-2p 60 --games-4p 40 --distill-prob 0.30 --epochs 24 --out checkpoints/ckpt_best.pth.tar
-python scripts/train_lightzero.py --algo alphazero --mode self_play --model-path checkpoints/ckpt_best.pth.tar --max-env-step 50000
-python scripts/evaluate.py --candidate mcts --checkpoint checkpoints/ckpt_best.pth.tar --opponents heuristic wd_bestv6 --players 2 --games 6 --sims 16 --time-budget 0.18
-python scripts/evaluate.py --candidate mcts --checkpoint checkpoints/ckpt_best.pth.tar --opponents heuristic wd_bestv6 --players 4 --games 8 --sims 14 --time-budget 0.18
 pytest -v</pre>
       </div>
     </section>
   </div>
 
   <script>
+    const ELO_2P = [
+      { id: "lightzero_v3", name: "LightZero v3 (Ours)", elo: 2300.3, ci: [2044, 2980], wdl: "19-0-1", wr: 95.0, ours: true },
+      { id: "heuristic_v2", name: "Heuristic v2 (Ours)", elo: 2070.0, ci: [1786, 2675], wdl: "16-0-4", wr: 80.0, ours: true },
+      { id: "wd_heuristic", name: "wd_heuristic", elo: 1796.3, ci: [1561, 2235], wdl: "12-0-8", wr: 60.0, ours: false },
+      { id: "wd_bestv6", name: "wd_bestv6 (CMA-ES)", elo: 1575.6, ci: [1347, 1772], wdl: "9-0-11", wr: 45.0, ours: false },
+      { id: "starter", name: "Kaggle Starter (Anchor)", elo: 1000.0, ci: [1000, 1000], wdl: "4-0-16", wr: 20.0, ours: false },
+      { id: "kvatsa5", name: "kvatsa5 (Predator v3)", elo: 392.4, ci: [255, 628], wdl: "0-0-20", wr: 0.0, ours: false }
+    ];
+
+    const ELO_4P = [
+      { id: "wd_bestv6", name: "wd_bestv6 (CMA-ES)", elo: 1377.3, ci: [1187, 1765], games: 12, wr: 33.3, top2: 91.7, avgPlc: 1.75, ours: false },
+      { id: "heuristic_v2", name: "Heuristic v2 (Ours)", elo: 1357.8, ci: [1047, 1924], games: 12, wr: 66.7, top2: 75.0, avgPlc: 1.75, ours: true },
+      { id: "lightzero_v3", name: "LightZero v3 (Ours)", elo: 1323.5, ci: [1151, 1649], games: 12, wr: 25.0, top2: 66.7, avgPlc: 2.08, ours: true },
+      { id: "wd_heuristic", name: "wd_heuristic", elo: 1104.8, ci: [894, 1382], games: 12, wr: 16.7, top2: 33.3, avgPlc: 2.83, ours: false },
+      { id: "starter", name: "Kaggle Starter (Anchor)", elo: 1000.0, ci: [1000, 1000], games: 12, wr: 8.3, top2: 25.0, avgPlc: 3.08, ours: false },
+      { id: "kvatsa5", name: "kvatsa5 (Predator v3)", elo: 933.1, ci: [626, 1124], games: 12, wr: 0.0, top2: 8.3, avgPlc: 3.50, ours: false }
+    ];
+
+    const MATRIX_ORDER = [
+      { id: "lightzero_v3", short: "LZ v3" },
+      { id: "heuristic_v2", short: "Heur v2" },
+      { id: "wd_heuristic", short: "wd_heur" },
+      { id: "wd_bestv6", short: "wd_v6" },
+      { id: "starter", short: "Starter" },
+      { id: "kvatsa5", short: "kvatsa5" }
+    ];
+    const MATRIX_2P = {
+      lightzero_v3: { heuristic_v2: [3,1], wd_heuristic: [4,0], wd_bestv6: [4,0], starter: [4,0], kvatsa5: [4,0] },
+      heuristic_v2: { lightzero_v3: [1,3], wd_heuristic: [3,1], wd_bestv6: [4,0], starter: [4,0], kvatsa5: [4,0] },
+      wd_heuristic: { lightzero_v3: [0,4], heuristic_v2: [1,3], wd_bestv6: [3,1], starter: [4,0], kvatsa5: [4,0] },
+      wd_bestv6:    { lightzero_v3: [0,4], heuristic_v2: [0,4], wd_heuristic: [1,3], starter: [4,0], kvatsa5: [4,0] },
+      starter:      { lightzero_v3: [0,4], heuristic_v2: [0,4], wd_heuristic: [0,4], wd_bestv6: [0,4], kvatsa5: [4,0] },
+      kvatsa5:      { lightzero_v3: [0,4], heuristic_v2: [0,4], wd_heuristic: [0,4], wd_bestv6: [0,4], starter: [0,4] }
+    };
+
     const SUITES = {
       "lz_v3": [
         { opp: "wd_bestv6 (2P)", src: "LightZero v3 MCTS", wdl: "6-0-0", wr: 100.0, rank: "1.00", ticks: 205.0, mean: 134.3, max: 468.9 },
@@ -223,6 +312,60 @@ pytest -v</pre>
         { opp: "wd_bestv6", src: "Heuristic v2", wdl: "8-0-0", wr: 100.0, rank: "1.00", ticks: 186.6, mean: 10.82, max: 82.17 }
       ]
     };
+
+    function renderElo(mode) {
+      const is2p = mode === "2p";
+      const rows = is2p ? ELO_2P : ELO_4P;
+      document.getElementById("elo-subtitle").textContent = is2p
+        ? "60 official 2P games (4 slot-balanced games/pair) • Bradley-Terry MLE + 95% bootstrap CI."
+        : "18 mixed 4P FFA tables (12 games/bot, balanced seats) • Survival-ranked Plackett-Luce MLE + 95% CI.";
+      const minElo = Math.min(...rows.map(r => r.elo)) - 100;
+      const maxElo = Math.max(...rows.map(r => r.elo)) + 50;
+      document.getElementById("elo-bars").innerHTML = rows.map((r, i) => {
+        const pct = Math.max(4, Math.round(((r.elo - minElo) / (maxElo - minElo)) * 100));
+        const fill = r.ours ? "fill-pri" : i === 0 ? "fill-ok" : "fill-muted";
+        return `<div class="bar-row">
+          <span>${i + 1}. ${r.name}</span>
+          <div class="bar-track"><div class="bar-fill ${fill}" style="width:${pct}%"></div></div>
+          <span class="mono" style="text-align:right"><strong>${r.elo.toFixed(0)}</strong> Elo (${r.wr.toFixed(0)}%)</span>
+        </div>`;
+      }).join("");
+      if (is2p) {
+        document.getElementById("elo-thead").innerHTML = `<tr><th>#</th><th>Bot</th><th class="num">2P Elo</th><th class="num">95% CI</th><th class="num">W-D-L</th><th class="num">Win %</th></tr>`;
+        document.getElementById("elo-tbody").innerHTML = rows.map((r, i) => `
+          <tr class="${r.ours ? "ours-row" : ""}">
+            <td class="mono">${i + 1}</td><td><strong>${r.name}</strong></td>
+            <td class="num mono"><strong>${r.elo.toFixed(1)}</strong></td>
+            <td class="num mono" style="color:var(--muted)">[${r.ci[0]}, ${r.ci[1]}]</td>
+            <td class="num mono">${r.wdl}</td>
+            <td class="num mono"><strong>${r.wr.toFixed(1)}%</strong></td>
+          </tr>`).join("");
+      } else {
+        document.getElementById("elo-thead").innerHTML = `<tr><th>#</th><th>Bot</th><th class="num">4P Elo</th><th class="num">95% CI</th><th class="num">Win % (par 25%)</th><th class="num">Top-2 %</th><th class="num">Avg Place</th></tr>`;
+        document.getElementById("elo-tbody").innerHTML = rows.map((r, i) => `
+          <tr class="${r.ours ? "ours-row" : ""}">
+            <td class="mono">${i + 1}</td><td><strong>${r.name}</strong></td>
+            <td class="num mono"><strong>${r.elo.toFixed(1)}</strong></td>
+            <td class="num mono" style="color:var(--muted)">[${r.ci[0]}, ${r.ci[1]}]</td>
+            <td class="num mono"><strong>${r.wr.toFixed(1)}%</strong></td>
+            <td class="num mono">${r.top2.toFixed(1)}%</td>
+            <td class="num mono">${r.avgPlc.toFixed(2)}</td>
+          </tr>`).join("");
+      }
+      document.querySelectorAll(".elo-btn").forEach(b => b.classList.toggle("active", b.dataset.elo === mode));
+    }
+
+    function renderMatrix() {
+      const thead = `<thead><tr><th>Row vs. Col</th>${MATRIX_ORDER.map(c => `<th class="ctr mono">${c.short}</th>`).join("")}</tr></thead>`;
+      const tbody = `<tbody>${MATRIX_ORDER.map(r => `<tr><td class="mono"><strong>${r.short}</strong></td>${MATRIX_ORDER.map(c => {
+        if (r.id === c.id) return `<td class="ctr mono" style="color:var(--muted)">—</td>`;
+        const [w, l] = MATRIX_2P[r.id][c.id];
+        const pct = Math.round((w / (w + l)) * 100);
+        const cls = pct >= 75 ? "cell-hi" : pct <= 25 ? "cell-lo" : "cell-mid";
+        return `<td class="ctr mono ${cls}">${pct}% (${w}-${l})</td>`;
+      }).join("")}</tr>`).join("")}</tbody>`;
+      document.getElementById("h2h-matrix").innerHTML = thead + tbody;
+    }
 
     function fillClass(wr) { return wr >= 50 ? "fill-ok" : wr >= 25 ? "fill-pri" : "fill-err"; }
 
@@ -251,7 +394,10 @@ pytest -v</pre>
       document.querySelectorAll(".tab-btn").forEach(x => x.classList.toggle("active", x === b));
       document.querySelectorAll(".panel").forEach(p => p.classList.toggle("active", p.id === "tab-" + b.dataset.tab));
     }));
+    document.querySelectorAll(".elo-btn").forEach(b => b.addEventListener("click", () => renderElo(b.dataset.elo)));
     document.querySelectorAll(".suite-btn").forEach(b => b.addEventListener("click", () => renderSuite(b.dataset.suite)));
+    renderElo("2p");
+    renderMatrix();
     renderSuite("lz_v3");
   </script>
 </body>
