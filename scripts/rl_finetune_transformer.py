@@ -378,13 +378,13 @@ def _worker_collect_episode(task: Tuple[Dict[str, Any], Dict[str, Any], Optional
 
     model_cfg, policy_sd, opp_sd, num_players, opponent_kind, seed, temperature, max_steps, shaping_coef, early_reset = task
     policy = PlanetTimelineTransformer(**model_cfg)
-    policy.load_state_dict(policy_sd)
+    policy.load_state_dict({k: torch.as_tensor(v) for k, v in policy_sd.items()})
     policy.eval()
 
     opp_model: Optional[PlanetTimelineTransformer] = None
     if opp_sd is not None:
         opp_model = PlanetTimelineTransformer(**model_cfg)
-        opp_model.load_state_dict(opp_sd)
+        opp_model.load_state_dict({k: torch.as_tensor(v) for k, v in opp_sd.items()})
         opp_model.eval()
 
     return collect_episode(
@@ -616,13 +616,13 @@ def main(argv: list[str] | None = None) -> int:
         for p in m.parameters():
             p.requires_grad_(False)
 
-    # Build historical opponent state-dict pool (init + any --pool checkpoints)
-    pool_sds: List[Tuple[str, Dict[str, Any]]] = [("init", {k: v.cpu().clone() for k, v in policy.state_dict().items()})]
+    # Build historical opponent state-dict pool as plain NumPy arrays (zero IPC file descriptors)
+    pool_sds: List[Tuple[str, Dict[str, Any]]] = [("init", {k: v.detach().cpu().numpy().copy() for k, v in policy.state_dict().items()})]
     for p_path in args.pool:
         pp = Path(p_path)
         if pp.is_file():
             p_ckpt = torch.load(pp, map_location="cpu", weights_only=False)
-            pool_sds.append((pp.stem, p_ckpt["model_state_dict"]))
+            pool_sds.append((pp.stem, {k: v.detach().cpu().numpy().copy() for k, v in p_ckpt["model_state_dict"].items()}))
 
     opt = torch.optim.AdamW(policy.parameters(), lr=args.lr, weight_decay=1e-4)
     out_path = Path(args.out)
@@ -656,7 +656,7 @@ def main(argv: list[str] | None = None) -> int:
 
     for it in range(1, args.iterations + 1):
         policy.eval()
-        pol_sd = {k: v.cpu().clone() for k, v in policy.state_dict().items()}
+        pol_sd = {k: v.detach().cpu().numpy().copy() for k, v in policy.state_dict().items()}
         tasks = []
         for e in range(args.episodes_per_iter):
             n_pl, opp_kind = league_cycle[(it * args.episodes_per_iter + e) % len(league_cycle)]
@@ -727,7 +727,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # Periodically add a frozen snapshot of our improving policy into the historical pool
         if it % 2 == 0:
-            pool_sds.append((f"snap_it{it}", {k: v.cpu().clone() for k, v in policy.state_dict().items()}))
+            pool_sds.append((f"snap_it{it}", {k: v.detach().cpu().numpy().copy() for k, v in policy.state_dict().items()}))
             if len(pool_sds) > 6:
                 # Keep init + most recent 5 snapshots
                 pool_sds = [pool_sds[0]] + pool_sds[-5:]
