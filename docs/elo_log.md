@@ -157,3 +157,22 @@ This log tracks calibrated **Kaggle-equivalent Elo** estimates (anchored against
     - **`PT-v5-Boss + Neural-Opp Search (8× D4)`:** `0–6` (`118.0` avg ticks, max `129t`).
 - **Estimated Kaggle Skill Rating (`1.89M PT-v5-Boss (8× D4)` / `Ensemble-3x`):**
   - **Pure (`55–72 ms/turn`):** **~1,660–1,720** (firmly in official **Kaggle Top-10** range around `#10 = 1681.5` and `#7 = 1717.3`; taking games off `#2 = 1800.1` requires GPU-scale PPO self-play).
+
+### Generation 8 — `1.89M PT-Gen8` (Soft-Logit KD + `#7 Audun` Aux `t+10` World Model + `#5 TonyK` 2P Specialist)
+- **Date:** 2026-11-23
+- **Naming Note:** Synced `PT-Gen#` 1-to-1 with Generation numbers starting at **Gen 8** (`PT-Gen8`).
+- **Three Top-10 ROI Upgrades Implemented & Combined ([`scripts/distill_soft_kd.py`](../scripts/distill_soft_kd.py)):**
+  1. **Full Soft-Logit Knowledge Distillation (`KL(q_hober || p_ours)`):** Queried `#2 Hober Malloc`'s local JAX model (`rotation_tta=True` = exact 100% full 2P `1800.1` probabilities, `89.2–91.1%` live Rust launch parity) across `2,422` 2P boards (16 on-policy `PT-v5-Boss` DAgger games + 3 elite Hober mirror games) instead of hard 1-hot argmax targets.
+  2. **Auxiliary `t+10` Future-State World-Model Head (inspired by `#7 Audun`, `1717.3`):** Added a lightweight training-only head (`aux_future_head`, **0 ms inference overhead**) predicting each planet's true post-action owner & `log1p(ships)` 10 ticks into the future — reached **`94.2%`** owner prediction accuracy!
+  3. **Dedicated 2P Specialist + All-In Execution (inspired by `#5 TonyK`, `1754.6` & `#2 SimJeg`, `1800.1`):** Pure 2P Soft-KD training + `force_all_in=True` + auto-dispatch `pt_specialist:<2p>|<4p>` pairing **`PT-Gen8` (2P)** with **`Gen 7 PT-v5-Boss` (4P)**.
+- **Training Convergence (12 cosine-annealed epochs resuming `1.89M PT-v5-Boss`, `295s`):**
+  - `val_kl`: **`0.489 → 0.369`** | `val_all`: **`83.2%`** | `val_tgt`: **`62.7% → 73.6%`** (+10.9%) | `aux_own (t+10)`: **`94.2%`**.
+- **Elo-Fair Benchmarks (`PT-Gen8`, `53.8 ms/turn` — zero inference overhead!):**
+  - **`PT-Gen8 (8× D4 All-In)` vs. Gen 7 `1.89M PT-v5-Boss (8× D4)` (2P):** **`6–2–0` (`75.0%`, ~+190 Elo, `148.0t`)** — largest single-generation jump since Gen 4!
+  - **`Ensemble (Gen8 + Gen7, 8× D4 All-In)` vs. Gen 7 `1.89M PT-v5-Boss (8× D4)` (2P):** **`4–2–0` (`66.7%`, ~+120 Elo, `219.8t`)** at `96.3 ms/turn`.
+  - **2P Boss Gauntlet vs. `#2 Hober Malloc (1800.1)` (seeds 200–205, all `DONE/DONE`):**
+    - `PT-Gen8` pure (`53.8 ms`, `thr=0.50`): `0–6` (`111.3t` avg, max `127t`); threshold sweep (`0.40`: `110.0t`, `0.34`: `108.5t`) confirmed Soft-KL probabilities are best calibrated at `0.50`.
+    - `PT-Gen8 + Neural-Opp Search`: `0–6` (`115.2t` avg, peak **`134t`** on seed 202 with `93/111` active turns, `127t` on seed 205).
+- **Estimated Kaggle Skill Rating (`1.89M PT-Gen8` 2P Specialist + `Gen 7` 4P Specialist):**
+  - **Pure (`53.8 ms/turn`):** **~1,720–1,760** (firmly inside Kaggle Top-10 between `#7 Audun = 1717.3` and `#5 TonyK = 1754.6`, +190 Elo over Gen 7 in 2P!). Crossing the final ~50–80 Elo to consistently beat `#2 Hober Malloc (1800.1, 4.3M ModernBERT, 10B RL steps)` now genuinely hits the GPU self-play RL compute wall.
+

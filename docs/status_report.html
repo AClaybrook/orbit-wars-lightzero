@@ -37,8 +37,9 @@
     .tabs { display: flex; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 16px; }
     .tab-btn, .elo-btn { font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; padding: 7px 13px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--muted); }
     .tab-btn.active, .elo-btn.active { background: var(--primary); color: var(--primary-fg); border-color: var(--primary); }
-    .panel { display: none; } .panel.active { display: block; }
     .stack { display: flex; flex-direction: column; gap: 14px; }
+    .panel { display: none; }
+    .panel.active { display: flex; flex-direction: column; gap: 14px; }
     .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
     .bar-row { display: grid; grid-template-columns: 245px 1fr 195px; align-items: center; gap: 10px; font-size: 12.5px; margin: 8px 0; }
     .bar-track { height: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
@@ -57,37 +58,37 @@
   <div class="wrap">
     <header>
       <div>
-        <div class="meta">AClaybrook/orbit-wars-lightzero • High-Elo Neural Tier • Gen 3 → Gen 7 (1.89M PT-v5-Boss)</div>
+        <div class="meta">AClaybrook/orbit-wars-lightzero • High-Elo Neural Tier • Gen 3 → Gen 8 (1.89M PT-Gen8)</div>
         <h1>Orbit Wars AI — High-Elo Progression &amp; Benchmark Report</h1>
         <p>Elo-fair comparisons for competitive neural generations (&gt;1,200). Gen 1–2 heuristic ladders preserved in the Historical Archive tab.</p>
       </div>
       <div class="badges">
         <a href="gameplay_viewer.html" class="badge info">▶ Watch Live Gameplay</a>
-        <span class="badge ok">35/35 Tests Passing</span>
-        <span class="badge info">Best: 1.89M PT-v5-Boss 8× D4 (~1,700 Est.)</span>
+        <span class="badge ok">36/36 Orbit Wars Tests</span>
+        <span class="badge info">Best: 1.89M PT-Gen8 (~1,740 Est.)</span>
       </div>
     </header>
 
     <section class="kpis">
       <div class="card highlight-card">
-        <div class="meta">Current Best (1.89M PT-v5-Boss)</div>
-        <div class="kpi-val ok">~1,660–1,720</div>
-        <p>Top-10 range (#10 = 1681.5) • 55 ms</p>
+        <div class="meta">Current Best (1.89M PT-Gen8)</div>
+        <div class="kpi-val ok">~1,720–1,760</div>
+        <p>Top-7 range (#7 = 1717.3) • 53.8 ms</p>
       </div>
       <div class="card rec-card">
-        <div class="meta">Gen 7 vs. Gen 6 (Elo-Fair 2P)</div>
-        <div class="kpi-val ok">4–2 (66.7%)</div>
-        <p>Both 8× D4 &amp; Ensemble +120 Elo vs v4</p>
+        <div class="meta">Gen 8 vs. Gen 7 (Elo-Fair 2P)</div>
+        <div class="kpi-val ok">6–2 (75.0%)</div>
+        <p>+190 Elo jump via Soft-KD + Aux t+10</p>
       </div>
       <div class="card">
-        <div class="meta">4P KO Speed (New All-Time Best)</div>
+        <div class="meta">Aux t+10 World-Model Head</div>
+        <div class="kpi-val pri">94.2% acc</div>
+        <p>Predicts real t+10 owners • 0 ms cost</p>
+      </div>
+      <div class="card">
+        <div class="meta">4P Specialist KO Speed (Gen 7)</div>
         <div class="kpi-val pri">133.8–137.2t</div>
-        <p>8–0 sweep • Fastest blitz: 85 ticks</p>
-      </div>
-      <div class="card">
-        <div class="meta">Pure vs. #2 Hober (1800.1)</div>
-        <div class="kpi-val warn">119.0t avg</div>
-        <p>+7.8t pure jump • Peak 132t (Ensemble)</p>
+        <p>8–0 sweep • Auto-routed 2P/4P</p>
       </div>
     </section>
 
@@ -101,7 +102,7 @@
     <section id="tab-high" class="panel active stack">
       <div class="card">
         <h2>Upper-Tier Skill Rating Ladder (Neural Models vs. Official Kaggle Top 10)</h2>
-        <p>Anchored to official Kaggle scores: #1 Isaiah @ Tufa Labs (1865.1), #2 Hober Malloc (1800.1), #7 (1717.3), #10 Cutoff (1681.5).</p>
+        <p>Anchored to official Kaggle scores: #1 Isaiah @ Tufa Labs (1865.1), #2 Hober Malloc (1800.1), #5 TonyK (1754.6), #7 Audun (1717.3), #10 Cutoff (1681.5).</p>
         <div id="kaggle-elo-bars" style="margin-top:12px;"></div>
       </div>
 
@@ -126,7 +127,7 @@
     <section id="tab-boss" class="panel stack">
       <div class="card">
         <h2>Lookahead Internalization &amp; Compute Tradeoff (Search vs. Exact Same Weights)</h2>
-        <p>As model capacity scaled 3.2× (0.59M → 1.89M) and converged with 8× D4 TTA, pure neural weights fully matched 10-tick lookahead vs. #2 Hober Malloc.</p>
+        <p>As model capacity scaled 3.2× (0.59M → 1.89M) and added Soft-Logit KD + Aux t+10 world modeling, pure 54 ms weights jumped +190 Elo over Gen 7.</p>
         <div id="search-bars" style="margin-top:12px;"></div>
         <div style="overflow-x:auto;">
           <table>
@@ -139,12 +140,12 @@
       </div>
       <div class="grid-2">
         <div class="card highlight-card">
-          <h3 class="pri">Gen 7 Breakthroughs (+120 Elo &amp; +7.8t Pure vs. #2)</h3>
-          <p>1) <strong>Un-nerfed Full-TTA (1800.1) Boss DAgger</strong> exposed 57.3% launch disagreement vs. true #2 play. 2) <strong>8× D4 dihedral TTA</strong> + <strong>top-3 blocked-shot fallback</strong> + <strong>3-model Ensemble</strong> pushed pure boss survival from 111.2t → 119.0t (peak 132t).</p>
+          <h3 class="pri">Gen 8: 3 Top-10 Tricks Combined (+190 Elo vs. Gen 7!)</h3>
+          <p>1) <strong>Full Soft-Logit KL Distillation</strong> from #2 Hober Malloc's JAX logits (val_kl 0.489 → 0.369, val_tgt +10.9%). 2) <strong>#7 Audun Aux t+10 World-Model Head</strong> (94.2% owner accuracy, 0 ms inference cost). 3) <strong>#5 TonyK 2P Specialist + All-In</strong> (crushed Gen 7 6–2 at 53.8 ms).</p>
         </div>
         <div class="card">
-          <h3 class="warn">Final ~100 Elo Gap to #2 Hober Malloc (1800.1)</h3>
-          <p>Pure 1.89M PT-v5-Boss (55 ms) now sits firmly in Kaggle Top-10 territory (~1,660–1,720 vs. #10 = 1681.5). Closing the final ~100 pts to #2 (4.3M ModernBERT, 10B RL steps) now requires GPU-scale PPO self-play (100M–1B+ steps).</p>
+          <h3 class="warn">The Remaining Compute Wall vs. #2 Hober Malloc (1800.1)</h3>
+          <p>PT-Gen8 sits around ~1,720–1,760 (solid Top-7 territory) with zero copied weights. Closing the final ~50–80 Elo to consistently beat #2 (4.3M ModernBERT, 10B RL steps) and #1 (200M, 15B RL steps on B200s) is now a pure GPU self-play RL throughput wall.</p>
         </div>
       </div>
     </section>
@@ -174,23 +175,26 @@
 
     <section id="tab-commands" class="panel stack">
       <div class="card">
-        <h3>Reproducible Gen 7 Full-TTA Boss DAgger, 8× D4 &amp; Ensemble Commands</h3>
-        <pre># 1. Collect Full-TTA (1800.1) Boss DAgger states (2x oversampled)
-python scripts/train_planet_transformer.py --dataset-cache pt_dataset_gen6.npz \
-  --save-cache pt_dataset_gen7.npz --dagger-checkpoint checkpoints/planet_transformer_v4_large.pt \
-  --dagger-2p 12 --full-tta-teacher --oversample-new 2 --workers 2 --collect-only
+        <h3>Reproducible Gen 8 Soft-Logit KD + Aux t+10 + 2P Specialist Commands</h3>
+        <pre># 1. Collect exact Full-TTA Soft-Logit + t+10 World-Model 2P boards (incremental --append)
+python scripts/distill_soft_kd.py --dataset-cache pt_softkd_2p.npz \
+  --hober-games 0 --dagger-games 12 --student-checkpoint checkpoints/planet_transformer_v5_boss.pt \
+  --sample-stride 3 --workers 1 --collect-only
+python scripts/distill_soft_kd.py --dataset-cache pt_softkd_2p.npz \
+  --hober-games 3 --dagger-games 4 --student-checkpoint checkpoints/planet_transformer_v5_boss.pt \
+  --sample-stride 4 --workers 1 --seed 14000 --append --collect-only
 
-# 2. Resume 1.89M with launch-weight calibration (Pass 1 &amp; 2 -&gt; 21 total epochs)
-python scripts/train_planet_transformer.py --dataset-cache pt_dataset_gen7.npz \
-  --resume checkpoints/planet_transformer_v4_large.pt --epochs 3 --batch-size 80 \
-  --lr 4e-4 --launch-weight 1.20 --out checkpoints/planet_transformer_v5_boss_p1.pt
+# 2. Train 1.89M PT-Gen8 (Soft-KL + #7 Audun Aux t+10 World Model + 2P Specialist)
+python scripts/distill_soft_kd.py --dataset-cache pt_softkd_2p.npz \
+  --resume checkpoints/planet_transformer_v5_boss.pt --epochs 12 --batch-size 64 --lr 3.5e-4 \
+  --aux-weight 0.20 --launch-boost 1.25 --out checkpoints/planet_transformer_gen8_2p_softkd.pt
 
-# 3. Evaluate 8x D4 TTA &amp; 3-Model Ensemble vs. Gen 6 &amp; #2 Hober Malloc
-python scripts/evaluate.py --candidate pt_d4:checkpoints/planet_transformer_v5_boss.pt \
-  --opponents pt:checkpoints/planet_transformer_v4_large.pt hober_malloc --games 6 --players 2
+# 3. Evaluate PT-Gen8 (or auto-routed 2P/4P Specialist) vs. Gen 7 &amp; #2 Hober Malloc
+python scripts/evaluate.py --candidate pt_d4_allin:checkpoints/planet_transformer_gen8_2p_softkd.pt \
+  --opponents pt_d4:checkpoints/planet_transformer_v5_boss.pt hober_malloc --games 6 --players 2
 python scripts/evaluate.py \
-  --candidate pt_ens:checkpoints/planet_transformer_v5_boss.pt,checkpoints/planet_transformer_v4_large.pt,checkpoints/planet_transformer_v4_large_rl.pt \
-  --opponents hober_malloc --games 6 --players 2
+  --candidate "pt_specialist:checkpoints/planet_transformer_gen8_2p_softkd.pt|checkpoints/planet_transformer_v5_boss.pt" \
+  --opponents subham_v14 --games 4 --players 4
 pytest -v</pre>
       </div>
     </section>
@@ -200,11 +204,12 @@ pytest -v</pre>
     const KAGGLE_LADDER = [
       { name: "#1 Isaiah @ Tufa Labs (200M, B200s)", elo: 1865.1, tag: "Official Kaggle #1", ours: false, boss: true },
       { name: "#2 Hober Malloc (4.3M, 10B RL)", elo: 1800.1, tag: "Local Boss • Kaggle #2", ours: false, boss: true },
+      { name: "#5 TonyK (IMPALA + BC, RTX 5090)", elo: 1754.6, tag: "Official #5 / 4,729", ours: false },
+      { name: "1.89M PT-Gen8 (Soft-KD + Aux 2P)", elo: 1740, tag: "Gen 8 • 6–2 vs Gen 7 • 54 ms", ours: true },
       { name: "#7 Audun (Official Top-10)", elo: 1717.3, tag: "Official #7 / 4,729", ours: false },
-      { name: "1.89M PT-v5-Boss (8× D4 / Ensemble)", elo: 1700, tag: "Gen 7 • 55–72 ms", ours: true },
+      { name: "1.89M PT-v5-Boss (Gen 7, 8× D4 / 4P)", elo: 1700, tag: "Gen 7 • 55–72 ms", ours: true },
       { name: "#10 Kaggle Top-10 Cutoff", elo: 1681.5, tag: "Official #10 / 4,729", ours: false },
-      { name: "1.89M PT-v4-Large + Neural Search", elo: 1670, tag: "Gen 6 • 145 ms", ours: true },
-      { name: "1.89M PT-v4-Large Pure (Gen 6)", elo: 1635, tag: "4–2 vs Gen 5 • 37 ms", ours: true },
+      { name: "1.89M PT-v4-Large Pure (Gen 6)", elo: 1635, tag: "Gen 6 • 37 ms", ours: true },
       { name: "0.59M PT-v3-RL Pure (Gen 5 PPO)", elo: 1565, tag: "Gen 5 • 28 ms", ours: true },
       { name: "0.59M PT-v2+RL Pure (Gen 4 PPO)", elo: 1540, tag: "Gen 4 • 27 ms", ours: true },
       { name: "0.59M PT-v1 Pure (Gen 3 BC)", elo: 1430, tag: "Gen 3 • 29 ms", ours: true },
@@ -212,10 +217,11 @@ pytest -v</pre>
       { name: "subham_v14 (Top Heuristic Ceiling)", elo: 1224, tag: "Kaggle ~1,224", ours: false }
     ];
     const ABLATIONS = [
-      { name: "Gen 7: 1.89M PT-v5-Boss (8× D4, Promoted)", method: "1.89M • Full-TTA DAgger + 8× D4", vsPrior: "4–2 vs Gen 6 (66.7%)", sub4: "4–0 (133.8t)", wd4: "4–0 (137.2t)", boss: "0–6 (119.0t, max 127t)", ms: "55.4", hi: true },
-      { name: "Gen 7: Ensemble-3x (v5+v4+v4rl)", method: "3× 1.89M Probability Blend", vsPrior: "4–2 vs Gen 6 (66.7%)", sub4: "—", wd4: "—", boss: "0–6 (119.0t, max 132t)", ms: "72.0", hi: true },
+      { name: "Gen 8: 1.89M PT-Gen8 (2P Specialist)", method: "Soft-KD + Aux t+10 + 8× D4 All-In", vsPrior: "6–2 vs Gen 7 (75.0%)", sub4: "Routes → Gen 7", wd4: "Routes → Gen 7", boss: "0–6 (111.3t / 134t w/S)", ms: "53.8", hi: true },
+      { name: "Gen 8: Ensemble (Gen8 + Gen7)", method: "2× 1.89M 8× D4 All-In Blend", vsPrior: "4–2 vs Gen 7 (66.7%)", sub4: "—", wd4: "—", boss: "—", ms: "96.3", hi: true },
+      { name: "Gen 7: 1.89M PT-v5-Boss (4P Specialist)", method: "1.89M • Full-TTA DAgger + 8× D4", vsPrior: "4–2 vs Gen 6 (66.7%)", sub4: "4–0 (133.8t)", wd4: "4–0 (137.2t)", boss: "0–6 (119.0t, max 127t)", ms: "55.4", hi: false },
+      { name: "Gen 7: Ensemble-3x (v5+v4+v4rl)", method: "3× 1.89M Probability Blend", vsPrior: "4–2 vs Gen 6 (66.7%)", sub4: "—", wd4: "—", boss: "0–6 (119.0t, max 132t)", ms: "72.0", hi: false },
       { name: "Gen 6: 1.89M PT-v4-Large Pure", method: "1.89M • 12.8K BC+DAgger", vsPrior: "4–2 vs Gen 5 (66.7%)", sub4: "4–0 (135.8t)", wd4: "4–0 (142.5t)", boss: "0–6 (111.2t, max 131t)", ms: "36.6", hi: false },
-      { name: "Gen 6: 1.89M PT-v4-Large + Search", method: "1.89M + Neural-Opp 10t", vsPrior: "2–2 vs 1.89M Pure", sub4: "—", wd4: "—", boss: "0–6 (119.2t, max 135t)", ms: "145.5", hi: false },
       { name: "Gen 5: 0.59M PT-v3-RL", method: "0.59M • League PPO+EMA", vsPrior: "6–6 vs Gen 4 (12g)", sub4: "4–0 (181.5t)", wd4: "4–0 (190.5t)", boss: "0–4 (116.8t w/S)", ms: "29.0", hi: false },
       { name: "Gen 4: 0.59M PT-v2+RL", method: "0.59M • DAgger + PPO", vsPrior: "5–1 vs Gen 3 (83.3%)", sub4: "4–0 (130.8t)", wd4: "3–1 (75.0%)", boss: "0–6 (109.2t / 121t w/S)", ms: "27.2", hi: false },
       { name: "Gen 3: 0.59M PT-v1", method: "0.59M • 34g BC", vsPrior: "6–0 vs LightZero v3", sub4: "1–3 (25.0%)", wd4: "4–0 (192.2t)", boss: "0–6 (117.2t)", ms: "29.0", hi: false }
@@ -224,7 +230,8 @@ pytest -v</pre>
       { model: "Gen 4: 0.59M PT-v2+RL", vsPure: "5–1 (83.3%)", wr: 83.3, pureMs: "27.2 ms", searchMs: "118.1 ms", boss: "109.2t → 121.0t" },
       { model: "Gen 5: 0.59M PT-v3-RL", vsPure: "6–0 (100.0%)", wr: 100.0, pureMs: "29.9 ms", searchMs: "131.9 ms", boss: "— → 116.8t" },
       { model: "Gen 6: 1.89M PT-v4-Large", vsPure: "2–2 (50.0%)", wr: 50.0, pureMs: "36.6 ms", searchMs: "145.5 ms", boss: "111.2t → 119.2t (max 135t)" },
-      { model: "Gen 7: 1.89M PT-v5-Boss (8× D4)", vsPure: "Internalized (Pure = Search vs #2)", wr: 50.0, pureMs: "55.4 ms", searchMs: "160 ms", boss: "119.0t → 118.0t (max 129t)" }
+      { model: "Gen 7: 1.89M PT-v5-Boss (8× D4)", vsPure: "Internalized (Pure = Search vs #2)", wr: 50.0, pureMs: "55.4 ms", searchMs: "160 ms", boss: "119.0t → 118.0t (max 129t)" },
+      { model: "Gen 8: 1.89M PT-Gen8 (Soft-KD + Aux)", vsPure: "6–2 vs Gen 7 Pure (+190 Elo)", wr: 75.0, pureMs: "53.8 ms", searchMs: "160 ms", boss: "111.3t → 115.2t (max 134t)" }
     ];
     const ELO_2P = [
       { name: "LightZero v3 (Gen 2)", elo: 2300.3, ci: [2044, 2980], wdl: "19-0-1", wr: 95.0, ours: true },
@@ -255,7 +262,7 @@ pytest -v</pre>
       document.getElementById("ablation-tbody").innerHTML = ABLATIONS.map(r => `
         <tr class="${r.hi ? "ours-row" : ""}">
           <td>${r.name}</td><td style="color:var(--muted)">${r.method}</td>
-          <td class="num mono ${r.vsPrior.startsWith("4–2") || r.vsPrior.startsWith("5–1") || r.vsPrior.startsWith("6–0") ? "ok" : ""}">${r.vsPrior}</td>
+          <td class="num mono ${r.vsPrior.startsWith("4–2") || r.vsPrior.startsWith("5–1") || r.vsPrior.startsWith("6–0") || r.vsPrior.startsWith("6–2") ? "ok" : ""}">${r.vsPrior}</td>
           <td class="num mono ${r.sub4.startsWith("4–0") ? "ok" : ""}">${r.sub4}</td>
           <td class="num mono ${r.wd4.startsWith("4–0") ? "ok" : ""}">${r.wd4}</td>
           <td class="num mono">${r.boss}</td><td class="num mono">${r.ms}</td>

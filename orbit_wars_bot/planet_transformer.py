@@ -490,8 +490,10 @@ class PlanetTimelineTransformer(nn.Module):
         n_heads: int = 4,
         n_layers: int = 4,
         dim_ff: int = 256,
+        use_aux_future: bool = False,
     ):
         super().__init__()
+        self.use_aux_future = bool(use_aux_future)
         self.config = {
             "planet_dim": planet_dim,
             "timeline_dim": timeline_dim,
@@ -501,6 +503,8 @@ class PlanetTimelineTransformer(nn.Module):
             "n_layers": n_layers,
             "dim_ff": dim_ff,
         }
+        if self.use_aux_future:
+            self.config["use_aux_future"] = True
 
         # 1D-CNN encoder over the 20-step arrival & ownership timeline per planet
         self.timeline_conv = nn.Sequential(
@@ -542,13 +546,26 @@ class PlanetTimelineTransformer(nn.Module):
             nn.Linear(64, 1),
         )
 
+        # Optional training-only auxiliary future-state world-model head (inspired by #7 Audun):
+        # predicts [owner_mine, owner_enemy, owner_neutral, log1p_ships_norm] at t + 10.
+        # Never invoked during inference -> zero latency cost.
+        self.aux_future_head: Optional[nn.Module] = None
+        if self.use_aux_future:
+            self.aux_future_head = nn.Sequential(
+                nn.Linear(d_model, d_model // 2),
+                nn.GELU(),
+                nn.Linear(d_model // 2, 4),
+            )
+
     def forward(
         self,
         planet_feats: torch.Tensor,
         timeline_feats: torch.Tensor,
         edge_feats: torch.Tensor,
         pad_mask: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        *,
+        return_aux: bool = False,
+    ):
         """Forward pass.
 
         Args:
@@ -556,6 +573,8 @@ class PlanetTimelineTransformer(nn.Module):
             timeline_feats: ``(B, N, T, TIMELINE_FEAT_DIM)``
             edge_feats: ``(B, N, N, EDGE_FEAT_DIM)``
             pad_mask: ``(B, N)`` bool, True for valid planets.
+            return_aux: When ``True`` (and ``use_aux_future=True``), returns a 4-tuple
+                including ``aux_future`` of shape ``(B, N, 4)``.
 
         Returns:
             action_logits: ``(B, N, N + 1)`` where index ``0`` is HOLD and ``1 + j`` is target ``j``.
@@ -589,6 +608,9 @@ class PlanetTimelineTransformer(nn.Module):
         vw = F.softmax(va, dim=-1).unsqueeze(-1)
         pooled = (h * vw).sum(dim=1)
         value = torch.tanh(self.val_head(pooled).squeeze(-1))
+        if return_aux and self.aux_future_head is not None:
+            aux_future = self.aux_future_head(h)  # (B, N, 4)
+            return action_logits, frac_preds, value, aux_future
         return action_logits, frac_preds, value
 
 

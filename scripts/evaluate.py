@@ -139,6 +139,12 @@ def resolve_agent(spec: str, checkpoint: str | None = None, sims: int = 20, time
         override_ckpt = spec.split(":", 1)[1] if ":" in spec else None
         ckpt_path = override_ckpt or checkpoint or str(REPO_ROOT / "checkpoints" / "planet_transformer_best.pt")
         return create_planet_transformer_agent(checkpoint_path=ckpt_path, use_d4_tta=True)
+    if spec.startswith("pt_d4_allin:") or spec == "pt_d4_allin":
+        from orbit_wars_bot.planet_transformer import create_planet_transformer_agent
+
+        override_ckpt = spec.split(":", 1)[1] if ":" in spec else None
+        ckpt_path = override_ckpt or checkpoint or str(REPO_ROOT / "checkpoints" / "planet_transformer_best.pt")
+        return create_planet_transformer_agent(checkpoint_path=ckpt_path, use_d4_tta=True, force_all_in=True)
     if spec in ("planet_transformer_search", "pt_search") or spec.startswith("planet_transformer_search:") or spec.startswith("pt_search:"):
         from orbit_wars_bot.planet_transformer import create_search_planet_transformer_agent
 
@@ -158,16 +164,31 @@ def resolve_agent(spec: str, checkpoint: str | None = None, sims: int = 20, time
             use_d4_tta=True,
             time_budget_sec=min(0.26, time_budget),
         )
-    if spec.startswith("planet_transformer_ensemble:") or spec.startswith("pt_ens:") or spec.startswith("pt_ens_d4:"):
+    if spec.startswith("planet_transformer_ensemble:") or spec.startswith("pt_ens:") or spec.startswith("pt_ens_d4:") or spec.startswith("pt_ens_allin:"):
         from orbit_wars_bot.planet_transformer import create_ensemble_planet_transformer_agent
 
-        use_d4 = spec.startswith("pt_ens_d4:")
+        use_d4 = spec.startswith("pt_ens_d4:") or spec.startswith("pt_ens_allin:")
+        all_in = spec.startswith("pt_ens_allin:")
         raw_paths = spec.split(":", 1)[1]
         ckpt_paths = [p.strip() for p in raw_paths.split(",") if p.strip()]
         return create_ensemble_planet_transformer_agent(
             checkpoint_paths=ckpt_paths,
             use_d4_tta=use_d4,
+            force_all_in=all_in,
         )
+    if spec.startswith("pt_specialist:"):
+        from orbit_wars_bot.planet_transformer import PlanetTransformerAgent
+
+        p2_path, p4_path = [p.strip() for p in spec.split(":", 1)[1].split("|", 1)]
+        ag_2p = PlanetTransformerAgent(p2_path, use_d4_tta=True, force_all_in=True)
+        ag_4p = PlanetTransformerAgent(p4_path, use_d4_tta=True, force_all_in=False)
+
+        def _specialist_agent(obs, config=None):
+            owners = {int(row[1]) for row in obs.get("planets", []) if int(row[1]) >= 0}
+            owners.update(int(row[1]) for row in obs.get("fleets", []) if int(row[1]) >= 0)
+            return ag_4p.act(obs, config) if len(owners) > 2 else ag_2p.act(obs, config)
+
+        return _specialist_agent
     if spec == "kvatsa5":
         kv_path = OPP_DIR / "kvatsa5_agent.py"
         if not kv_path.is_file():

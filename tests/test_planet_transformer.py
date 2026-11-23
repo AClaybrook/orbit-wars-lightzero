@@ -235,3 +235,50 @@ def test_decode_plan_blocked_shot_fallback(tmp_path: Path, monkeypatch):
     assert len(moves) == 1
     assert int(moves[0][0]) == int(enc.planet_rows[owned_idx][0])
 
+
+def test_aux_future_head_and_soft_kd_loss():
+    import sys
+
+    scripts_dir = str(Path(__file__).resolve().parent.parent / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from distill_soft_kd import compute_soft_kd_loss
+
+    env = make("orbit_wars", configuration={"seed": 88})
+    obs = env.reset(2)[0]["observation"]
+    enc = extract_planet_features(obs, player=0)
+    pad = pad_encoded_state(enc)
+
+    model = PlanetTimelineTransformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128, use_aux_future=True)
+    pf = torch.from_numpy(pad["planet_feats"][None])
+    tf = torch.from_numpy(pad["timeline_feats"][None])
+    ef = torch.from_numpy(pad["edge_feats"][None])
+    le = torch.from_numpy(pad["legal_edges"][None])
+    om = torch.from_numpy(pad["owned_mask"][None])
+    pm = torch.from_numpy(pad["pad_mask"][None])
+
+    # Default inference forward returns 3-tuple (zero aux overhead)
+    out3 = model(pf, tf, ef, pm)
+    assert len(out3) == 3
+
+    # Training forward with return_aux=True returns 4-tuple
+    out4 = model(pf, tf, ef, pm, return_aux=True)
+    assert len(out4) == 4
+    assert out4[3].shape == (1, MAX_PLANETS, 4)
+
+    # Soft-KL + aux loss computes finite gradients cleanly
+    soft_q = torch.zeros((1, MAX_PLANETS, MAX_PLANETS + 1), dtype=torch.float32)
+    soft_q[..., 0] = 0.7
+    soft_q[..., 1] = 0.3
+    vtar = torch.tensor([1.0], dtype=torch.float32)
+    ao = torch.zeros((1, MAX_PLANETS), dtype=torch.long)
+    ash = torch.full((1, MAX_PLANETS), 0.5, dtype=torch.float32)
+    av = pm.clone()
+
+    loss, metrics = compute_soft_kd_loss(model, pf, tf, ef, le, om, pm, soft_q, vtar, ao, ash, av)
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert metrics["kl"] >= 0.0
+    assert 0.0 <= metrics["aux_acc"] <= 1.0
+
+
