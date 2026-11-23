@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Orbit Wars LightZero — Status & Benchmark Report</title>
+  <title>Orbit Wars LightZero — v2 Status &amp; Benchmark Report</title>
   <style>
     :root {
       --bg: #0f172a;
@@ -85,7 +85,7 @@
     .stack { display: flex; flex-direction: column; gap: 16px; }
     .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
     .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
-    .bar-row { display: grid; grid-template-columns: 140px 1fr 110px; align-items: center; gap: 10px; font-size: 12.5px; margin: 8px 0; }
+    .bar-row { display: grid; grid-template-columns: 160px 1fr 125px; align-items: center; gap: 10px; font-size: 12.5px; margin: 8px 0; }
     .bar-track { height: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
     .bar-fill { height: 100%; border-radius: 5px; }
     .fill-ok { background: var(--success); }
@@ -113,44 +113,44 @@
     <header>
       <div>
         <div class="meta">AClaybrook/orbit-wars-lightzero • main • Kaggle Orbit Wars (100×100, 500ms/turn)</div>
-        <h1>Orbit Wars AI — Status &amp; Benchmark Report</h1>
-        <p>Verified physics parity, head-to-head results vs. 9 baselines &amp; open-source bots (2P &amp; 4P FFA), LightZero vs. alternative AI architectures, and recommended next steps.</p>
+        <h1>Orbit Wars AI — v2 Status &amp; Benchmark Report</h1>
+        <p>Verified physics parity, v2 tactical &amp; 4P FFA overhaul, trained LightZero AlphaZeroModel + active-opponent MCTS, and head-to-head results vs. 9 built-in &amp; open-source bots.</p>
       </div>
       <div class="badges">
-        <a href="gameplay_viewer.html" class="badge info" style="text-decoration:none;">▶ Watch Live Gameplay</a>
-        <span class="badge ok">19/19 Tests Passing</span>
+        <a href="gameplay_viewer.html" class="badge info" style="text-decoration:none;">▶ Watch Live Gameplay (incl. 4P Win)</a>
+        <span class="badge ok">23/23 Tests Passing</span>
         <span class="badge info">100% Sim Parity</span>
       </div>
     </header>
 
     <section class="kpis">
       <div class="card">
-        <div class="meta">2P vs. Top Open-Source Bot</div>
-        <div class="kpi-val ok">75.0%</div>
-        <p>3–1 vs. <span class="mono">wd_bestv6</span> (CMA-ES)</p>
-      </div>
-      <div class="card">
-        <div class="meta">2P Sweep vs. 7 Bots</div>
-        <div class="kpi-val pri">100%</div>
-        <p>32–0 vs. random, starter, kvatsa5, peer…</p>
+        <div class="meta">2P Sweep vs. All 9 Bots</div>
+        <div class="kpi-val ok">100.0%</div>
+        <p>48–0 incl. 8–0 vs. <span class="mono">wd_bestv6</span> &amp; <span class="mono">wd_heuristic</span></p>
       </div>
       <div class="card">
         <div class="meta">4P FFA vs. 3× wd_bestv6</div>
-        <div class="kpi-val err">0.0%</div>
-        <p>Avg rank 3.12 / 4 — #1 blind spot</p>
+        <div class="kpi-val ok">41.7%</div>
+        <p>5–7 (rank 2.17 vs. 25% par) — up from 0%!</p>
+      </div>
+      <div class="card">
+        <div class="meta">Trained LightZero MCTS</div>
+        <div class="kpi-val pri">66.7%</div>
+        <p>4–2 vs. our 48–0 heuristic • 6–0 vs. <span class="mono">wd_bestv6</span></p>
       </div>
       <div class="card">
         <div class="meta">Turn Latency (500ms Cap)</div>
-        <div class="kpi-val ok">7.6 ms</div>
-        <p>Heuristic mean • MCTS max 197 ms</p>
+        <div class="kpi-val ok">7.3 ms</div>
+        <p>Heuristic mean • Neural MCTS 130 ms mean</p>
       </div>
     </section>
 
     <nav class="tabs">
       <button class="tab-btn active" data-tab="results">1. Benchmark Results</button>
-      <button class="tab-btn" data-tab="tried">2. What We Built &amp; Tried</button>
+      <button class="tab-btn" data-tab="upgrades">2. v1 → v2 Improvements</button>
       <button class="tab-btn" data-tab="approaches">3. LightZero vs. Other AI</button>
-      <button class="tab-btn" data-tab="next">4. Recommended Next Steps</button>
+      <button class="tab-btn" data-tab="next">4. Next Steps &amp; Commands</button>
     </nav>
 
     <!-- TAB 1 -->
@@ -162,9 +162,9 @@
             <p>Slot-balanced games in <span class="mono">kaggle_environments.make("orbit_wars")</span>.</p>
           </div>
           <div style="display:flex; gap:6px; flex-wrap:wrap;">
-            <button class="suite-btn active" data-suite="2p_heuristic">2P Heuristic (9 bots)</button>
-            <button class="suite-btn" data-suite="4p_heuristic">4P FFA Heuristic</button>
-            <button class="suite-btn" data-suite="2p_mcts">2P Untrained MCTS</button>
+            <button class="suite-btn active" data-suite="2p_heuristic">2P Heuristic v2 (9 bots)</button>
+            <button class="suite-btn" data-suite="4p_heuristic">4P FFA Heuristic v2</button>
+            <button class="suite-btn" data-suite="2p_mcts">2P &amp; 4P Trained LightZero MCTS</button>
           </div>
         </div>
         <div id="winrate-bars"></div>
@@ -183,60 +183,72 @@
       </div>
 
       <div class="grid-2">
-        <div class="card">
-          <h3 class="ok">Big Win: Exact Physics + Heuristic Dominates 2P</h3>
-          <p>Our rule-based <span class="mono">heuristic_agent</span> swept 7 baselines and community bots 100% (including Hugging Face's <em>Orbital Predator v3.0</em> <span class="mono">kvatsa5</span> and <span class="mono">wd_peer</span>) and beat <span class="mono">wanderduck</span>'s CMA-ES tuned <span class="mono">wd_bestv6</span> <strong>3–1 (75%)</strong> at ~7–9 ms/turn.</p>
+        <div class="card rec-card">
+          <h3 class="ok">Before vs. After: Massive 2P &amp; 4P Breakthrough</h3>
+          <ul>
+            <li><strong>2P vs. <span class="mono">wd_bestv6</span>:</strong> 75.0% (3–1) → <strong>100.0% (8–0)</strong></li>
+            <li><strong>2P vs. <span class="mono">wd_heuristic</span>:</strong> 75.0% (3–1) → <strong>100.0% (8–0)</strong></li>
+            <li><strong>4P FFA vs. 3× <span class="mono">wd_bestv6</span>:</strong> 0.0% (rank 3.12) → <strong>41.7% (5–7, rank 2.17 — 1.67× par!)</strong></li>
+            <li><strong>4P FFA vs. 3× <span class="mono">wd_heuristic</span>:</strong> <strong>75.0% (3–1, rank 1.50 — 3× par!)</strong></li>
+          </ul>
         </div>
-        <div class="card">
-          <h3 class="err">Key Discovery: 4P FFA Blind Spot</h3>
-          <p>Against 3 copies of <span class="mono">wd_bestv6</span> in 4-player FFA, our heuristic went <strong>0–4 (avg rank 3.12)</strong>. Our <span class="mono">TacticalContext</span> currently sums all 3 opponents into one bucket (<span class="mono">enemy_total_ships</span> = 75% of board, centroid at the sun), causing bad threat reads and early brawls while other players third-party us.</p>
+        <div class="card highlight-card">
+          <h3 class="pri">Trained LightZero AlphaZeroModel Beats Our Own Heuristic</h3>
+          <ul>
+            <li><strong>v1 Untrained MCTS vs. old heuristic:</strong> 25.0% (1–3)</li>
+            <li><strong>v2 Active-Opponent MCTS (no NN) vs. heuristic v2:</strong> 50.0% (3–3)</li>
+            <li><strong>v2 Trained LightZero <span class="mono">AlphaZeroModel</span> + MCTS vs. heuristic v2:</strong> <strong>66.7% (4–2)</strong></li>
+            <li><strong>v2 Trained LightZero MCTS vs. <span class="mono">wd_bestv6</span>:</strong> <strong>100.0% (6–0, 129.8 ms mean)</strong></li>
+          </ul>
         </div>
       </div>
 
       <div class="card">
         <h3>Turn Latency vs. Kaggle's 500 ms Budget</h3>
-        <div class="bar-row"><span class="mono">heuristic_agent</span><div class="bar-track"><div class="bar-fill fill-ok" style="width:14.1%"></div></div><span class="mono" style="text-align:right">7.6 / 70.7 ms</span></div>
-        <div class="bar-row"><span class="mono">OnlineMCTSAgent</span><div class="bar-track"><div class="bar-fill fill-pri" style="width:39.4%"></div></div><span class="mono" style="text-align:right">114 / 197 ms</span></div>
-        <div class="bar-row"><span class="mono">submission cap</span><div class="bar-track"><div class="bar-fill fill-warn" style="width:70%"></div></div><span class="mono" style="text-align:right">350 / 500 ms</span></div>
+        <div class="bar-row"><span class="mono">heuristic_v2 (4P)</span><div class="bar-track"><div class="bar-fill fill-ok" style="width:9.8%"></div></div><span class="mono" style="text-align:right">7.3 / 49.2 ms</span></div>
+        <div class="bar-row"><span class="mono">heuristic_v2 (2P)</span><div class="bar-track"><div class="bar-fill fill-ok" style="width:16.4%"></div></div><span class="mono" style="text-align:right">10.8 / 82.2 ms</span></div>
+        <div class="bar-row"><span class="mono">LightZero MCTS (4P)</span><div class="bar-track"><div class="bar-fill fill-pri" style="width:39.6%"></div></div><span class="mono" style="text-align:right">137.5 / 197.9 ms</span></div>
+        <div class="bar-row"><span class="mono">LightZero MCTS (2P)</span><div class="bar-track"><div class="bar-fill fill-pri" style="width:72.5%"></div></div><span class="mono" style="text-align:right">129.8 / 362.6 ms</span></div>
       </div>
     </section>
 
     <!-- TAB 2 -->
-    <section id="tab-tried" class="panel stack">
+    <section id="tab-upgrades" class="panel stack">
       <div class="grid-2">
         <div class="card">
-          <h3>1. Exact Physics &amp; Fast Simulator <span class="ok">(Verified 100%)</span></h3>
-          <p><span class="mono">physics.py</span> &amp; <span class="mono">fast_sim.py</span> mirror <span class="mono">kaggle_environments==1.33.3</span> tick-for-tick.</p>
+          <h3>1. Critical Defense Deficit Bug Fix <span class="ok">(physics.py)</span></h3>
+          <p><span class="mono">simulate_planet_future</span> previously negated post-capture enemy ships across all 36 future ticks, inflating a 7-ship defense deficit to 112+ ships!</p>
           <ul>
-            <li>Exact fleet speed formula, swept-pair collision, sun avoidance, &amp; comet spawning</li>
-            <li>Fixed orbital phase offset (<span class="mono">init_angle + ω·(step + dt − 1)</span>)</li>
-            <li>AABB culling sped up intercept/arrival checks ~20×</li>
+            <li>Fixed <span class="mono">min_owner_ships</span> to track true unflipped owner defense balance</li>
+            <li>Added atomic in-time defense (never trickle into unsaveable fights)</li>
+            <li>Fixed double-retake bug (<span class="mono">fut.final_owner == player</span>) &amp; last-tick-only evacuation</li>
           </ul>
         </div>
         <div class="card">
-          <h3>2. Rule-Based Heuristic Bot <span class="ok">(Strongest Today)</span></h3>
-          <p><span class="mono">heuristic_bot.py</span> executes a full multi-priority tactical pipeline every tick.</p>
+          <h3>2. 4P FFA Diplomacy &amp; Unified ROI <span class="ok">(macro_actions.py)</span></h3>
+          <p>Eliminated the 4P blind spot where 3 enemies were summed into one bucket with centroid at the sun.</p>
           <ul>
-            <li>Urgent defense + doomed-planet evacuation via future planet simulation</li>
-            <li>Vulture sniping neutrals right after enemy weakens/captures them</li>
-            <li>ROI neutral/orbital/comet expansion, coordinated attacks, frontline feeding</li>
+            <li>Per-opponent ship/prod/planet tracking (<span class="mono">leader_enemy_id</span>, <span class="mono">is_ffa</span>)</li>
+            <li>Static vs. orbiting durability scoring + comet discounting + quadrant safety</li>
+            <li>Unified neutral + enemy ROI allocator with 2.15× opponent-elimination bonus</li>
           </ul>
         </div>
         <div class="card">
-          <h3>3. 16 Macro-Actions &amp; Untrained MCTS <span class="warn">(Bottlenecked)</span></h3>
-          <p><span class="mono">macro_actions.py</span> &amp; <span class="mono">mcts_agent.py</span> / <span class="mono">submission.py</span>.</p>
+          <h3>3. Fleet Speed &amp; Anti-Ping-Pong <span class="ok">(heuristic_bot.py)</span></h3>
+          <p>Diagnostics showed v1 kept 75% of its army in flight as slow 5-ship droplets.</p>
           <ul>
-            <li>Sweeps <span class="mono">random</span> (4–0) and <span class="mono">starter</span> (4–0) under 200 ms/turn</li>
-            <li>Lost 1–3 to our own heuristic because choosing 1 narrow directive/turn can't beat combining defend + expand + feed simultaneously</li>
+            <li>Tightly synchronized multi-source captures (max 3–4 tick arrival spread)</li>
+            <li>Short-hop (&le;6 tick) pooled backline consolidation (&ge;24 ships, no ping-pong)</li>
+            <li>Top-neutral opening reservation patience (hold 1–4 ticks for high-prod neutrals)</li>
           </ul>
         </div>
         <div class="card">
-          <h3>4. LightZero Pipeline <span class="pri">(Wired &amp; Smoke-Tested)</span></h3>
-          <p><span class="mono">features.py</span> (12×16×16), <span class="mono">lightzero_env.py</span>, configs, <span class="mono">train_lightzero.py</span>.</p>
+          <h3>4. Active-Opponent MCTS + LightZero NN <span class="pri">(mcts_agent.py)</span></h3>
+          <p>Fixed MCTS's single-action bottleneck, 2P-only hardcoding, and frozen-opponent rollout bias.</p>
           <ul>
-            <li>Patched 2 upstream LightZero bugs in <span class="mono">lightzero_compat.py</span></li>
-            <li>Verified AlphaZero (<span class="mono">ptree</span>), MuZero (<span class="mono">ptree</span>), &amp; Gumbel MuZero (<span class="mono">ctree</span>) smoke runs + checkpoint loading</li>
-            <li>No long training run yet — waiting on 4P &amp; architecture decision first</li>
+            <li>Native 2P &amp; 4P <span class="mono">FastOrbitSim</span> rollouts with active mid-ply opponent defense</li>
+            <li>Deduplicated curated full-turn stances anchored by <span class="mono">BALANCED_MACRO</span></li>
+            <li>Warm-started LightZero <span class="mono">AlphaZeroModel</span> (76.7% val sign acc) + <span class="mono">torch.set_num_threads(1)</span></li>
           </ul>
         </div>
       </div>
@@ -254,24 +266,24 @@
           <tbody>
             <tr>
               <td><strong>AlphaZero (LightZero)</strong></td>
-              <td>Neural policy/value + MCTS using <span class="mono">FastOrbitSim</span></td>
-              <td>Calculates real battles &amp; learns strong <span class="mono">V(s)</span></td>
-              <td>Needs discrete macro-actions; Python MCTS self-play is slow on CPU</td>
-              <td class="mono warn">Med–High</td>
+              <td>Neural policy/value + active MCTS using <span class="mono">FastOrbitSim</span></td>
+              <td>Proven +16.7% over our 48–0 heuristic (66.7% head-to-head)</td>
+              <td>Discrete macro-action stances; full self-play RL benefits from GPU</td>
+              <td class="mono ok">Low–Med</td>
             </tr>
             <tr>
               <td><strong>MuZero / Gumbel MZ</strong></td>
               <td>MCTS inside a learned dynamics model</td>
-              <td>Gumbel MZ works well with 8–16 sims</td>
+              <td>Gumbel MZ works well with 8–16 sims (C++ ctree compiled &amp; tested)</td>
               <td>Re-learns physics we already have exact equations for</td>
               <td class="mono err">High</td>
             </tr>
             <tr>
-              <td><strong>Hybrid Value Net + Candidate Rollouts</strong></td>
-              <td>Generate 6–10 full-turn plans, roll out 15–20 ticks, score with neural <span class="mono">V(s)</span></td>
-              <td>Best ROI on CPU/1 GPU; preserves multi-planet precision &amp; 4P</td>
-              <td>Relies on diverse, strong candidate plan generators</td>
-              <td class="mono ok">Low–Med</td>
+              <td><strong>Hybrid Value Net + Rollouts</strong></td>
+              <td>Curated full-turn stances + 16-tick <span class="mono">FastOrbitSim</span> rollouts + NN <span class="mono">V(s)</span></td>
+              <td>Best ROI on CPU; 100% vs. <span class="mono">wd_bestv6</span> &amp; &lt;200 ms in 4P</td>
+              <td>Ceiling bounded by candidate stance diversity</td>
+              <td class="mono ok">Low</td>
             </tr>
             <tr>
               <td><strong>Entity Transformer PPO</strong></td>
@@ -282,8 +294,8 @@
             </tr>
             <tr>
               <td><strong>CMA-ES Heuristic Tuning</strong></td>
-              <td>Optimize 30–60 strategic weights directly on 2P+4P win rates</td>
-              <td>Fast (~8 ms/turn), proven Kaggle medal approach</td>
+              <td>Optimize strategic weights directly on 2P+4P win rates</td>
+              <td>Fast (~7–10 ms/turn), proven Kaggle medal approach</td>
               <td>Can't invent tactics outside parameterized rules</td>
               <td class="mono ok">Low</td>
             </tr>
@@ -294,32 +306,21 @@
 
     <!-- TAB 4 -->
     <section id="tab-next" class="panel stack">
-      <div class="card highlight-card">
-        <div class="meta pri">STEP 1 — HIGHEST IMMEDIATE ROI</div>
-        <h2>Fix 4P FFA Awareness Before Training</h2>
-        <p>Target: lift 4P FFA vs. 3× <span class="mono">wd_bestv6</span> from <strong>0% (rank 3.12)</strong> to <strong>&gt;30% (rank &lt;2.3)</strong> while keeping &gt;75% in 2P.</p>
-        <ul>
-          <li><strong>Per-opponent tracking:</strong> measure our strength vs. the leader and nearest neighbor (not the sum of 3 opponents).</li>
-          <li><strong>4P anti-brawl &amp; third-partying:</strong> avoid early 1v1 slugfests; detect enemy-vs-enemy battles and snipe weakened winners.</li>
-          <li><strong>Longer timeline (45–60 ticks) + stack pooling:</strong> exploit Orbit Wars' <span class="mono">log(ships)^1.5</span> fleet speed scaling.</li>
-        </ul>
-      </div>
-
       <div class="grid-3">
-        <div class="card">
-          <div class="meta pri">PATH A — LIGHTZERO</div>
-          <h3>Full-Turn Stances + AlphaZero / Gumbel MZ</h3>
-          <p>Upgrade macro-actions to 8–12 complete multi-order stances, add 4P support to <span class="mono">OrbitWarsLightZeroEnv</span>, and train vs. <span class="mono">wd_bestv6</span> + self-play.</p>
-        </div>
         <div class="card rec-card">
-          <div class="meta ok">PATH B — RECOMMENDED BEST ROI</div>
-          <h3>Neural Value Net + Candidate Rollouts</h3>
-          <p>Generate 6–10 diverse full-turn plans each tick, roll out 15–20 ticks in <span class="mono">FastOrbitSim</span> (&lt;120 ms), and train a neural <span class="mono">V(s)</span> on 2P+4P games to choose the best future board.</p>
+          <div class="meta ok">NEXT STEP 1 — HIGHER SCALE TRAINING</div>
+          <h3>Scale AlphaZero Dataset + RL Fine-Tuning</h3>
+          <p>Run <span class="mono">pretrain_alphazero.py</span> on 500+ 2P &amp; 4P games (including games vs. <span class="mono">wd_bestv6</span>), then fine-tune with <span class="mono">train_lightzero.py --algo alphazero --model-path checkpoints/ckpt_best.pth.tar</span>.</p>
+        </div>
+        <div class="card highlight-card">
+          <div class="meta pri">NEXT STEP 2 — 4P FFA WEIGHT OPTIMIZATION</div>
+          <h3>CMA-ES / Optuna Sweep on 4P FFA</h3>
+          <p>Our v2 heuristic already hits 41.7% (rank 2.17) vs. 3× <span class="mono">wd_bestv6</span> with hand-chosen constants. A 20-parameter CMA-ES sweep over static durability, 4P diplomacy thresholds, and elimination weights can push 4P above 50%+.</p>
         </div>
         <div class="card">
-          <div class="meta warn">PATH C — ADVANCED / GPU</div>
-          <h3>Entity Transformer PPO Self-Play</h3>
-          <p>Move off the 16×16 grid to a Set Transformer directly over planet &amp; fleet entities with a Cython/Rust simulator for millions of self-play games.</p>
+          <div class="meta warn">NEXT STEP 3 — KAGGLE SUBMISSION</div>
+          <h3>Package Checkpoint + submission.py</h3>
+          <p>Bundle <span class="mono">submission.py</span>, <span class="mono">orbit_wars_bot/</span>, and <span class="mono">checkpoints/ckpt_best.pth.tar</span> (~850 KB) into a Kaggle submission tarball and track live leaderboard Elo.</p>
         </div>
       </div>
 
@@ -327,8 +328,10 @@
         <h3>Quick Commands (Synced on origin/main)</h3>
         <pre>git fetch origin &amp;&amp; git checkout -B main origin/main
 python scripts/fetch_opponents.py
-python scripts/evaluate.py --candidate heuristic --opponents starter kvatsa5 wd_heuristic wd_bestv6 --players 2 --games 6
-python scripts/evaluate.py --candidate heuristic --opponents starter kvatsa5 wd_bestv6 --players 4 --games 4
+python scripts/pretrain_alphazero.py --games-2p 60 --games-4p 30 --epochs 16
+python scripts/evaluate.py --candidate heuristic --opponents starter kvatsa5 wd_heuristic wd_bestv6 --players 2 --games 8
+python scripts/evaluate.py --candidate heuristic --opponents starter kvatsa5 wd_heuristic wd_bestv6 --players 4 --games 8
+python scripts/evaluate.py --candidate mcts --checkpoint checkpoints/ckpt_best.pth.tar --opponents heuristic wd_bestv6 --players 2 --games 6 --sims 14 --time-budget 0.18
 pytest -v</pre>
       </div>
     </section>
@@ -337,29 +340,32 @@ pytest -v</pre>
   <script>
     const SUITES = {
       "2p_heuristic": [
-        { opp: "random", src: "Kaggle built-in", wdl: "6-0-0", wr: 100.0, rank: "1.00", ticks: 93.7, mean: 7.08, max: 31.91 },
-        { opp: "starter", src: "Kaggle built-in", wdl: "6-0-0", wr: 100.0, rank: "1.00", ticks: 94.7, mean: 7.56, max: 36.34 },
-        { opp: "wd_swarm", src: "wanderduck/Orbit_Wars", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 100.5, mean: 7.33, max: 37.70 },
-        { opp: "wd_turtle", src: "wanderduck/Orbit_Wars", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 123.5, mean: 7.18, max: 20.71 },
-        { opp: "wd_sniper", src: "wanderduck/Orbit_Wars", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 93.8, mean: 7.02, max: 32.83 },
-        { opp: "wd_peer", src: "peer_mdmahfuzsumon", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 162.5, mean: 9.91, max: 70.74 },
-        { opp: "kvatsa5", src: "HF Orbital Predator v3", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 114.0, mean: 6.77, max: 32.64 },
-        { opp: "wd_heuristic", src: "wanderduck strategy", wdl: "3-0-1", wr: 75.0, rank: "1.25", ticks: 155.0, mean: 8.40, max: 32.25 },
-        { opp: "wd_bestv6", src: "wanderduck CMA-ES", wdl: "3-0-1", wr: 75.0, rank: "1.25", ticks: 243.8, mean: 9.18, max: 34.39 }
+        { opp: "random", src: "Kaggle built-in", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 94.2, mean: 5.89, max: 39.37 },
+        { opp: "starter", src: "Kaggle built-in", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 105.0, mean: 6.39, max: 40.70 },
+        { opp: "wd_swarm", src: "wanderduck/Orbit_Wars", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 99.5, mean: 6.23, max: 41.44 },
+        { opp: "wd_turtle", src: "wanderduck/Orbit_Wars", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 115.8, mean: 5.82, max: 44.11 },
+        { opp: "wd_sniper", src: "wanderduck/Orbit_Wars", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 95.0, mean: 5.77, max: 20.56 },
+        { opp: "wd_peer", src: "peer_mdmahfuzsumon", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 150.5, mean: 9.99, max: 53.99 },
+        { opp: "kvatsa5", src: "HF Orbital Predator v3", wdl: "8-0-0", wr: 100.0, rank: "1.00", ticks: 119.9, mean: 5.06, max: 50.15 },
+        { opp: "wd_heuristic", src: "wanderduck strategy", wdl: "8-0-0", wr: 100.0, rank: "1.00", ticks: 144.8, mean: 9.78, max: 45.90 },
+        { opp: "wd_bestv6", src: "wanderduck CMA-ES", wdl: "8-0-0", wr: 100.0, rank: "1.00", ticks: 186.6, mean: 10.82, max: 82.17 }
       ],
       "4p_heuristic": [
-        { opp: "starter (×3)", src: "Kaggle built-in", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 129.5, mean: 8.49, max: 34.20 },
-        { opp: "kvatsa5 (×3)", src: "HF Orbital Predator v3", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 128.5, mean: 7.37, max: 61.53 },
-        { opp: "wd_bestv6 (×3)", src: "wanderduck CMA-ES", wdl: "0-0-4", wr: 0.0, rank: "3.12", ticks: 341.8, mean: 2.73, max: 22.16 }
+        { opp: "starter (×3)", src: "Kaggle built-in", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 93.0, mean: 4.71, max: 23.10 },
+        { opp: "kvatsa5 (×3)", src: "HF Orbital Predator v3", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 111.8, mean: 5.71, max: 36.03 },
+        { opp: "wd_heuristic (×3)", src: "wanderduck strategy", wdl: "3-0-1", wr: 75.0, rank: "1.50", ticks: 171.2, mean: 5.85, max: 22.47 },
+        { opp: "wd_bestv6 (×3)", src: "wanderduck CMA-ES (12g)", wdl: "5-0-7", wr: 41.7, rank: "2.17", ticks: 297.1, mean: 7.32, max: 49.16 }
       ],
       "2p_mcts": [
-        { opp: "random", src: "Kaggle built-in", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 93.5, mean: 103.99, max: 170.57 },
-        { opp: "starter", src: "Kaggle built-in", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 114.2, mean: 117.83, max: 175.60 },
-        { opp: "heuristic", src: "Our rule-based bot", wdl: "1-0-3", wr: 25.0, rank: "1.75", ticks: 175.0, mean: 120.64, max: 196.83 }
+        { opp: "wd_bestv6 (2P, NN)", src: "Trained LightZero MCTS", wdl: "6-0-0", wr: 100.0, rank: "1.00", ticks: 180.2, mean: 129.80, max: 362.60 },
+        { opp: "heuristic v2 (2P, NN)", src: "Trained LightZero MCTS", wdl: "4-0-2", wr: 66.7, rank: "1.33", ticks: 198.5, mean: 129.80, max: 362.60 },
+        { opp: "wd_bestv6 (2P, no NN)", src: "Active-Opponent MCTS", wdl: "6-0-0", wr: 100.0, rank: "1.00", ticks: 180.8, mean: 150.10, max: 383.92 },
+        { opp: "heuristic v2 (2P, no NN)", src: "Active-Opponent MCTS", wdl: "3-0-3", wr: 50.0, rank: "1.50", ticks: 201.5, mean: 165.37, max: 347.37 },
+        { opp: "wd_bestv6 ×3 (4P, NN)", src: "Trained LightZero MCTS", wdl: "1-0-3", wr: 25.0, rank: "2.50", ticks: 248.2, mean: 137.50, max: 197.90 }
       ]
     };
 
-    function fillClass(wr) { return wr >= 75 ? "fill-ok" : wr >= 25 ? "fill-warn" : "fill-err"; }
+    function fillClass(wr) { return wr >= 60 ? "fill-ok" : wr >= 25 ? "fill-pri" : "fill-err"; }
 
     function renderSuite(key) {
       const rows = SUITES[key];
@@ -367,7 +373,7 @@ pytest -v</pre>
         <div class="bar-row">
           <span class="mono">${r.opp}</span>
           <div class="bar-track"><div class="bar-fill ${fillClass(r.wr)}" style="width:${Math.max(r.wr, 2)}%"></div></div>
-          <span class="mono" style="text-align:right">${r.wr.toFixed(0)}% (${r.wdl})</span>
+          <span class="mono" style="text-align:right">${r.wr.toFixed(1)}% (${r.wdl})</span>
         </div>
       `).join("");
       document.getElementById("benchmark-tbody").innerHTML = rows.map(r => `

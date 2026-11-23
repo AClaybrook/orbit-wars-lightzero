@@ -577,6 +577,7 @@ def simulate_planet_future(
 
     timeline: List[Tuple[int, int]] = [(owner, ships)]
     min_owner_ships = ships
+    unflipped_ships = ships
     captured_by: Optional[int] = None
     capture_tick: Optional[int] = None
 
@@ -584,6 +585,8 @@ def simulate_planet_future(
         # 1. Production
         if owner != -1:
             ships += prod
+        if initial_owner != -1:
+            unflipped_ships += prod
 
         # 2. Combat resolution
         combat = by_tick.get(dt)
@@ -601,6 +604,11 @@ def simulate_planet_future(
                 survivor_ships = top_ships
 
             if survivor_ships > 0:
+                if initial_owner != -1:
+                    if survivor_owner == initial_owner:
+                        unflipped_ships += survivor_ships
+                    else:
+                        unflipped_ships -= survivor_ships
                 if owner == survivor_owner:
                     ships += survivor_ships
                 else:
@@ -612,7 +620,10 @@ def simulate_planet_future(
                             captured_by = owner
                             capture_tick = dt
 
-        if owner == initial_owner:
+        if initial_owner != -1:
+            if unflipped_ships < min_owner_ships:
+                min_owner_ships = unflipped_ships
+        elif owner == initial_owner:
             if ships < min_owner_ships:
                 min_owner_ships = ships
         else:

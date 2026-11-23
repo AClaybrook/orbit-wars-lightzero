@@ -42,9 +42,9 @@ def _get_agent() -> OnlineMCTSAgent:
     if _AGENT is None:
         _AGENT = OnlineMCTSAgent(
             checkpoint_path=_discover_checkpoint(),
-            num_simulations=24,
-            time_budget_sec=0.35,
-            rollout_horizon=12,
+            num_simulations=16,
+            time_budget_sec=0.22,
+            rollout_horizon=16,
         )
     return _AGENT
 

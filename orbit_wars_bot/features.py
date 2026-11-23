@@ -185,7 +185,11 @@ def encode_observation(
 
 
 def evaluate_state(state: Any, player: int = 0) -> float:
-    """Fast heuristic state value estimate in ``[-1.0, 1.0]`` from ``player``'s view."""
+    """Fast heuristic state value estimate in ``[-1.0, 1.0]`` from ``player``'s view.
+
+    Works accurately in both 2-player 1v1 (zero-sum symmetric) and 4-player FFA
+    (compares ``player`` against the strongest rival and active field average).
+    """
     if hasattr(state, "done") and state.done:
         w = state.winner()
         if w == player:
@@ -195,52 +199,62 @@ def evaluate_state(state: Any, player: int = 0) -> float:
         return -1.0
 
     planets, fleets, comet_ids, step, max_steps, _ = _extract_fields(state)
-    my_ships = 0.0
-    opp_ships = 0.0
-    my_prod = 0.0
-    opp_prod = 0.0
-    my_planets = 0
-    opp_planets = 0
+    ships_by_p: dict[int, float] = {}
+    prod_by_p: dict[int, float] = {}
+    planets_by_p: dict[int, int] = {}
 
     for p in planets:
         owner = int(p[1])
+        if owner < 0:
+            continue
         ships = float(p[5])
         prod = float(p[6])
         is_comet = int(p[0]) in comet_ids
-        # Comets eventually expire so discount their long-term production slightly
+        # Comets eventually expire so discount their long-term production
         eff_prod = prod * (0.35 if is_comet else 1.0)
-        if owner == player:
-            my_ships += ships
-            my_prod += eff_prod
-            my_planets += 1
-        elif owner != -1:
-            opp_ships += ships
-            opp_prod += eff_prod
-            opp_planets += 1
+        ships_by_p[owner] = ships_by_p.get(owner, 0.0) + ships
+        prod_by_p[owner] = prod_by_p.get(owner, 0.0) + eff_prod
+        planets_by_p[owner] = planets_by_p.get(owner, 0) + 1
 
     for f in fleets:
         owner = int(f[1])
-        ships = float(f[6])
-        if owner == player:
-            my_ships += ships
-        else:
-            opp_ships += ships
+        if owner < 0:
+            continue
+        ships_by_p[owner] = ships_by_p.get(owner, 0.0) + float(f[6])
 
-    if my_ships <= 0.0 and opp_ships > 0.0:
+    my_ships = ships_by_p.get(player, 0.0)
+    opp_ids = [pid for pid, s in ships_by_p.items() if pid != player and s > 0.0]
+
+    if my_ships <= 0.0 and opp_ids:
         return -1.0
-    if opp_ships <= 0.0 and my_ships > 0.0:
+    if not opp_ids and my_ships > 0.0:
         return 1.0
-    if my_ships <= 0.0 and opp_ships <= 0.0:
+    if my_ships <= 0.0 and not opp_ids:
         return 0.0
 
     remaining = max(0, max_steps - step)
     # Effective value of 1 point of production scales down as the match nears step 500
-    prod_horizon = min(35.0, float(remaining) * 0.6)
+    prod_horizon = min(36.0, float(remaining) * 0.65)
 
-    my_power = my_ships + my_prod * prod_horizon + my_planets * 2.5
-    opp_power = opp_ships + opp_prod * prod_horizon + opp_planets * 2.5
+    def _power(pid: int) -> float:
+        return (
+            ships_by_p.get(pid, 0.0)
+            + prod_by_p.get(pid, 0.0) * prod_horizon
+            + planets_by_p.get(pid, 0) * 2.5
+        )
 
-    denom = max(10.0, my_power + opp_power)
-    advantage = (my_power - opp_power) / denom
+    my_power = _power(player)
+    opp_powers = [_power(pid) for pid in opp_ids]
+    max_opp_power = max(opp_powers)
+    if len(opp_powers) == 1:
+        # Exact zero-sum symmetry in 2-player games
+        ref_opp_power = max_opp_power
+    else:
+        # In 4P FFA, winning requires beating the strongest rival while staying ahead of the field
+        mean_opp_power = sum(opp_powers) / len(opp_powers)
+        ref_opp_power = 0.72 * max_opp_power + 0.28 * mean_opp_power
+
+    denom = max(10.0, my_power + ref_opp_power)
+    advantage = (my_power - ref_opp_power) / denom
     # Scale so a ~2:1 advantage maps around ~0.6-0.75 without saturating too early
     return float(math.tanh(2.4 * advantage))

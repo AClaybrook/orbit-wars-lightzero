@@ -47,6 +47,28 @@ def test_env_registered_and_bot_mode_rollout():
     assert "eval_episode_return" in ts.info
 
 
+def test_env_4p_ffa_bot_mode_rollout():
+    env = OrbitWarsLightZeroEnv(
+        dict(
+            battle_mode="play_with_bot_mode",
+            bot_action_type="starter",
+            num_agents=4,
+            max_steps=40,
+            decision_interval=8,
+        )
+    )
+    env.seed(19)
+    obs = env.reset()
+    assert env.sim.num_agents == 4
+    assert obs["observation"].shape == (12, 16, 16)
+    done = False
+    while not done:
+        ts = env.step(env.legal_actions[0])
+        done = ts.done
+    assert "eval_episode_return" in ts.info
+
+
+
 def test_env_self_play_mode_and_board_state_restore():
     env = OrbitWarsLightZeroEnv(
         dict(

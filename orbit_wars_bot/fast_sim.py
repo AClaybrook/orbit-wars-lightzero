@@ -412,7 +412,7 @@ class FastOrbitSim:
         obs: Any,
         config: Any = None,
         *,
-        num_agents: int = 2,
+        num_agents: Optional[int] = None,
         episode_seed: Optional[int] = None,
     ) -> "FastOrbitSim":
         """Reconstruct a ``FastOrbitSim`` from a Kaggle ``obs`` and optional ``config``."""
@@ -433,6 +433,16 @@ class FastOrbitSim:
         angular_velocity = float(_get_field(obs, "angular_velocity", 0.0))
         next_fleet_id = int(_get_field(obs, "next_fleet_id", len(fleets)))
         step_count = int(_get_field(obs, "step", 0))
+
+        if num_agents is None:
+            max_pid = int(_get_field(obs, "player", 0))
+            for p in planets:
+                if int(p[1]) > max_pid:
+                    max_pid = int(p[1])
+            for f in fleets:
+                if int(f[1]) > max_pid:
+                    max_pid = int(f[1])
+            num_agents = 4 if max_pid >= 2 else 2
 
         max_steps = int(_get_field(config, "episodeSteps", DEFAULT_EPISODE_STEPS)) if config is not None else DEFAULT_EPISODE_STEPS
         ship_speed = float(_get_field(config, "shipSpeed", DEFAULT_SHIP_SPEED)) if config is not None else DEFAULT_SHIP_SPEED

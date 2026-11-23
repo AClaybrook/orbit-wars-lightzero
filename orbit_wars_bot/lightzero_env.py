@@ -57,6 +57,7 @@ class OrbitWarsLightZeroEnv(BaseEnv):
         battle_mode="play_with_bot_mode",
         battle_mode_in_simulation_env="play_with_bot_mode",
         bot_action_type="heuristic",  # {'heuristic', 'starter', 'random'}
+        num_agents=2,  # 2 for 1v1, 4 for 4P FFA (play_with_bot_mode)
         max_steps=500,
         decision_interval=4,
         ship_speed=6.0,
@@ -96,6 +97,9 @@ class OrbitWarsLightZeroEnv(BaseEnv):
             self.battle_mode_in_simulation_env = "play_with_bot_mode"
 
         self.bot_action_type = str(self._cfg.bot_action_type)
+        self.num_agents = int(self._cfg.get("num_agents", 2))
+        if self.battle_mode == "self_play_mode":
+            self.num_agents = 2
         self.max_steps = int(self._cfg.max_steps)
         self.decision_interval = max(1, int(self._cfg.decision_interval))
         self.ship_speed = float(self._cfg.ship_speed)
@@ -330,7 +334,7 @@ class OrbitWarsLightZeroEnv(BaseEnv):
             ep_seed = self._rng.randint(0, 2 ** 31 - 1)
             self.sim = FastOrbitSim.from_seed(
                 ep_seed,
-                num_agents=2,
+                num_agents=self.num_agents,
                 max_steps=self.max_steps,
                 ship_speed=self.ship_speed,
                 comet_speed=self.comet_speed,
@@ -358,12 +362,13 @@ class OrbitWarsLightZeroEnv(BaseEnv):
         legal = self.legal_actions
         return int(self._rng.choice(legal)) if legal else 0
 
-    def _advance_sim(self, m0: List[List[float]], m1: List[List[float]]) -> None:
-        self.sim.step([m0, m1])
+    def _advance_sim(self, actions: List[List[List[float]]]) -> None:
+        self.sim.step(actions)
+        empty = [[] for _ in range(self.sim.num_agents)]
         for _ in range(self.decision_interval - 1):
             if self.sim.done:
                 break
-            self.sim.step([[], []])
+            self.sim.step(empty)
         self._cached_ctx = None
         self._cached_ctx_key = None
 
@@ -374,7 +379,7 @@ class OrbitWarsLightZeroEnv(BaseEnv):
         w = self.sim.winner()
         if w == 0:
             return True, 1
-        if w == 1:
+        if w >= 1:
             return True, 2
         return True, -1
 
@@ -396,8 +401,8 @@ class OrbitWarsLightZeroEnv(BaseEnv):
             )
 
         m0 = execute_macro_action(self.sim, 0, action, ctx=self._get_ctx(0))
-        m1 = self._bot_moves_for(1)
-        self._advance_sim(m0, m1)
+        all_actions = [m0] + [self._bot_moves_for(p) for p in range(1, self.sim.num_agents)]
+        self._advance_sim(all_actions)
         self._ply += 1
 
         done, winner = self.get_done_winner()
@@ -445,7 +450,7 @@ class OrbitWarsLightZeroEnv(BaseEnv):
         m0 = execute_macro_action(self.sim, 0, p0_act, ctx=self._get_ctx(0))
         m1 = execute_macro_action(self.sim, 1, action, ctx=self._get_ctx(1))
         self._pending_p0_action = None
-        self._advance_sim(m0, m1)
+        self._advance_sim([m0, m1])
         self._current_player = 1
         self._ply += 1
 
