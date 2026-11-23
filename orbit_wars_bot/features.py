@@ -175,13 +175,42 @@ def encode_observation(
     obs[9] = np.tanh(obs[9])
     obs[10] = np.tanh(obs[10])
 
-    # Channel 11: normalized time progress + central sun spatial cue
+    # Channel 11: D4-invariant global time progress + central sun spatial cue + power balance
     progress = float(min(1.0, max(0.0, step / max(1, max_steps))))
-    obs[11] = progress * 0.5 + _SUN_PLANE * 0.5
+    bal = 0.5 * (1.0 + evaluate_state(state, player=player))
+    obs[11] = progress * 0.30 + _SUN_PLANE * 0.40 + bal * 0.30
 
     if channel_last:
         return np.transpose(obs, (1, 2, 0)).copy()
     return obs
+
+
+def augment_obs_d4(obs: np.ndarray, sym_idx: int) -> np.ndarray:
+    """Apply one of the 8 exact D4 dihedral board symmetries (``sym_idx in 0..7``) to a ``(12, 16, 16)`` tensor.
+
+    Transforms scalar channels ``0..8, 11`` spatially and rotates/reflects the 2D
+    fleet momentum vector field ``(obs[9]=vx, obs[10]=vy)`` consistently.
+    """
+    k = sym_idx % 4
+    do_flip = (sym_idx // 4) % 2 == 1
+    out = obs.copy()
+
+    if k:
+        out = np.rot90(out, k=k, axes=(1, 2)).copy()
+        # Grid axes are (row=y, col=x). Each np.rot90(..., k=1) maps (r, c) -> (N-1-c, r),
+        # i.e. (new_x, new_y) = (old_y, -old_x) in grid coordinates.
+        for _ in range(k):
+            vx = out[9].copy()
+            vy = out[10].copy()
+            out[9] = vy
+            out[10] = -vx
+
+    if do_flip:
+        # Horizontal flip along col=x axis: (r, c) -> (r, N-1-c) => vx -> -vx
+        out = out[:, :, ::-1].copy()
+        out[9] = -out[9]
+
+    return out
 
 
 def evaluate_state(state: Any, player: int = 0) -> float:

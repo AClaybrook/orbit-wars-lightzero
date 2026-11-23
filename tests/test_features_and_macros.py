@@ -37,6 +37,38 @@ def test_feature_encoding_shape_and_player_symmetry():
     assert t0_cl.shape == (16, 16, 12)
 
 
+def test_d4_symmetry_augmentation_equivariance():
+    import math
+    from orbit_wars_bot.features import augment_obs_d4
+
+    ang = 0.4
+    s0 = {
+        "step": 10,
+        "planets": [[0, 0, 20.0, 30.0, 2.0, 25, 3], [1, 1, 80.0, 70.0, 2.0, 25, 3]],
+        "fleets": [[0, 0, 20.0, 30.0, ang, 0, 15]],
+        "comet_planet_ids": [],
+    }
+    t0 = encode_observation(s0, player=0)
+
+    # Horizontal flip: x' = 100 - x, y' = y, ang' = pi - ang
+    s_flip = {
+        "step": 10,
+        "planets": [[0, 0, 80.0, 30.0, 2.0, 25, 3], [1, 1, 20.0, 70.0, 2.0, 25, 3]],
+        "fleets": [[0, 0, 80.0, 30.0, math.pi - ang, 0, 15]],
+        "comet_planet_ids": [],
+    }
+    assert np.allclose(encode_observation(s_flip, player=0), augment_obs_d4(t0, 4), atol=1e-5)
+
+    # 90-deg grid rotation (np.rot90 k=1): x' = y, y' = 100 - x, vx' = vy, vy' = -vx
+    s_rot = {
+        "step": 10,
+        "planets": [[0, 0, 30.0, 80.0, 2.0, 25, 3], [1, 1, 70.0, 20.0, 2.0, 25, 3]],
+        "fleets": [[0, 0, 30.0, 80.0, math.atan2(-math.cos(ang), math.sin(ang)), 0, 15]],
+        "comet_planet_ids": [],
+    }
+    assert np.allclose(encode_observation(s_rot, player=0), augment_obs_d4(t0, 1), atol=1e-5)
+
+
 def test_state_evaluator_symmetry_and_dominance():
     sim = FastOrbitSim.from_seed(33, max_steps=200)
     v0 = evaluate_state(sim, player=0)

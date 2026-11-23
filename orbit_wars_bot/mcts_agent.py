@@ -35,6 +35,7 @@ _CURATED_STANCES: Tuple[MacroAction, ...] = (
     MacroAction.BALANCED_MACRO,
     MacroAction.EXPAND_BEST_ROI_MULTI,
     MacroAction.FEED_FRONTLINE,
+    MacroAction.ATTACK_WEAKEST_ENEMY,
     MacroAction.ATTACK_HIGH_PROD_ENEMY,
     MacroAction.AGGRESSIVE_SKIRMISH,
     MacroAction.COORDINATED_ALL_IN,
@@ -243,7 +244,7 @@ class OnlineMCTSAgent:
         rollout_horizon: int = 16,
         step_stride: int = 8,
         c_puct: float = 1.10,
-        neural_value_weight: float = 0.40,
+        neural_value_weight: float = 0.45,
         device: str = "cpu",
     ) -> None:
         self.num_simulations = max(1, int(num_simulations))
@@ -295,7 +296,7 @@ class OnlineMCTSAgent:
                 s = float(masked_nn.sum())
                 if s > 1e-8:
                     masked_nn /= s
-                    priors = 0.65 * masked_nn + 0.35 * h_priors
+                    priors = 0.75 * masked_nn + 0.25 * h_priors
             val = self.neural_value_weight * nn_val + (1.0 - self.neural_value_weight) * h_val
             return priors, val
 
@@ -426,10 +427,14 @@ class OnlineMCTSAgent:
             opp_ctx = build_tactical_context(root_sim, opp_id, horizon=opp_horizon)
             root_opp_moves[opp_id] = heuristic_moves(root_sim, opp_id, ctx=opp_ctx)
 
-        # Expand root over distinct stances
+        # Expand root over distinct stances, ordered by neural prior (keeping BALANCED_MACRO anchor first)
         root = _SearchNode()
         priors, _ = self._evaluate_leaf(root_sim, player, ctx=root_ctx, need_priors=True)
         assert priors is not None
+        anchor_id = int(MacroAction.BALANCED_MACRO)
+        distinct_actions.sort(
+            key=lambda a: (0 if a == anchor_id else 1, -float(priors[a]))
+        )
         prior_sum = sum(float(priors[a]) for a in distinct_actions)
         if prior_sum <= 1e-8:
             for a in distinct_actions:
@@ -439,7 +444,7 @@ class OnlineMCTSAgent:
                 root.children[a] = _SearchNode(parent=root, prior=float(priors[a]) / prior_sum)
 
         max_depth = max(1, self.rollout_horizon // self.step_stride)
-        sub_stride = 4 if root_sim.num_agents == 2 else 5
+        sub_stride = 4 if root_sim.num_agents == 2 else 6
 
         for sim_idx in range(self.num_simulations):
             if sim_idx > 0 and time.perf_counter() >= deadline:
@@ -521,7 +526,6 @@ class OnlineMCTSAgent:
 
         # Select the best evaluated stance, using BALANCED_MACRO as a disciplined anchor
         # so noisy near-ties don't override our strong tactical baseline.
-        anchor_id = int(MacroAction.BALANCED_MACRO)
         visited_children = [(a, ch) for a, ch in root.children.items() if ch.visits > 0]
         if not visited_children:
             best_action = anchor_id if anchor_id in root.children else distinct_actions[0]
@@ -530,10 +534,11 @@ class OnlineMCTSAgent:
                 visited_children,
                 key=lambda kv: (kv[1].q_value, kv[1].visits, kv[1].prior),
             )[0]
+            override_margin = 0.012 if self._net is not None else 0.015
             if anchor_id in root.children and root.children[anchor_id].visits > 0 and best_action != anchor_id:
                 anchor_q = root.children[anchor_id].q_value
                 best_q = root.children[best_action].q_value
-                if best_q < anchor_q + 0.015:
+                if best_q < anchor_q + override_margin:
                     best_action = anchor_id
 
         return int(best_action), visits, cand_moves
