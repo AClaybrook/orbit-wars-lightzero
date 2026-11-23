@@ -64,7 +64,25 @@
       display: flex; flex-direction: column; gap: 6px; font-size: 12px;
     }
     .p-card.dead { opacity: 0.5; }
-    .dot { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
+    .dot { width: 10px; height: 10px; border-radius: 999px; display: inline-block; flex-shrink: 0; }
+    .legend-bar {
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+      gap: 8px; padding: 8px 10px; border-radius: 8px; background: var(--bg);
+      border: 1px solid var(--border); font-size: 12px;
+    }
+    .legend-group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .legend-chip {
+      display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px;
+      border-radius: 999px; background: var(--card); border: 1px solid var(--border);
+      font-size: 11.5px; line-height: 1.3;
+    }
+    .legend-map-chip {
+      display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted);
+    }
+    .color-tag {
+      font-size: 10.5px; font-weight: 600; padding: 1px 5px; border-radius: 4px;
+      background: rgba(148, 163, 184, 0.14);
+    }
     .bar-bg { width: 100%; height: 6px; border-radius: 999px; background: var(--card); overflow: hidden; }
     .bar-fg { height: 100%; border-radius: 999px; }
     .win-pill { font-size: 10.5px; padding: 1px 6px; border-radius: 4px; background: rgba(52, 211, 153, 0.2); color: var(--success); }
@@ -89,6 +107,7 @@
 
     <div class="layout">
       <div class="card stack">
+        <div id="player-legend" class="legend-bar"></div>
         <div class="arena-box">
           <canvas id="arena"></canvas>
           <div id="banner"></div>
@@ -285,15 +304,44 @@
       return frames;
     }
 
+    const PLAYER_COLOR_NAMES = ["Blue", "Red", "Yellow", "Purple"];
+    const PLAYER_LABELS = {
+      lightzero_v3: "LightZero v3 (Ours)",
+      lightzero_mcts: "LightZero MCTS (Ours)",
+      heuristic_v2: "Heuristic v2 (Ours)",
+      heuristic: "Heuristic v1 (Ours)",
+      wd_bestv6: "wd_bestv6 (CMA-ES)",
+      kvatsa5: "kvatsa5 (Predator v3)"
+    };
+    function formatPlayerName(raw) { return PLAYER_LABELS[raw] || raw; }
+
     let curMatchIdx = 0, frames = [], playhead = 0, playing = true, ticksPerSec = 6, lastTs = null;
     const arena = document.getElementById("arena"), ctx = arena.getContext("2d");
     const spark = document.getElementById("sparkline"), sctx = spark.getContext("2d");
     const matchSelect = document.getElementById("match-select"), scrubber = document.getElementById("scrubber");
     const tickLabel = document.getElementById("tick-label"), btnPlay = document.getElementById("btn-play");
     const chkOrbits = document.getElementById("chk-orbits"), scoreboardEl = document.getElementById("scoreboard");
+    const legendEl = document.getElementById("player-legend");
     const modeBadge = document.getElementById("mode-badge"), bannerEl = document.getElementById("banner");
 
     MATCHES.forEach((m, i) => { const o = document.createElement("option"); o.value = i; o.textContent = m.title; matchSelect.appendChild(o); });
+
+    function renderLegend(m) {
+      const playerChips = m.players.map((raw, pid) => {
+        const col = PLAYER_PALETTE[pid];
+        const colName = PLAYER_COLOR_NAMES[pid] || `P${pid}`;
+        return `<span class="legend-chip" style="border-color:${col}66;">
+          <span class="dot" style="background:${col}"></span>
+          <strong style="color:${col}">${colName}</strong>
+          <span style="color:var(--muted);">·</span>
+          <span>P${pid}: ${formatPlayerName(raw)}</span>
+        </span>`;
+      }).join("");
+      const mapChips = `<span class="legend-map-chip"><span class="dot" style="background:#64748b"></span>Gray: Neutral</span>
+        <span class="legend-map-chip"><span class="dot" style="background:#f97316"></span>Orange: Sun</span>
+        <span class="legend-map-chip"><span class="dot" style="background:#67e8f9"></span>Cyan: Comet</span>`;
+      legendEl.innerHTML = `<div class="legend-group">${playerChips}</div><div class="legend-group" style="gap:10px;">${mapChips}</div>`;
+    }
 
     function loadMatch(idx) {
       curMatchIdx = idx;
@@ -301,6 +349,7 @@
       frames = buildTimeline(m);
       playhead = 0; scrubber.max = frames.length - 1; scrubber.value = 0;
       modeBadge.textContent = `${m.players.length}P ${m.players.length === 4 ? "FFA" : "1v1"}`;
+      renderLegend(m);
       playing = true; btnPlay.textContent = "Pause";
       updateHUD(0); drawSparkline(0); drawArena();
     }
@@ -313,22 +362,26 @@
       scoreboardEl.innerHTML = m.players.map((name, pid) => {
         const ships = f.totals[pid], planets = f.counts[pid], prod = f.prods[pid];
         const pct = Math.round((ships / maxShips) * 100);
-        const tag = pid === 0 ? "Our Heuristic" : name;
+        const col = PLAYER_PALETTE[pid];
+        const colName = PLAYER_COLOR_NAMES[pid] || `P${pid}`;
+        const tag = formatPlayerName(name);
         const won = tickIdx === frames.length - 1 && m.rewards[pid] > 0;
         const dead = ships === 0 && planets === 0;
-        return `<div class="p-card ${dead ? "dead" : ""}">
+        return `<div class="p-card ${dead ? "dead" : ""}" style="border-left: 3px solid ${col};">
           <div class="between">
-            <div class="row" style="gap:6px;"><span class="dot" style="background:${PLAYER_PALETTE[pid]}"></span><strong>P${pid}: ${tag}</strong>${won ? '<span class="win-pill">WIN</span>' : ""}</div>
+            <div class="row" style="gap:6px;"><span class="dot" style="background:${col}"></span><span class="color-tag" style="background:${col}24; color:${col};">${colName}</span><strong>P${pid}: ${tag}</strong>${won ? '<span class="win-pill">WIN</span>' : ""}</div>
             <span class="mono"><strong>${ships}</strong> ships</span>
           </div>
-          <div class="bar-bg"><div class="bar-fg" style="width:${pct}%; background:${PLAYER_PALETTE[pid]}"></div></div>
+          <div class="bar-bg"><div class="bar-fg" style="width:${pct}%; background:${col}"></div></div>
           <div class="between mono" style="font-size:11px; color:var(--muted);"><span>${planets} planets</span><span>+${prod}/turn</span></div>
         </div>`;
       }).join("");
 
       if (tickIdx === frames.length - 1) {
         const w = m.rewards.findIndex(r => r > 0);
-        bannerEl.textContent = `Match Complete — Winner: ${w === 0 ? "P0 (Our Heuristic)" : "P" + w + " (" + m.players[w] + ")"}`;
+        const wCol = PLAYER_COLOR_NAMES[w] || `P${w}`;
+        const wName = w >= 0 ? `P${w} (${wCol} · ${formatPlayerName(m.players[w])})` : "Draw";
+        bannerEl.textContent = `Match Complete — Winner: ${wName}`;
         bannerEl.classList.add("show");
       } else if (f.step >= 50 && f.step <= 55) {
         bannerEl.textContent = "Comets Entering Solar System!";
