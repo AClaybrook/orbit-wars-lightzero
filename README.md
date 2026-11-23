@@ -81,8 +81,12 @@ python scripts/train_lightzero.py --algo gumbel_muzero --mode bot --ctree --max-
 ### Benchmark & Export Replays
 
 ```bash
-# Benchmark heuristic and online MCTS agents against random and starter
-python scripts/evaluate.py --candidate heuristic --opponents random starter --games 10
+# Download open-source community benchmark bots (into gitignored external/opponents/)
+python scripts/fetch_opponents.py
+
+# Benchmark heuristic and online MCTS agents (2P 1v1 or 4P FFA)
+python scripts/evaluate.py --candidate heuristic --opponents random starter kvatsa5 wd_bestv6 --players 2 --games 6
+python scripts/evaluate.py --candidate heuristic --opponents starter kvatsa5 wd_bestv6 --players 4 --games 4
 python scripts/evaluate.py --candidate mcts --opponents random starter heuristic --games 6 --sims 16
 
 # Benchmark with a trained LightZero checkpoint
