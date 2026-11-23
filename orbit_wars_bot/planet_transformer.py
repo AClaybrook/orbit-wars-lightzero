@@ -675,6 +675,68 @@ class PlanetTransformerAgent:
         probs = F.softmax(logits, dim=-1).mean(dim=0).cpu().numpy()  # (N, N+1)
         mean_fracs = fracs.mean(dim=0).cpu().numpy()  # (N, N)
 
+        return self._decode_plan(
+            enc,
+            probs,
+            mean_fracs,
+            launch_threshold=self.launch_threshold,
+            force_all_in=self.force_all_in,
+            max_speed=max_speed,
+        )
+
+    @torch.no_grad()
+    def predict_probs_and_value(
+        self,
+        enc: EncodedPlanetState,
+        *,
+        use_rot_tta: Optional[bool] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, float]:
+        """Run the Transformer on ``enc`` and return ``(probs, mean_fracs, value)``."""
+        n = len(enc.planet_ids)
+        if n == 0:
+            return np.zeros((0, 1), dtype=np.float32), np.zeros((0, 0), dtype=np.float32), 0.0
+        tta = self.use_rot_tta if use_rot_tta is None else bool(use_rot_tta)
+        if tta:
+            pf_batch = np.stack([apply_d4_planet_feats(enc.planet_feats, k_rot=k) for k in range(4)], axis=0)
+            tf_batch = np.broadcast_to(enc.timeline_feats[None], (4, n, TIMELINE_HORIZON, TIMELINE_FEAT_DIM)).copy()
+            ef_batch = np.broadcast_to(enc.edge_feats[None], (4, n, n, EDGE_FEAT_DIM)).copy()
+            pm_batch = np.ones((4, n), dtype=bool)
+        else:
+            pf_batch = enc.planet_feats[None]
+            tf_batch = enc.timeline_feats[None]
+            ef_batch = enc.edge_feats[None]
+            pm_batch = np.ones((1, n), dtype=bool)
+
+        logits, fracs, vals = self.model(
+            torch.from_numpy(pf_batch).to(self.device),
+            torch.from_numpy(tf_batch).to(self.device),
+            torch.from_numpy(ef_batch).to(self.device),
+            torch.from_numpy(pm_batch).to(self.device),
+        )
+        legal = torch.from_numpy(enc.legal_edges).to(self.device)
+        mask = torch.cat([torch.ones((n, 1), dtype=torch.bool, device=self.device), legal], dim=-1)
+        logits = logits.masked_fill(~mask.unsqueeze(0), -1e9)
+        probs = F.softmax(logits, dim=-1).mean(dim=0).cpu().numpy()
+        mean_fracs = fracs.mean(dim=0).cpu().numpy()
+        val = float(vals.mean().item())
+        return probs, mean_fracs, val
+
+    def _decode_plan(
+        self,
+        enc: EncodedPlanetState,
+        probs: np.ndarray,
+        mean_fracs: np.ndarray,
+        *,
+        launch_threshold: float,
+        force_all_in: bool,
+        max_speed: float,
+        overrides: Optional[Dict[int, int]] = None,
+    ) -> List[List[float]]:
+        """Convert per-planet probabilities (+ optional per-planet overrides) into Kaggle moves.
+
+        ``overrides`` maps ``planet_idx -> action_class`` where ``0`` = HOLD and ``1 + j`` = target ``j``.
+        """
+        n = len(enc.planet_ids)
         expiring_set = set(enc.expiring_comet_indices)
         moves: List[List[float]] = []
 
@@ -683,14 +745,20 @@ class PlanetTransformerAgent:
                 continue
             if not np.any(enc.legal_edges[i]):
                 continue
-            p_launch = 1.0 - float(probs[i, 0])
             forced = i in expiring_set
-            if (p_launch < self.launch_threshold) and (not forced):
-                continue
 
-            target_probs = probs[i, 1:]
-            best_j = int(np.argmax(target_probs))
-            if not enc.legal_edges[i, best_j]:
+            if overrides is not None and i in overrides and not forced:
+                cls = int(overrides[i])
+                if cls == 0:
+                    continue
+                best_j = cls - 1
+            else:
+                p_launch = 1.0 - float(probs[i, 0])
+                if (p_launch < launch_threshold) and (not forced):
+                    continue
+                best_j = int(np.argmax(probs[i, 1:]))
+
+            if best_j < 0 or best_j >= n or not enc.legal_edges[i, best_j]:
                 continue
 
             src_row = enc.planet_rows[i]
@@ -699,7 +767,7 @@ class PlanetTransformerAgent:
             if avail <= 0:
                 continue
 
-            if self.force_all_in or forced:
+            if force_all_in or forced:
                 send_ships = avail
             else:
                 f = float(mean_fracs[i, best_j])
@@ -724,6 +792,181 @@ class PlanetTransformerAgent:
         return moves
 
 
+class SearchPlanetTransformerAgent(PlanetTransformerAgent):
+    """AlphaZero-style value-guided lookahead search over ``PlanetTimelineTransformer``.
+
+    Uses the Transformer's per-planet policy distribution to propose up to 6 diverse
+    high-probability full-turn plans (varying launch tempo + flipping the highest-entropy
+    borderline planets), rolls each candidate forward in ``FastOrbitSim`` with active
+    opponent responses, and selects the plan with the highest blended neural + tactical
+    value under a strict wall-clock budget.
+    """
+
+    def __init__(
+        self,
+        checkpoint_path: str | Path,
+        *,
+        launch_threshold: float = 0.50,
+        use_rot_tta: bool = True,
+        rollout_horizon: int = 10,
+        time_budget_sec: float = 0.22,
+        neural_value_weight: float = 0.65,
+        device: str = "cpu",
+    ) -> None:
+        super().__init__(
+            checkpoint_path=checkpoint_path,
+            launch_threshold=launch_threshold,
+            use_rot_tta=use_rot_tta,
+            device=device,
+        )
+        self.rollout_horizon = max(2, int(rollout_horizon))
+        self.time_budget_sec = float(time_budget_sec)
+        self.neural_value_weight = float(neural_value_weight)
+
+    def _plan_key(self, moves: Sequence[Sequence[float]]) -> Tuple[Tuple[int, int, int], ...]:
+        return tuple(sorted((int(m[0]), int(round(float(m[1]) * 100.0)), int(m[2])) for m in moves))
+
+    def _plan_log_prior(
+        self,
+        enc: EncodedPlanetState,
+        probs: np.ndarray,
+        moves: Sequence[Sequence[float]],
+    ) -> float:
+        by_src = {int(m[0]): m for m in moves}
+        lp = 0.0
+        for i in range(len(enc.planet_ids)):
+            if not enc.owned_mask[i] or not np.any(enc.legal_edges[i]):
+                continue
+            pid = enc.planet_ids[i]
+            if pid not in by_src:
+                lp += math.log(max(1e-4, float(probs[i, 0])))
+            else:
+                lp += math.log(max(1e-4, float(1.0 - probs[i, 0])))
+        return lp
+
+    @torch.no_grad()
+    def act(self, obs: Any, config: Any = None) -> List[List[float]]:
+        import time
+
+        from orbit_wars_bot.fast_sim import FastOrbitSim
+        from orbit_wars_bot.features import evaluate_state
+        from orbit_wars_bot.heuristic_bot import heuristic_moves
+
+        t_start = time.perf_counter()
+        deadline = t_start + self.time_budget_sec
+        max_speed = float(_obs_get(config, "shipSpeed", DEFAULT_SHIP_SPEED)) if config else DEFAULT_SHIP_SPEED
+
+        enc = extract_planet_features(obs, max_speed=max_speed)
+        n = len(enc.planet_ids)
+        if n == 0 or not np.any(enc.owned_mask):
+            return []
+
+        probs, mean_fracs, _ = self.predict_probs_and_value(enc, use_rot_tta=self.use_rot_tta)
+
+        # Build diverse candidate plans from the Transformer's posterior
+        raw_candidates: List[List[List[float]]] = [
+            self._decode_plan(enc, probs, mean_fracs, launch_threshold=self.launch_threshold, force_all_in=False, max_speed=max_speed),
+            self._decode_plan(enc, probs, mean_fracs, launch_threshold=0.35, force_all_in=False, max_speed=max_speed),
+            self._decode_plan(enc, probs, mean_fracs, launch_threshold=0.65, force_all_in=False, max_speed=max_speed),
+            self._decode_plan(enc, probs, mean_fracs, launch_threshold=0.45, force_all_in=True, max_speed=max_speed),
+        ]
+
+        # Identify top-2 highest-entropy owned planets and propose single-planet flips
+        entropies: List[Tuple[float, int, int]] = []
+        for i in range(n):
+            if not enc.owned_mask[i] or not np.any(enc.legal_edges[i]):
+                continue
+            p_row = probs[i]
+            ent = -float(np.sum(p_row * np.log(np.clip(p_row, 1e-8, 1.0))))
+            top2 = np.argsort(p_row)[-2:][::-1]
+            if len(top2) >= 2 and p_row[top2[1]] >= 0.12:
+                entropies.append((ent, i, int(top2[1])))
+        entropies.sort(reverse=True)
+        for _, p_idx, alt_cls in entropies[:2]:
+            raw_candidates.append(
+                self._decode_plan(
+                    enc,
+                    probs,
+                    mean_fracs,
+                    launch_threshold=self.launch_threshold,
+                    force_all_in=False,
+                    max_speed=max_speed,
+                    overrides={p_idx: alt_cls},
+                )
+            )
+
+        # Deduplicate candidate plans
+        candidates: List[List[List[float]]] = []
+        seen_keys = set()
+        for plan in raw_candidates:
+            k = self._plan_key(plan)
+            if k not in seen_keys:
+                seen_keys.add(k)
+                candidates.append(plan)
+
+        if len(candidates) <= 1 or time.perf_counter() >= deadline - 0.03:
+            return candidates[0] if candidates else []
+
+        base_sim = FastOrbitSim.from_observation(obs, config)
+        player = enc.player
+        n_players = base_sim.num_agents
+
+        # Precompute opponent turn-0 response once so every candidate faces the same strong opponent
+        opp_moves_t0: Dict[int, List[List[float]]] = {}
+        for opp_id in range(n_players):
+            if opp_id != player:
+                opp_moves_t0[opp_id] = heuristic_moves(base_sim, opp_id)
+
+        best_plan = candidates[0]
+        best_score = -1e9
+        half_step = max(2, self.rollout_horizon // 2)
+
+        for idx, plan in enumerate(candidates):
+            if idx > 0 and time.perf_counter() >= deadline:
+                break
+            sim = base_sim.clone()
+            actions_t0: List[List[List[float]]] = [[] for _ in range(n_players)]
+            actions_t0[player] = plan
+            for opp_id, omv in opp_moves_t0.items():
+                actions_t0[opp_id] = omv
+            sim.step(actions_t0)
+
+            for step_i in range(1, self.rollout_horizon):
+                if sim.done:
+                    break
+                if step_i == half_step:
+                    # Active mid-rollout replan for all players
+                    step_acts: List[List[List[float]]] = [[] for _ in range(n_players)]
+                    for pid_cur in range(n_players):
+                        step_acts[pid_cur] = heuristic_moves(sim, pid_cur)
+                    sim.step(step_acts)
+                else:
+                    sim.step([[] for _ in range(n_players)])
+
+            if sim.done:
+                win_pid = sim.winner()
+                if win_pid == player:
+                    v_total = 1.0
+                elif win_pid < 0:
+                    v_total = 0.0
+                else:
+                    v_total = -1.0
+            else:
+                h_val = float(evaluate_state(sim, player))
+                fut_obs = sim.to_observation(player=player)
+                fut_enc = extract_planet_features(fut_obs, player=player, max_speed=max_speed)
+                _, _, nn_val = self.predict_probs_and_value(fut_enc, use_rot_tta=False)
+                v_total = self.neural_value_weight * nn_val + (1.0 - self.neural_value_weight) * h_val
+
+            prior_bonus = 0.015 * self._plan_log_prior(enc, probs, plan)
+            score = v_total + prior_bonus
+            if score > best_score:
+                best_score = score
+                best_plan = plan
+
+        return best_plan
+
+
 def create_planet_transformer_agent(
     checkpoint_path: str | Path,
     *,
@@ -737,6 +980,29 @@ def create_planet_transformer_agent(
         launch_threshold=launch_threshold,
         use_rot_tta=use_rot_tta,
         force_all_in=force_all_in,
+    )
+
+    def _kaggle_agent(obs: Any, config: Any = None) -> List[List[float]]:
+        return agent_obj.act(obs, config)
+
+    return _kaggle_agent
+
+
+def create_search_planet_transformer_agent(
+    checkpoint_path: str | Path,
+    *,
+    launch_threshold: float = 0.50,
+    use_rot_tta: bool = True,
+    rollout_horizon: int = 10,
+    time_budget_sec: float = 0.22,
+):
+    """Factory returning a value-guided lookahead ``PlanetTimelineTransformer`` Kaggle agent."""
+    agent_obj = SearchPlanetTransformerAgent(
+        checkpoint_path=checkpoint_path,
+        launch_threshold=launch_threshold,
+        use_rot_tta=use_rot_tta,
+        rollout_horizon=rollout_horizon,
+        time_budget_sec=time_budget_sec,
     )
 
     def _kaggle_agent(obs: Any, config: Any = None) -> List[List[float]]:

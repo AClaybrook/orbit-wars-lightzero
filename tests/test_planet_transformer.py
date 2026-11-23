@@ -17,6 +17,7 @@ from orbit_wars_bot.planet_transformer import (
     TIMELINE_HORIZON,
     PlanetTimelineTransformer,
     PlanetTransformerAgent,
+    SearchPlanetTransformerAgent,
     apply_d4_planet_feats,
     extract_planet_features,
     match_action_to_target,
@@ -99,3 +100,58 @@ def test_model_forward_and_match_action_to_target(tmp_path: Path):
         assert enc.owned_mask[src_i]
         assert src_i != dst_i
         assert 0.0 < frac <= 1.0
+
+
+def test_search_planet_transformer_agent_2p_and_4p(tmp_path: Path):
+    model = PlanetTimelineTransformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
+    ckpt_path = tmp_path / "pt_search_test.pt"
+    torch.save({"model_config": model.config, "model_state_dict": model.state_dict()}, ckpt_path)
+    agent = SearchPlanetTransformerAgent(
+        ckpt_path,
+        launch_threshold=0.10,
+        use_rot_tta=False,
+        rollout_horizon=6,
+        time_budget_sec=0.25,
+    )
+    for n_players in (2, 4):
+        env = make("orbit_wars", configuration={"seed": 100 + n_players})
+        obs = env.reset(n_players)[0]["observation"]
+        enc = extract_planet_features(obs, player=0)
+        t0 = time.perf_counter()
+        moves = agent.act(obs)
+        dt_ms = (time.perf_counter() - t0) * 1000.0
+        assert dt_ms < 600.0
+        assert isinstance(moves, list)
+        owned_pids = {enc.planet_ids[i] for i in range(len(enc.planet_ids)) if enc.owned_mask[i]}
+        for mv in moves:
+            assert len(mv) == 3
+            assert int(mv[0]) in owned_pids
+            assert int(mv[2]) >= 1
+
+
+def test_rl_ppo_rollout_and_update():
+    import copy
+    import sys
+
+    scripts_dir = str(Path(__file__).resolve().parent.parent / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from rl_finetune_transformer import collect_episode, ppo_update
+
+    policy = PlanetTimelineTransformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
+    anchor = copy.deepcopy(policy)
+    anchor.eval()
+    opt = torch.optim.AdamW(policy.parameters(), lr=1e-3)
+
+    before = [p.detach().clone() for p in policy.parameters()]
+    batch, stats = collect_episode(
+        policy, anchor, num_players=2, opponent_kind="heuristic", seed=77, max_steps=15
+    )
+    assert len(batch["returns"]) > 0
+    assert stats["steps"] > 0
+    metrics = ppo_update(policy, anchor, opt, batch, ppo_epochs=1, batch_size=16)
+    assert np.isfinite(metrics["loss"])
+    assert np.isfinite(metrics["kl"])
+    assert metrics["kl"] >= 0.0
+    changed = any(not torch.allclose(b, a) for b, a in zip(before, policy.parameters()))
+    assert changed
