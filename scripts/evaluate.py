@@ -127,6 +127,11 @@ def resolve_agent(spec: str, checkpoint: str | None = None, sims: int = 20, time
             num_simulations=sims,
             time_budget_sec=time_budget,
         )
+    if spec in ("planet_transformer", "transformer", "pt"):
+        from orbit_wars_bot.planet_transformer import create_planet_transformer_agent
+
+        ckpt_path = checkpoint or str(REPO_ROOT / "checkpoints" / "planet_transformer_best.pt")
+        return create_planet_transformer_agent(checkpoint_path=ckpt_path)
     if spec == "kvatsa5":
         kv_path = OPP_DIR / "kvatsa5_agent.py"
         if not kv_path.is_file():
