@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Orbit Wars AI — PlanetTransformer Gen 5 RL &amp; Lookahead Report</title>
+  <title>Orbit Wars AI — High-Elo Model Progression &amp; Benchmark Report</title>
   <style>
     :root {
       --bg: #0f172a; --card: #1e293b; --border: #334155; --text: #f1f5f9;
@@ -35,15 +35,15 @@
     .kpi-val { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; margin: 4px 0; }
     .ok { color: var(--success); } .warn { color: var(--warning); } .err { color: var(--error); } .pri { color: var(--primary); }
     .tabs { display: flex; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 16px; }
-    .tab-btn, .suite-btn, .elo-btn { font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; padding: 7px 13px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--muted); }
-    .tab-btn.active, .suite-btn.active, .elo-btn.active { background: var(--primary); color: var(--primary-fg); border-color: var(--primary); }
+    .tab-btn, .elo-btn { font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; padding: 7px 13px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--muted); }
+    .tab-btn.active, .elo-btn.active { background: var(--primary); color: var(--primary-fg); border-color: var(--primary); }
     .panel { display: none; } .panel.active { display: block; }
     .stack { display: flex; flex-direction: column; gap: 14px; }
-    .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
-    .bar-row { display: grid; grid-template-columns: 245px 1fr 190px; align-items: center; gap: 10px; font-size: 12.5px; margin: 8px 0; }
+    .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+    .bar-row { display: grid; grid-template-columns: 245px 1fr 195px; align-items: center; gap: 10px; font-size: 12.5px; margin: 8px 0; }
     .bar-track { height: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
     .bar-fill { height: 100%; border-radius: 5px; }
-    .fill-ok { background: var(--success); } .fill-pri { background: var(--primary); } .fill-warn { background: var(--warning); } .fill-err { background: var(--error); } .fill-muted { background: var(--muted); opacity: 0.6; }
+    .fill-ok { background: var(--success); } .fill-pri { background: var(--primary); } .fill-warn { background: var(--warning); } .fill-muted { background: var(--muted); opacity: 0.6; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 10px; }
     th, td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; }
@@ -57,97 +57,108 @@
   <div class="wrap">
     <header>
       <div>
-        <div class="meta">AClaybrook/orbit-wars-lightzero • Gen 1 → Gen 5 • League PPO + Moving EMA Teacher KL + Lookahead</div>
-        <h1>Orbit Wars AI — PlanetTransformer Gen 5 RL &amp; Lookahead Report</h1>
-        <p>Calibrated to official Kaggle leaderboard scores: <span class="mono">#1 Isaiah @ Tufa Labs = 1865.1</span>, <span class="mono">#2 Hober Malloc = 1800.1</span>, <span class="mono">#10 = 1681.5</span>.</p>
+        <div class="meta">AClaybrook/orbit-wars-lightzero • High-Elo Neural Tier • Gen 3 → Gen 6 (1.89M)</div>
+        <h1>Orbit Wars AI — High-Elo Progression &amp; Benchmark Report</h1>
+        <p>Elo-fair comparisons for competitive neural generations (&gt;1,200). Gen 1–2 heuristic ladders preserved in the Historical Archive tab.</p>
       </div>
       <div class="badges">
         <a href="gameplay_viewer.html" class="badge info">▶ Watch Live Gameplay</a>
         <span class="badge ok">33/33 Tests Passing</span>
-        <span class="badge info">PT-v3-RL+Search: ~1,650 Est. Kaggle</span>
+        <span class="badge info">Best: 1.89M PT-v4-Large (~1,670 Est.)</span>
       </div>
     </header>
 
     <section class="kpis">
       <div class="card highlight-card">
-        <div class="meta">PT-v3-RL + Search (Est.)</div>
-        <div class="kpi-val ok">~1,620–1,680</div>
-        <p>Near #10 (1681.5) • 125 ms mean</p>
+        <div class="meta">Current Best (1.89M PT-v4)</div>
+        <div class="kpi-val ok">~1,640–1,700</div>
+        <p>Near #10 (1681.5) • 37 ms pure</p>
       </div>
       <div class="card rec-card">
-        <div class="meta">Lookahead vs. Same Pure Net</div>
-        <div class="kpi-val ok">91.7% (11–1)</div>
-        <p>5–1 (Gen 4) + 6–0 (Gen 5) • 13% budget</p>
+        <div class="meta">Gen 6 vs. Gen 5 (Elo-Fair 2P)</div>
+        <div class="kpi-val ok">4–2 (66.7%)</div>
+        <p>+120 Elo over 0.59M PT-v3-RL</p>
       </div>
       <div class="card">
-        <div class="meta">PT-v3-RL Pure (28 ms)</div>
-        <div class="kpi-val pri">20–0 (100%)</div>
-        <p>LZ v3, subham 2P/4P, 3× wd_bestv6</p>
+        <div class="meta">4P KO Speed (vs. Top Heuristics)</div>
+        <div class="kpi-val pri">135–142 ticks</div>
+        <p>8–0 sweep • 46–48t faster than Gen 5</p>
       </div>
       <div class="card">
-        <div class="meta">Boss Benchmark (#2 / 4,729)</div>
+        <div class="meta">Target Boss (#2 / 4,729)</div>
         <div class="kpi-val warn">1,800.1</div>
-        <p>Hober Malloc (10B RL) • #1 = 1865.1</p>
+        <p>Hober Malloc • Peak 135t survival</p>
       </div>
     </section>
 
     <nav class="tabs">
-      <button class="tab-btn active" data-tab="gen5">1. Gen 5 Ablation &amp; Kaggle Elo</button>
-      <button class="tab-btn" data-tab="elo">2. Local 6-Bot Elo Ladders</button>
-      <button class="tab-btn" data-tab="results">3. Matchup Suites</button>
-      <button class="tab-btn" data-tab="commands">4. Pipeline &amp; Commands</button>
+      <button class="tab-btn active" data-tab="high">1. High-Elo Ladder &amp; Fair Matchups</button>
+      <button class="tab-btn" data-tab="boss">2. Boss Sparring &amp; Search Study</button>
+      <button class="tab-btn" data-tab="archive">3. Historical Archive (Gen 1–2 &amp; Heuristics)</button>
+      <button class="tab-btn" data-tab="commands">4. Training Commands</button>
     </nav>
 
-    <section id="tab-gen5" class="panel active stack">
+    <section id="tab-high" class="panel active stack">
       <div class="card">
-        <h2>Kaggle-Calibrated Skill Rating Progression (Gen 1 → Gen 5 vs. Official Leaderboard)</h2>
-        <p>Anchored to official Kaggle scores: #1 Isaiah @ Tufa Labs (1865.1), #2 Hober Malloc (1800.1), #10 Cutoff (1681.5), subham_v14 (~1,224).</p>
+        <h2>Upper-Tier Skill Rating Ladder (Neural Models vs. Official Kaggle Top 10)</h2>
+        <p>Anchored to official Kaggle scores: #1 Isaiah @ Tufa Labs (1865.1), #2 Hober Malloc (1800.1), #10 Cutoff (1681.5).</p>
         <div id="kaggle-elo-bars" style="margin-top:12px;"></div>
       </div>
 
       <div class="card">
-        <h2>Controlled Ablation: BC → DAgger → PPO → League PPO → Lookahead Search</h2>
-        <p>Lookahead adds +300–380 Elo (11–1 vs. exact same weights) at ~125 ms mean (only ~13% of Kaggle's 1,000 ms turn cap).</p>
+        <h2>Elo-Fair Neural Head-to-Head &amp; 4P Efficiency Table</h2>
+        <p>Compares each generation against its immediate predecessor, #2 Hober Malloc (1800.1), and 4P KO speed (avg ticks vs. 3× subham_v14 / 3× wd_bestv6).</p>
         <div style="overflow-x:auto;">
           <table>
             <thead>
               <tr>
-                <th>Variant</th><th>Method</th><th class="num">vs. Pure Anchor</th>
-                <th class="num">vs. 3× subham (4P)</th><th class="num">vs. 3× wd_v6 (4P)</th>
-                <th class="num">vs. #2 Hober (2P)</th><th class="num">Mean (ms)</th>
+                <th>Model Generation</th><th>Params / Method</th><th class="num">vs. Prior Gen (2P)</th>
+                <th class="num">4P KO vs. 3× subham</th><th class="num">4P KO vs. 3× wd_v6</th>
+                <th class="num">vs. #2 Hober (1800.1)</th><th class="num">Mean (ms)</th>
               </tr>
             </thead>
             <tbody id="ablation-tbody"></tbody>
           </table>
         </div>
       </div>
+    </section>
 
-      <div class="grid-3">
-        <div class="card rec-card">
-          <h3 class="ok">Gen 5: League PPO (PT-v3-RL)</h3>
-          <p>84 more mixed 2P/4P episodes (~10.8K states) against frozen pool <span class="mono">{v1, v2, v2_rl}</span> + <span class="mono">subham_v14</span> + <span class="mono">Heuristic v2</span> with zero-planet early reset &amp; moving EMA teacher KL. Now <strong>20–0 undefeated</strong> at 28–36 ms/turn, upgrading 4P vs. 3× wd_bestv6 from <strong>3–1 → 4–0</strong>.</p>
+    <section id="tab-boss" class="panel stack">
+      <div class="card">
+        <h2>Lookahead Internalization &amp; Compute Tradeoff (Search vs. Exact Same Weights)</h2>
+        <p>As model capacity scaled 3.2× (0.59M → 1.89M), pure neural weights internalized much of the 10-tick lookahead foresight.</p>
+        <div id="search-bars" style="margin-top:12px;"></div>
+        <div style="overflow-x:auto;">
+          <table>
+            <thead>
+              <tr><th>Base Model</th><th>Search vs. Same Pure Net (2P)</th><th class="num">Pure Latency</th><th class="num">Search Latency</th><th class="num">vs. #2 Hober (Pure → Search)</th></tr>
+            </thead>
+            <tbody id="search-tbody"></tbody>
+          </table>
         </div>
+      </div>
+      <div class="grid-2">
         <div class="card highlight-card">
-          <h3 class="pri">Is Lookahead Worth the Compute?</h3>
-          <p><strong>YES at game time:</strong> crushed the exact same neural weights <strong>11–1 (91.7%)</strong> across Gen 4 (5–1) &amp; Gen 5 (6–0) and swept 3× wd_bestv6 4–0, using only <strong>~125 ms</strong> (~13% of Kaggle's 1s cap). <strong>NO during RL rollouts:</strong> pure 28 ms rollouts generate 4–15× more games/min.</p>
+          <h3 class="pri">Why Did 1.89M Beat 0.59M by 4–2 (66.7%)?</h3>
+          <p>In Elo math, a <strong>66.7% (4–2)</strong> win rate equals a <strong>+120 Elo gap</strong> — nearly double the gap between #1 Isaiah (1865.1) and #2 Hober Malloc (1800.1, +65 Elo ≈ 59%). Above 1,550 Elo, symmetric 2P games rarely produce 6–0 sweeps against another strong Transformer.</p>
         </div>
         <div class="card">
-          <h3 class="warn">Honest Negative Ablation (PT-v3-AZ)</h3>
-          <p>Distilling 2,759 pure search-selfplay states (61% launch rate) without mixing in the base replay buffer lost <strong>0–1–5</strong> to PT-v3-RL — proving lookahead's aggression relies on its 10-tick counter-snipe check unless stabilized by replay mixing + KL.</p>
+          <h3 class="warn">Key Bottleneck vs. #2 Hober Malloc (1800.1)</h3>
+          <p>1) Previous datasets used fast <span class="mono">TTA=0</span> Hober Malloc (~1,680) instead of full 8×-TTA <span class="mono">1800.1</span> Hober Malloc. 2) Blocked-shot targets silently dropped to HOLD. 3) 1.89M only trained 15 epochs (still under-trained vs. 0.59M's 26 epochs).</p>
         </div>
       </div>
     </section>
 
-    <section id="tab-elo" class="panel stack">
+    <section id="tab-archive" class="panel stack">
       <div class="card">
         <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px;">
           <div>
-            <h2>Local 6-Bot Elo Leaderboard (Anchored: Kaggle Starter = 1000)</h2>
-            <p id="elo-subtitle">60 official 2P games (4 slot-balanced games/pair) • Bradley-Terry MLE + 95% bootstrap CI.</p>
+            <h2>Historical Archive — Early 6-Bot Heuristic &amp; LightZero v3 Elo Ladders</h2>
+            <p id="elo-subtitle">Preserved from Gen 1–2 (60 official 2P games + 18 mixed 4P tables, anchored to Kaggle Starter = 1000).</p>
           </div>
           <div style="display:flex; gap:6px; flex-wrap:wrap;">
-            <button class="elo-btn active" data-elo="2p">2P Round-Robin (60g)</button>
-            <button class="elo-btn" data-elo="4p">4P FFA Mixed-Table (18t)</button>
+            <button class="elo-btn active" data-elo="2p">Archive: 2P (60g)</button>
+            <button class="elo-btn" data-elo="4p">Archive: 4P FFA (18t)</button>
           </div>
         </div>
         <div id="elo-bars"></div>
@@ -155,46 +166,24 @@
           <table><thead id="elo-thead"></thead><tbody id="elo-tbody"></tbody></table>
         </div>
       </div>
-    </section>
-
-    <section id="tab-results" class="panel stack">
       <div class="card">
-        <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px;">
-          <div>
-            <h2>Dedicated Official Kaggle Environment Benchmarks</h2>
-            <p>Slot-balanced matches in <span class="mono">kaggle_environments.make("orbit_wars")</span>.</p>
-          </div>
-          <div style="display:flex; gap:6px; flex-wrap:wrap;">
-            <button class="suite-btn active" data-suite="pt_v3_rl">PT-v3-RL (Gen 5)</button>
-            <button class="suite-btn" data-suite="pt_v2_rl">PT-v2+RL (Gen 4)</button>
-            <button class="suite-btn" data-suite="lz_v3">LightZero v3 (Gen 2)</button>
-          </div>
-        </div>
-        <div id="winrate-bars"></div>
-        <div style="overflow-x:auto;">
-          <table>
-            <thead>
-              <tr><th>Matchup</th><th>Candidate</th><th>W-D-L</th><th class="num">Win %</th><th class="num">Avg Rank</th><th class="num">Avg Ticks</th><th class="num">Mean (ms)</th></tr>
-            </thead>
-            <tbody id="benchmark-tbody"></tbody>
-          </table>
-        </div>
+        <h3>Historical Gen 1–2 Progression Summary</h3>
+        <p><strong>Gen 1 Heuristic v2 (~1,220):</strong> 6–0 vs OW-Proto, 3–3 vs subham_v14 (2P). <strong>Gen 2 LightZero v3 (~1,285):</strong> #1 in local 6-bot 2P ladder (2300.3 local Elo, 19–1), beat subham_v14 4–2 (2P), 50% vs 3× wd_bestv6 (4P). Superseded by Gen 3+ PlanetTransformers (swept LightZero v3 6–0 in 113–118 ticks).</p>
       </div>
     </section>
 
     <section id="tab-commands" class="panel stack">
       <div class="card">
-        <h3>Reproducible Gen 5 League PPO + Search Commands</h3>
-        <pre># Gen 5 League PPO + Historical Pool + Moving EMA Teacher KL + Zero-Planet Early Reset
-python scripts/rl_finetune_transformer.py \
-  --init checkpoints/planet_transformer_v2_rl.pt \
-  --pool checkpoints/planet_transformer_v1_backup.pt checkpoints/planet_transformer_v2.pt \
-  --out checkpoints/planet_transformer_v3_rl.pt \
-  --iterations 4 --episodes-per-iter 12 --workers 2 --lr 4.5e-5 --kl-coef 0.10 --ent-coef 0.0015
+        <h3>Reproducible Gen 6 Scaled Training &amp; Evaluation Commands</h3>
+        <pre># Train 1.89M PlanetTimelineTransformer (d=192, h=6, L=6, ff=384)
+python scripts/train_planet_transformer.py --dataset-cache pt_dataset_gen6.npz \
+  --d-model 192 --n-heads 6 --n-layers 6 --dim-ff 384 --epochs 15 --batch-size 96 --lr 1.5e-3 \
+  --out checkpoints/planet_transformer_v4_large.pt
 
-# Evaluate pure policy (28 ms) vs. AlphaZero-style value-guided lookahead (~125 ms)
-python scripts/evaluate.py --candidate planet_transformer --opponents subham_v14 lightzero --games 6 --players 2
-python scripts/evaluate.py --candidate planet_transformer_search --opponents planet_transformer --games 6 --players 2
+# High-Elo head-to-head evaluation (pure vs. search vs. #2 Hober Malloc)
+python scripts/evaluate.py --candidate planet_transformer:checkpoints/planet_transformer_v4_large.pt \
+  --opponents planet_transformer:checkpoints/planet_transformer_v3_rl_latest.pt hober_malloc --games 6 --players 2
+python scripts/evaluate.py --candidate planet_transformer_search --opponents hober_malloc --games 6 --players 2
 pytest -v</pre>
       </div>
     </section>
@@ -205,27 +194,30 @@ pytest -v</pre>
       { name: "#1 Isaiah @ Tufa Labs (200M, B200s)", elo: 1865.1, tag: "Official Kaggle #1", ours: false, boss: true },
       { name: "#2 Hober Malloc (4.3M, 10B RL)", elo: 1800.1, tag: "Local Boss • Kaggle #2", ours: false, boss: true },
       { name: "#10 Kaggle Top-10 Cutoff", elo: 1681.5, tag: "Official #10 / 4,729", ours: false },
-      { name: "PT-v3-RL + Search (Ours — Gen 5)", elo: 1650, tag: "11–1 vs Pure • 125 ms", ours: true },
-      { name: "PT-v3-RL Pure (Ours — League PPO)", elo: 1565, tag: "20–0 Non-#2 • 28 ms", ours: true },
-      { name: "PT-v2+RL Pure (Ours — Gen 4 PPO)", elo: 1540, tag: "Gen 4 • 27 ms", ours: true },
-      { name: "PT-v1 Pure (Ours — 34g BC)", elo: 1430, tag: "Gen 3 • 29 ms", ours: true },
-      { name: "LightZero v3 (Ours — CNN + MCTS)", elo: 1285, tag: "Gen 2 • 130 ms", ours: true },
-      { name: "subham_v14 (3,588-line Heuristic)", elo: 1224, tag: "Kaggle ~1,224", ours: false },
-      { name: "Heuristic v2 (Ours — Rule-Based)", elo: 1220, tag: "Gen 1 • 7 ms", ours: true },
-      { name: "Kaggle Starter (Anchor)", elo: 600, tag: "Baseline", ours: false }
+      { name: "1.89M PT-v4-Large + Neural Search", elo: 1670, tag: "Gen 6 • 145 ms", ours: true },
+      { name: "1.89M PT-v4-Large Pure (Promoted)", elo: 1635, tag: "4–2 vs Gen 5 • 37 ms", ours: true },
+      { name: "0.59M PT-v3-RL Pure (Gen 5 PPO)", elo: 1565, tag: "Gen 5 • 28 ms", ours: true },
+      { name: "0.59M PT-v2+RL Pure (Gen 4 PPO)", elo: 1540, tag: "Gen 4 • 27 ms", ours: true },
+      { name: "0.59M PT-v1 Pure (Gen 3 BC)", elo: 1430, tag: "Gen 3 • 29 ms", ours: true },
+      { name: "LightZero v3 (Gen 2 CNN + MCTS)", elo: 1285, tag: "Gen 2 • Archive", ours: true },
+      { name: "subham_v14 (Top Heuristic Ceiling)", elo: 1224, tag: "Kaggle ~1,224", ours: false }
     ];
     const ABLATIONS = [
-      { name: "PT-v1 (Gen 3 BC)", method: "34g Hober BC (17 ep)", vsAnchor: "—", vsSub4: "1–3 (25%, rk 2.50)", vsWd4: "4–0 (100%)", vsBoss: "0–6 (117.2t)", ms: "29.0", hi: false },
-      { name: "PT-v2 (DAgger)", method: "+16g on-policy oracle", vsAnchor: "3–3 vs PT-v1", vsSub4: "4–0 (100%, rk 1.00)", vsWd4: "—", vsBoss: "—", ms: "26.9", hi: false },
-      { name: "PT-v2+RL (Gen 4)", method: "Self-Play PPO + KL", vsAnchor: "5–1 vs v1 & v2", vsSub4: "4–0 (100%, 130.8t)", vsWd4: "3–1 (75%)", vsBoss: "0–6 (109.2t)", ms: "27.2", hi: false },
-      { name: "PT-v3-RL (Gen 5 Pure)", method: "League PPO + EMA KL", vsAnchor: "6–6 vs PT-v2+RL", vsSub4: "4–0 (100%, rk 1.00)", vsWd4: "4–0 (100%)", vsBoss: "—", ms: "29.0", hi: true },
-      { name: "PT-v2+RL + Search", method: "Gen 4 + 10t lookahead", vsAnchor: "5–1 vs Pure (83%)", vsSub4: "—", vsWd4: "4–0 (100%)", vsBoss: "0–4 (121.0t)", ms: "118.1", hi: false },
-      { name: "PT-v3-RL + Search (Best)", method: "Gen 5 + 10t lookahead", vsAnchor: "6–0 vs Pure (100%)", vsSub4: "—", vsWd4: "—", vsBoss: "0–4 (116.8t)", ms: "131.9", hi: true },
-      { name: "PT-v3-AZ (Neg. Ablation)", method: "Search-only distill", vsAnchor: "0–1–5 vs PT-v3-RL", vsSub4: "1–3 (25%, 415t)", vsWd4: "3–1 (75%)", vsBoss: "—", ms: "28.0", hi: false }
+      { name: "Gen 6: 1.89M PT-v4-Large (Promoted)", method: "1.89M • 12.8K BC+DAgger", vsPrior: "4–2 vs Gen 5 (66.7%)", sub4: "4–0 (135.8t)", wd4: "4–0 (142.5t)", boss: "0–6 (111.2t, max 131t)", ms: "36.6", hi: true },
+      { name: "Gen 6: 1.89M PT-v4-Large + Search", method: "1.89M + Neural-Opp 10t", vsPrior: "2–2 vs 1.89M Pure", sub4: "—", wd4: "—", boss: "0–6 (119.2t, max 135t)", ms: "145.5", hi: true },
+      { name: "Gen 6: 1.89M PT-v4-Large-RL", method: "1.89M + 30-ep CPU PPO", vsPrior: "4–2 Gen 5 / 2–4 v4", sub4: "4–0 (141.5t)", wd4: "4–0 (178.2t)", boss: "—", ms: "37.4", hi: false },
+      { name: "Gen 5: 0.59M PT-v3-RL", method: "0.59M • League PPO+EMA", vsPrior: "6–6 vs Gen 4 (12g)", sub4: "4–0 (181.5t)", wd4: "4–0 (190.5t)", boss: "0–4 (116.8t w/S)", ms: "29.0", hi: false },
+      { name: "Gen 4: 0.59M PT-v2+RL", method: "0.59M • DAgger + PPO", vsPrior: "5–1 vs Gen 3 (83.3%)", sub4: "4–0 (130.8t)", wd4: "3–1 (75.0%)", boss: "0–6 (109.2t / 121t w/S)", ms: "27.2", hi: false },
+      { name: "Gen 3: 0.59M PT-v1", method: "0.59M • 34g BC", vsPrior: "6–0 vs LightZero v3", sub4: "1–3 (25.0%)", wd4: "4–0 (192.2t)", boss: "0–6 (117.2t)", ms: "29.0", hi: false }
+    ];
+    const SEARCH_STUDY = [
+      { model: "Gen 4: 0.59M PT-v2+RL", vsPure: "5–1 (83.3%)", wr: 83.3, pureMs: "27.2 ms", searchMs: "118.1 ms", boss: "109.2t → 121.0t" },
+      { model: "Gen 5: 0.59M PT-v3-RL", vsPure: "6–0 (100.0%)", wr: 100.0, pureMs: "29.9 ms", searchMs: "131.9 ms", boss: "— → 116.8t" },
+      { model: "Gen 6: 1.89M PT-v4-Large", vsPure: "2–2 (50.0%)", wr: 50.0, pureMs: "36.6 ms", searchMs: "145.5 ms", boss: "111.2t → 119.2t (max 135t)" }
     ];
     const ELO_2P = [
-      { name: "LightZero v3 (Ours)", elo: 2300.3, ci: [2044, 2980], wdl: "19-0-1", wr: 95.0, ours: true },
-      { name: "Heuristic v2 (Ours)", elo: 2070.0, ci: [1786, 2675], wdl: "16-0-4", wr: 80.0, ours: true },
+      { name: "LightZero v3 (Gen 2)", elo: 2300.3, ci: [2044, 2980], wdl: "19-0-1", wr: 95.0, ours: true },
+      { name: "Heuristic v2 (Gen 1)", elo: 2070.0, ci: [1786, 2675], wdl: "16-0-4", wr: 80.0, ours: true },
       { name: "wd_heuristic", elo: 1796.3, ci: [1561, 2235], wdl: "12-0-8", wr: 60.0, ours: false },
       { name: "wd_bestv6 (CMA-ES)", elo: 1575.6, ci: [1347, 1772], wdl: "9-0-11", wr: 45.0, ours: false },
       { name: "Kaggle Starter (Anchor)", elo: 1000.0, ci: [1000, 1000], wdl: "4-0-16", wr: 20.0, ours: false },
@@ -233,68 +225,40 @@ pytest -v</pre>
     ];
     const ELO_4P = [
       { name: "wd_bestv6 (CMA-ES)", elo: 1377.3, ci: [1187, 1765], wr: 33.3, top2: 91.7, avgPlc: 1.75, ours: false },
-      { name: "Heuristic v2 (Ours)", elo: 1357.8, ci: [1047, 1924], wr: 66.7, top2: 75.0, avgPlc: 1.75, ours: true },
-      { name: "LightZero v3 (Ours)", elo: 1323.5, ci: [1151, 1649], wr: 25.0, top2: 66.7, avgPlc: 2.08, ours: true },
+      { name: "Heuristic v2 (Gen 1)", elo: 1357.8, ci: [1047, 1924], wr: 66.7, top2: 75.0, avgPlc: 1.75, ours: true },
+      { name: "LightZero v3 (Gen 2)", elo: 1323.5, ci: [1151, 1649], wr: 25.0, top2: 66.7, avgPlc: 2.08, ours: true },
       { name: "wd_heuristic", elo: 1104.8, ci: [894, 1382], wr: 16.7, top2: 33.3, avgPlc: 2.83, ours: false },
       { name: "Kaggle Starter (Anchor)", elo: 1000.0, ci: [1000, 1000], wr: 8.3, top2: 25.0, avgPlc: 3.08, ours: false },
       { name: "kvatsa5 (Predator v3)", elo: 933.1, ci: [626, 1124], wr: 0.0, top2: 8.3, avgPlc: 3.50, ours: false }
     ];
-    const SUITES = {
-      pt_v3_rl: [
-        { opp: "LightZero v3 (2P)", cand: "PT-v3-RL", wdl: "6-0-0", wr: 100.0, rank: "1.00", ticks: 118.8, ms: 35.3 },
-        { opp: "subham_v14 (2P)", cand: "PT-v3-RL", wdl: "6-0-0", wr: 100.0, rank: "1.00", ticks: 106.5, ms: 36.5 },
-        { opp: "3× subham_v14 (4P)", cand: "PT-v3-RL", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 181.5, ms: 28.3 },
-        { opp: "3× wd_bestv6 (4P)", cand: "PT-v3-RL", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 190.5, ms: 29.0 },
-        { opp: "PT-v3-RL Pure (2P)", cand: "PT-v3-RL+Search", wdl: "6-0-0", wr: 100.0, rank: "1.00", ticks: 153.2, ms: 131.9 },
-        { opp: "PT-v2+RL (2P, 12g)", cand: "PT-v3-RL", wdl: "6-0-6", wr: 50.0, rank: "1.50", ticks: 156.4, ms: 29.9 },
-        { opp: "#2 Hober Malloc (2P)", cand: "PT-v3-RL+Search", wdl: "0-0-4", wr: 0.0, rank: "2.00", ticks: 116.8, ms: 104.3 }
-      ],
-      pt_v2_rl: [
-        { opp: "LightZero v3 (2P)", cand: "PT-v2+RL", wdl: "6-0-0", wr: 100.0, rank: "1.00", ticks: 113.3, ms: 34.4 },
-        { opp: "subham_v14 (2P)", cand: "PT-v2+RL", wdl: "6-0-0", wr: 100.0, rank: "1.00", ticks: 104.5, ms: 32.1 },
-        { opp: "3× subham_v14 (4P)", cand: "PT-v2+RL", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 130.8, ms: 27.2 },
-        { opp: "PT-v1 (2P)", cand: "PT-v2+RL", wdl: "5-0-1", wr: 83.3, rank: "1.17", ticks: 151.5, ms: 30.3 },
-        { opp: "PT-v2 DAgger (2P)", cand: "PT-v2+RL", wdl: "5-0-1", wr: 83.3, rank: "1.17", ticks: 230.5, ms: 25.5 },
-        { opp: "3× wd_bestv6 (4P)", cand: "PT-v2+RL", wdl: "3-0-1", wr: 75.0, rank: "1.50", ticks: 222.2, ms: 24.9 },
-        { opp: "#2 Hober Malloc (2P)", cand: "PT-v2+RL", wdl: "0-0-6", wr: 0.0, rank: "2.00", ticks: 109.2, ms: 30.0 }
-      ],
-      lz_v3: [
-        { opp: "wd_bestv6 (2P)", cand: "LightZero v3", wdl: "6-0-0", wr: 100.0, rank: "1.00", ticks: 205.0, ms: 134.3 },
-        { opp: "3× Heuristic v2 (4P)", cand: "LightZero v3", wdl: "3-0-1", wr: 75.0, rank: "1.50", ticks: 164.5, ms: 142.1 },
-        { opp: "subham_v14 (2P)", cand: "LightZero v3", wdl: "4-0-2", wr: 66.7, rank: "1.33", ticks: 152.0, ms: 132.0 },
-        { opp: "Heuristic v2 (2P, 10g)", cand: "LightZero v3", wdl: "6-0-4", wr: 60.0, rank: "1.40", ticks: 186.7, ms: 150.6 },
-        { opp: "3× wd_bestv6 (4P, 8g)", cand: "LightZero v3", wdl: "4-0-4", wr: 50.0, rank: "2.06", ticks: 271.1, ms: 101.1 },
-        { opp: "3× subham_v14 (4P)", cand: "LightZero v3", wdl: "1-0-3", wr: 25.0, rank: "2.50", ticks: 165.0, ms: 130.0 }
-      ]
-    };
 
     function renderKaggleLadder() {
-      const minE = 500, maxE = 1900;
+      const minE = 1150, maxE = 1900;
       document.getElementById("kaggle-elo-bars").innerHTML = KAGGLE_LADDER.map(r => {
         const pct = Math.max(6, Math.round(((r.elo - minE) / (maxE - minE)) * 100));
         const cls = r.boss ? "fill-warn" : r.ours ? "fill-pri" : "fill-muted";
-        return `<div class="bar-row">
-          <span>${r.name.startsWith("PT-v3-RL") ? `<strong class="ok">${r.name}</strong>` : r.ours ? `<strong>${r.name}</strong>` : r.name}</span>
-          <div class="bar-track"><div class="bar-fill ${cls}" style="width:${pct}%"></div></div>
-          <span class="mono" style="text-align:right"><strong>${r.elo}</strong> (${r.tag})</span>
-        </div>`;
+        return `<div class="bar-row"><span>${r.name.startsWith("1.89M") ? `<strong class="ok">${r.name}</strong>` : r.ours ? `<strong>${r.name}</strong>` : r.name}</span><div class="bar-track"><div class="bar-fill ${cls}" style="width:${pct}%"></div></div><span class="mono" style="text-align:right"><strong>${r.elo}</strong> (${r.tag})</span></div>`;
       }).join("");
     }
     function renderAblations() {
       document.getElementById("ablation-tbody").innerHTML = ABLATIONS.map(r => `
         <tr class="${r.hi ? "ours-row" : ""}">
           <td>${r.name}</td><td style="color:var(--muted)">${r.method}</td>
-          <td class="num mono ${r.vsAnchor.startsWith("6–0") || r.vsAnchor.startsWith("5–1") ? "ok" : ""}">${r.vsAnchor}</td>
-          <td class="num mono ${r.vsSub4.startsWith("4–0") ? "ok" : ""}">${r.vsSub4}</td>
-          <td class="num mono ${r.vsWd4.startsWith("4–0") ? "ok" : ""}">${r.vsWd4}</td>
-          <td class="num mono">${r.vsBoss}</td><td class="num mono">${r.ms}</td>
+          <td class="num mono ${r.vsPrior.startsWith("4–2") || r.vsPrior.startsWith("5–1") || r.vsPrior.startsWith("6–0") ? "ok" : ""}">${r.vsPrior}</td>
+          <td class="num mono ${r.sub4.startsWith("4–0") ? "ok" : ""}">${r.sub4}</td>
+          <td class="num mono ${r.wd4.startsWith("4–0") ? "ok" : ""}">${r.wd4}</td>
+          <td class="num mono">${r.boss}</td><td class="num mono">${r.ms}</td>
         </tr>`).join("");
+    }
+    function renderSearchStudy() {
+      document.getElementById("search-bars").innerHTML = SEARCH_STUDY.map(r => `<div class="bar-row"><span><strong>${r.model}</strong></span><div class="bar-track"><div class="bar-fill ${r.wr >= 80 ? "fill-ok" : "fill-pri"}" style="width:${r.wr}%"></div></div><span class="mono" style="text-align:right">Search win: <strong>${r.vsPure}</strong></span></div>`).join("");
+      document.getElementById("search-tbody").innerHTML = SEARCH_STUDY.map(r => `<tr><td>${r.model}</td><td class="mono"><strong>${r.vsPure}</strong></td><td class="num mono">${r.pureMs}</td><td class="num mono">${r.searchMs}</td><td class="num mono">${r.boss}</td></tr>`).join("");
     }
     function renderElo(mode) {
       const is2p = mode === "2p", rows = is2p ? ELO_2P : ELO_4P;
       document.getElementById("elo-subtitle").textContent = is2p
-        ? "60 official 2P games (4 slot-balanced games/pair) • Bradley-Terry MLE + 95% bootstrap CI."
-        : "18 mixed 4P FFA tables (12 games/bot, balanced seats) • Survival-ranked Plackett-Luce MLE + 95% CI.";
+        ? "Historical Gen 1–2 archive: 60 official 2P games • Bradley-Terry MLE + 95% CI (Starter = 1000)."
+        : "Historical Gen 1–2 archive: 18 mixed 4P FFA tables • Plackett-Luce MLE + 95% CI (Starter = 1000).";
       const minE = Math.min(...rows.map(r => r.elo)) - 100, maxE = Math.max(...rows.map(r => r.elo)) + 50;
       document.getElementById("elo-bars").innerHTML = rows.map((r, i) => {
         const pct = Math.max(5, Math.round(((r.elo - minE) / (maxE - minE)) * 100));
@@ -310,23 +274,13 @@ pytest -v</pre>
       }
       document.querySelectorAll(".elo-btn").forEach(b => b.classList.toggle("active", b.dataset.elo === mode));
     }
-    function renderSuite(key) {
-      const rows = SUITES[key];
-      document.getElementById("winrate-bars").innerHTML = rows.map(r => {
-        const cls = r.wr >= 75 ? "fill-ok" : r.wr >= 50 ? "fill-pri" : r.wr >= 25 ? "fill-warn" : "fill-err";
-        return `<div class="bar-row"><span>${r.opp}</span><div class="bar-track"><div class="bar-fill ${cls}" style="width:${Math.max(4, r.wr)}%"></div></div><span class="mono" style="text-align:right"><strong>${r.wr.toFixed(1)}%</strong> (${r.wdl})</span></div>`;
-      }).join("");
-      document.getElementById("benchmark-tbody").innerHTML = rows.map(r => `<tr><td>${r.opp}</td><td style="color:var(--muted)">${r.cand}</td><td class="mono">${r.wdl}</td><td class="num mono">${r.wr.toFixed(1)}%</td><td class="num mono">${r.rank}</td><td class="num mono">${r.ticks.toFixed(1)}</td><td class="num mono">${r.ms.toFixed(1)}</td></tr>`).join("");
-      document.querySelectorAll(".suite-btn").forEach(b => b.classList.toggle("active", b.dataset.suite === key));
-    }
     document.querySelectorAll(".tab-btn").forEach(btn => btn.addEventListener("click", () => {
       const tab = btn.dataset.tab;
       document.querySelectorAll(".panel").forEach(p => p.classList.toggle("active", p.id === "tab-" + tab));
       document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
     }));
     document.querySelectorAll(".elo-btn").forEach(b => b.addEventListener("click", () => renderElo(b.dataset.elo)));
-    document.querySelectorAll(".suite-btn").forEach(b => b.addEventListener("click", () => renderSuite(b.dataset.suite)));
-    renderKaggleLadder(); renderAblations(); renderElo("2p"); renderSuite("pt_v3_rl");
+    renderKaggleLadder(); renderAblations(); renderSearchStudy(); renderElo("2p");
   </script>
 </body>
 </html>

@@ -842,7 +842,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1.5e-3)
     parser.add_argument("--d-model", type=int, default=128)
+    parser.add_argument("--n-heads", type=int, default=4)
     parser.add_argument("--n-layers", type=int, default=4)
+    parser.add_argument("--dim-ff", type=int, default=256)
     parser.add_argument("--out", default="checkpoints/planet_transformer_best.pt")
     parser.add_argument("--seed", type=int, default=7000)
     args = parser.parse_args(argv)
@@ -913,7 +915,9 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=args.batch_size,
         lr=args.lr,
         d_model=args.d_model,
+        n_heads=args.n_heads,
         n_layers=args.n_layers,
+        dim_ff=args.dim_ff,
         out_path=Path(args.out),
         seed=args.seed,
         resume_from=args.resume,

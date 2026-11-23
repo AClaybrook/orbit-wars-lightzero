@@ -911,11 +911,26 @@ class SearchPlanetTransformerAgent(PlanetTransformerAgent):
         player = enc.player
         n_players = base_sim.num_agents
 
-        # Precompute opponent turn-0 response once so every candidate faces the same strong opponent
+        # Precompute turn-0 opponent responses ONCE using our own fast neural policy (no-TTA ~4ms)
+        # so every candidate plan is tested against an elite neural counter-move rather than a 1220 heuristic.
         opp_moves_t0: Dict[int, List[List[float]]] = {}
         for opp_id in range(n_players):
-            if opp_id != player:
-                opp_moves_t0[opp_id] = heuristic_moves(base_sim, opp_id)
+            if opp_id == player:
+                continue
+            opp_obs = base_sim.to_observation(player=opp_id)
+            opp_enc = extract_planet_features(opp_obs, player=opp_id, max_speed=max_speed)
+            if np.any(opp_enc.owned_mask):
+                opp_probs, opp_fracs, _ = self.predict_probs_and_value(opp_enc, use_rot_tta=False)
+                opp_moves_t0[opp_id] = self._decode_plan(
+                    opp_enc,
+                    opp_probs,
+                    opp_fracs,
+                    launch_threshold=self.launch_threshold,
+                    force_all_in=False,
+                    max_speed=max_speed,
+                )
+            else:
+                opp_moves_t0[opp_id] = []
 
         best_plan = candidates[0]
         best_score = -1e9

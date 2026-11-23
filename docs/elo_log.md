@@ -116,5 +116,25 @@ This log tracks calibrated **Kaggle-equivalent Elo** estimates (anchored against
   - **`PT-v3-RL` (pure `28 ms/turn`):** **~1,530–1,600** (undefeated `20–0` across `LightZero v3`, `subham_v14`, `wd_bestv6` in 2P & 4P)
   - **`PT-v3-RL + Search` (`118–149 ms/turn`):** **~1,620–1,680** (`11–1` / `91.7%` over pure policy; approaching `#10 = 1681.5`, still below `#2 Hober Malloc = 1800.1`)
 
+### Generation 6 — `1.89M PT-v4-Large` (3.2× Scaled Capacity + 2× Data + Neural-Opponent Search)
+- **Date:** 2026-11-23
+- **Architecture & Data Scaling:**
+  - Scaled `PlanetTimelineTransformer` **3.2×** from `0.59M` (`d=128, h=4, L=4, ff=256`) → **`1.89M` params** (`d=192, h=6, L=6, ff=384`, 7.4 MB checkpoint — still half `#2 Hober Malloc`'s 16 MB and only `36–42 ms/turn` w/ 4× TTA!).
+  - Expanded dataset **2.1×** (`6,072 → 12,809` board states / ~131K planet decisions across 86 games): added 24 fresh `#2 Hober Malloc` 2P/4P games (`100.0%` exact target recovery) + 12 `PT-v3-RL` DAgger games targeting Gen 5's exact losses vs. `#2 Hober Malloc` (`86.6%` oracle recovery).
+  - Trained 15 cosine-annealed epochs across 5 passes with exact 8× D4 augmentation (`val_pol=0.745`, `val_all=73.3%`, `val_launch=58.5%`, `val_tgt=64.8%`, `val_vsign=95.2%`).
+  - Upgraded `SearchPlanetTransformerAgent` turn-0 opponent modeling from `heuristic_moves` (1,220 Elo) to our own fast no-TTA neural Transformer (~4 ms), and fixed PyTorch multiprocessing tensor-IPC file-descriptor limits in `scripts/rl_finetune_transformer.py` via NumPy weight serialization.
+- **`1.89M PT-v4-Large` (Pure Neural Policy, `36–42 ms/turn` — Promoted to `checkpoints/planet_transformer_best.pt`):**
+  - **`4–2` (`66.7%`, ~+120 Elo)** vs. Gen 5 `0.59M PT-v3-RL` (broke directly through the Gen 4/5 `0.59M` 2P plateau!)
+  - **`4–2` (`66.7%`)** vs. `1.89M PT-v4-Large-RL` (30-episode CPU League PPO pass also beat Gen 5 `0.59M PT-v3-RL` `4–2`, swept `LightZero v3` `6–0`, `3× subham_v14` `4–0`, and `3× wd_bestv6` `4–0`, though pure 12,809-state BC+DAgger stayed sharper head-to-head!)
+  - **`6–0` (`100.0%`, `102.8` ticks — fastest KO yet!)** vs. `subham_v14` (2P)
+  - **`4–0` (`100.0%`, rank `1.00`, `135.8` ticks — 46 ticks faster than Gen 5!)** vs. 3× `subham_v14` (4P)
+  - **`4–0` (`100.0%`, rank `1.00`, `142.5` ticks — 48 ticks faster than Gen 5!)** vs. 3× `wd_bestv6` (4P)
+  - **2P vs. `#2 Hober Malloc (1800.1)` (6 games, seeds 200–205):** `0–6` pure (`111.2` avg ticks, peak `131`t, up to `94` active turns vs. boss's `98`); `0–6` with Neural-Opponent Search (`119.2` avg ticks, peak **`135`t** on seed 204 and **`127`t** on seed 205).
+  - **Search-vs-Pure convergence:** On `1.89M PT-v4-Large`, `Neural-Opp Search vs. Pure` narrowed from `11–1` (`91.7%`) on `0.59M` to **`2–2` (`50.0%`, `180.2` ticks)** at `145.5 ms` mean — showing the 3.2× larger 6-layer Transformer internalized much of the tactical foresight directly into its fast `37 ms` weights!
+- **Estimated Kaggle Skill Rating (`1.89M PT-v4-Large`):**
+  - **Pure (`37 ms/turn`):** **~1,600–1,670** (beat `0.59M PT-v3-RL` `4–2`, matched its own 10-tick Search `2–2`, and crushed all 4P heuristics 46–48 ticks faster!)
+  - **With Neural-Opponent Search (`~145 ms/turn`):** **~1,640–1,700** (in range of official `#10 = 1681.5`; closing the final ~100–160 pts to `#2 Hober Malloc = 1800.1` now requires GPU-scale PPO self-play: 100M–1B+ steps on a single GPU).
+
+
 
 
