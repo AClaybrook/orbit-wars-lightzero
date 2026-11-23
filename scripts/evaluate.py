@@ -134,6 +134,43 @@ def resolve_agent(spec: str, checkpoint: str | None = None, sims: int = 20, time
                 f"Missing {kv_path}. Run `python scripts/fetch_opponents.py` first."
             )
         return _load_py_agent(kv_path)
+    if spec == "subham_v14":
+        p = OPP_DIR / "subham_v14.py"
+        if not p.is_file():
+            raise FileNotFoundError(
+                f"Missing {p}. Run `python scripts/fetch_opponents.py` first."
+            )
+        return _load_py_agent(p)
+    if spec == "ow_proto":
+        p = OPP_DIR / "simjeg_hober_malloc" / "ow_tools" / "agent_ow_proto.py"
+        if not p.is_file():
+            raise FileNotFoundError(
+                f"Missing {p}. Run `python scripts/fetch_opponents.py` first."
+            )
+        return _load_py_agent(p)
+    if spec == "hober_malloc":
+        import os
+
+        os.environ.setdefault("OW_PYTHON", sys.executable)
+        p = OPP_DIR / "simjeg_hober_malloc" / "main.py"
+        if not p.is_file():
+            raise FileNotFoundError(
+                f"Missing {p}. Run `python scripts/fetch_opponents.py` first."
+            )
+        raw_fn = _load_py_agent(p)
+
+        def _hober_wrapped(obs, config=None):
+            # kaggle_environments(debug=False) replaces sys.stderr with StringIO,
+            # which breaks subprocess.Popen(..., stderr=sys.stderr) inside main.py.
+            prev_err = sys.stderr
+            try:
+                if sys.__stderr__ is not None:
+                    sys.stderr = sys.__stderr__
+                return raw_fn(obs, config)
+            finally:
+                sys.stderr = prev_err
+
+        return _hober_wrapped
     if spec.startswith("wd_"):
         return _load_wanderduck_agent(spec)
 
@@ -184,7 +221,11 @@ def evaluate_matchup(
     for g in range(num_games):
         random.seed(seed + g)
         np.random.seed(seed + g)
-        config: Dict[str, Any] = {"seed": seed + g}
+        config: Dict[str, Any] = {
+            "seed": seed + g,
+            "actTimeout": 30,
+            "agentTimeout": 60,
+        }
         if max_steps is not None:
             config["episodeSteps"] = max_steps
         env = make("orbit_wars", configuration=config, debug=False)

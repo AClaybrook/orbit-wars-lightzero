@@ -39,8 +39,28 @@ def main() -> int:
     else:
         print(f"Already present: {wd_dir}")
 
+    # 3. subham007/orbit-wars-v14 (1,224 Kaggle Elo reference heuristic + cross-game reset)
+    v14_path = OPP_DIR / "subham_v14.py"
+    if not v14_path.exists():
+        url = "https://huggingface.co/subham007/orbit-wars-v14/resolve/main/submission.py"
+        print(f"Downloading {url} -> {v14_path}")
+        urllib.request.urlretrieve(url, v14_path)
+    else:
+        print(f"Already present: {v14_path}")
+
+    # 4. SimJeg/orbit-wars (includes Agent OW-Proto 1000+ heuristic & Hober Malloc 4.3M 10B-step RL)
+    hm_dir = OPP_DIR / "simjeg_hober_malloc"
+    if not hm_dir.exists():
+        print(f"Cloning https://github.com/SimJeg/orbit-wars.git -> {hm_dir}")
+        subprocess.run(
+            ["git", "clone", "--depth", "1", "https://github.com/SimJeg/orbit-wars.git", str(hm_dir)],
+            check=True,
+        )
+    else:
+        print(f"Already present: {hm_dir}")
+
     print("\nReady! Run benchmarks with e.g.:")
-    print("  python scripts/evaluate.py --candidate heuristic --opponents kvatsa5 wd_bestv6 wd_peer wd_sniper wd_swarm wd_turtle --games 6")
+    print("  python scripts/evaluate.py --candidate heuristic --opponents subham_v14 ow_proto wd_bestv6 kvatsa5 --games 6")
     return 0
 
 

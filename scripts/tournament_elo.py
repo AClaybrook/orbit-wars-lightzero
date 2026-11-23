@@ -55,6 +55,9 @@ BOT_DISPLAY_NAMES: Dict[str, str] = {
     "wd_bestv6": "wd_bestv6 (CMA-ES)",
     "wd_heuristic": "wd_heuristic",
     "kvatsa5": "kvatsa5 (Predator v3)",
+    "subham_v14": "subham_v14 (1224-Elo)",
+    "ow_proto": "Agent OW-Proto (1000+)",
+    "hober_malloc": "Hober Malloc (10B RL)",
     "wd_peer": "wd_peer (mdmahfuzsumon)",
     "wd_sniper": "wd_sniper",
     "wd_swarm": "wd_swarm",
@@ -114,7 +117,11 @@ def _run_single_game(task: Tuple[List[str], int, int, float, int | None]) -> Dic
     agents = [_resolve_tournament_bot(b, sims, time_budget) for b in bot_names]
     random.seed(seed)
     np.random.seed(seed)
-    config: Dict[str, Any] = {"seed": seed}
+    config: Dict[str, Any] = {
+        "seed": seed,
+        "actTimeout": 30,
+        "agentTimeout": 60,
+    }
     if max_steps is not None:
         config["episodeSteps"] = max_steps
     env = make("orbit_wars", configuration=config, debug=False)
