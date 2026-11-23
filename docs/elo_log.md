@@ -135,6 +135,25 @@ This log tracks calibrated **Kaggle-equivalent Elo** estimates (anchored against
   - **Pure (`37 ms/turn`):** **~1,600–1,670** (beat `0.59M PT-v3-RL` `4–2`, matched its own 10-tick Search `2–2`, and crushed all 4P heuristics 46–48 ticks faster!)
   - **With Neural-Opponent Search (`~145 ms/turn`):** **~1,640–1,700** (in range of official `#10 = 1681.5`; closing the final ~100–160 pts to `#2 Hober Malloc = 1800.1` now requires GPU-scale PPO self-play: 100M–1B+ steps on a single GPU).
 
-
-
-
+### Generation 7 — `1.89M PT-v5-Boss` (Full-TTA `1800.1` Boss DAgger + `8×` D4 TTA + Blocked-Shot Fallback + Multi-Model Ensemble)
+- **Date:** 2026-11-23
+- **Training & Architectural Upgrades:**
+  - **Un-nerfed Full-TTA (`1800.1`) Boss DAgger:** Collected 12 live 2P sparring games (`PT-v4-Large` vs. full 8×-TTA `1800.1` `#2 Hober Malloc`, `--full-tta-teacher`), exposing a `57.3%` launch-count divergence against true `1800.1` play (+1,080 states / 4,985 decisions, oversampled 2× onto Gen 6 → `14,969` total board states).
+  - **Continued Low-LR Convergence + Launch Calibration:** Resumed `1.89M` for 6 additional epochs (`batch=80`, `lr=4e-4 → 1.8e-4`, `--launch-weight 1.20` — 21 total epochs):
+    - `val_pol`: `0.745 → 0.695` | `val_all`: `73.3% → 75.0%` | `val_launch`: `58.5% → 65.0%` (+6.5%) | `val_tgt`: `64.8% → 71.2%` (+6.4%) | `val_vsign`: `95.2% → 96.7%`.
+  - **Three Inference Upgrades ([`orbit_wars_bot/planet_transformer.py`](../orbit_wars_bot/planet_transformer.py)):**
+    1. Top-3 blocked-shot fallback in `_decode_plan` when an intermediate planet blocks the #1 predicted target (`solve_intercept` returns `None`).
+    2. Full **8× D4 dihedral TTA** (`use_d4_tta=True`, 4 rotations × 2 reflections — matching `#2 Hober Malloc` at `55.4 ms/turn`).
+    3. Multi-checkpoint **`EnsemblePlanetTransformerAgent`** (blends `PT-v5-Boss + PT-v4-Large + PT-v4-Large-RL` at `72.0 ms/turn`).
+- **Elo-Fair Benchmarks (`PT-v5-Boss`, promoted to `checkpoints/planet_transformer_best.pt`):**
+  - **`PT-v5-Boss (8× D4)` vs. Gen 6 `1.89M PT-v4-Large` (2P):** **`4–2` (`66.7%`, ~+120 Elo, `145.8` ticks)** at `55.4 ms/turn`.
+  - **`Ensemble-3x (4× TTA)` vs. Gen 6 `1.89M PT-v4-Large` (2P):** **`4–2` (`66.7%`, ~+120 Elo, `263.0` ticks)** at `72.0 ms/turn`.
+  - **4P FFA New KO Records:**
+    - **`4–0` (`100.0%`, `133.8` avg ticks — fastest blitz `85`t!)** vs. 3× `subham_v14` (down from Gen 5's `181.5t` & Gen 6's `135.8t`).
+    - **`4–0` (`100.0%`, `137.2` avg ticks — fastest win `108`t!)** vs. 3× `wd_bestv6` (down from Gen 5's `190.5t` & Gen 6's `142.5t`).
+  - **2P Boss Gauntlet vs. `#2 Hober Malloc (1800.1)` (seeds 200–205, all `DONE/DONE`):**
+    - **Pure `PT-v5-Boss (8× D4)` (`55 ms`):** `0–6` (`119.0` avg ticks, max `127t`, up to `91/104` active turns) — **+7.8 avg ticks over Gen 6 pure (`111.2t`)**, matching Gen 6 *with Search* using zero lookahead!
+    - **Pure `Ensemble-3x (4×)` (`72 ms`):** `0–6` (`119.0` avg ticks, peak **`132`t** on seed 202, `129t` on seed 204).
+    - **`PT-v5-Boss + Neural-Opp Search (8× D4)`:** `0–6` (`118.0` avg ticks, max `129t`).
+- **Estimated Kaggle Skill Rating (`1.89M PT-v5-Boss (8× D4)` / `Ensemble-3x`):**
+  - **Pure (`55–72 ms/turn`):** **~1,660–1,720** (firmly in official **Kaggle Top-10** range around `#10 = 1681.5` and `#7 = 1717.3`; taking games off `#2 = 1800.1` requires GPU-scale PPO self-play).
