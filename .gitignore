@@ -32,6 +32,7 @@ runs/
 wandb/
 replays/
 *.html
+!docs/*.html
 *.gif
 *.mp4
 *.log
