@@ -30,7 +30,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["orbit_wars_bot*"]
+include = ["orbit_wars_bot*", "galcon*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
