@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Orbit Wars LightZero — Elo Ladders &amp; Benchmark Report</title>
+  <title>Orbit Wars AI — Gen 4 PlanetTransformer RL, DAgger &amp; Search Report</title>
   <style>
     :root {
       --bg: #0f172a; --card: #1e293b; --border: #334155; --text: #f1f5f9;
@@ -19,386 +19,312 @@
     }
     * { box-sizing: border-box; }
     body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
-    .wrap { max-width: 1040px; margin: 0 auto; padding: 28px 20px 48px; }
-    header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 16px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
+    .wrap { max-width: 1060px; margin: 0 auto; padding: 28px 20px 48px; }
+    header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid var(--border); }
     .meta { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); }
-    h1 { margin: 6px 0; font-size: 24px; letter-spacing: -0.02em; }
-    h2 { margin: 0 0 6px; font-size: 17px; }
-    h3 { margin: 0 0 6px; font-size: 15px; }
-    p { margin: 0; font-size: 13.5px; color: var(--muted); }
+    h1 { margin: 6px 0; font-size: 23px; letter-spacing: -0.02em; }
+    h2 { margin: 0 0 6px; font-size: 16px; }
+    h3 { margin: 0 0 6px; font-size: 14px; }
+    p { margin: 0; font-size: 13px; color: var(--muted); }
     .badges { display: flex; gap: 8px; flex-wrap: wrap; }
-    .badge { padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--card); border: 1px solid var(--border); }
-    .badge.ok { color: var(--success); }
-    .badge.info { color: var(--primary); }
-    .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 20px 0; }
+    .badge { padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--card); border: 1px solid var(--border); text-decoration: none; }
+    .badge.ok { color: var(--success); } .badge.info { color: var(--primary); }
+    .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 18px 0; }
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
-    .kpi-val { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; margin: 4px 0; }
+    .highlight-card { border-color: var(--primary); } .rec-card { border-color: var(--success); }
+    .kpi-val { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; margin: 4px 0; }
     .ok { color: var(--success); } .warn { color: var(--warning); } .err { color: var(--error); } .pri { color: var(--primary); }
-    .tabs { display: flex; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 18px; }
-    .tab-btn, .suite-btn, .elo-btn { font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--muted); }
+    .tabs { display: flex; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 16px; }
+    .tab-btn, .suite-btn, .elo-btn { font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; padding: 7px 13px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--muted); }
     .tab-btn.active, .suite-btn.active, .elo-btn.active { background: var(--primary); color: var(--primary-fg); border-color: var(--primary); }
     .panel { display: none; } .panel.active { display: block; }
-    .stack { display: flex; flex-direction: column; gap: 16px; }
-    .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
-    .bar-row { display: grid; grid-template-columns: 185px 1fr 140px; align-items: center; gap: 10px; font-size: 12.5px; margin: 8px 0; }
+    .stack { display: flex; flex-direction: column; gap: 14px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+    .bar-row { display: grid; grid-template-columns: 240px 1fr 185px; align-items: center; gap: 10px; font-size: 12.5px; margin: 8px 0; }
     .bar-track { height: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
     .bar-fill { height: 100%; border-radius: 5px; }
-    .fill-ok { background: var(--success); } .fill-pri { background: var(--primary); } .fill-err { background: var(--error); } .fill-muted { background: var(--muted); opacity: 0.65; }
+    .fill-ok { background: var(--success); } .fill-pri { background: var(--primary); } .fill-warn { background: var(--warning); } .fill-err { background: var(--error); } .fill-muted { background: var(--muted); opacity: 0.6; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-    table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 10px; }
     th, td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; }
     th { color: var(--muted); font-weight: 600; }
     td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-    td.ctr, th.ctr { text-align: center; font-variant-numeric: tabular-nums; }
-    tr.ours-row { background: rgba(56, 189, 248, 0.08); }
-    .cell-hi { color: var(--success); background: rgba(52, 211, 153, 0.12); font-weight: 600; }
-    .cell-lo { color: var(--error); background: rgba(248, 113, 113, 0.12); font-weight: 600; }
-    .cell-mid { color: var(--warning); background: rgba(251, 191, 36, 0.12); font-weight: 600; }
-    ul { margin: 8px 0 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
-    li { margin: 4px 0; }
+    tr.ours-row { background: rgba(56, 189, 248, 0.10); font-weight: 600; }
     pre { margin: 8px 0 0; padding: 12px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); overflow-x: auto; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-    .highlight-card { border-color: var(--primary); } .rec-card { border-color: var(--success); }
   </style>
 </head>
 <body>
   <div class="wrap">
     <header>
       <div>
-        <div class="meta">AClaybrook/orbit-wars-lightzero • main • 6-Bot Elo Tournament (60 2P + 18 4P FFA)</div>
-        <h1>Orbit Wars AI — Elo Ladders &amp; Benchmark Report</h1>
-        <p>Official <span class="mono">kaggle_environments</span> 2P Round-Robin (Bradley-Terry MLE) &amp; 4P FFA Mixed-Table (Plackett-Luce MLE) Elo ratings across our LightZero v3, Heuristic v2, and open-source benchmark bots.</p>
+        <div class="meta">AClaybrook/orbit-wars-lightzero • Gen 1 → Gen 4 • DAgger + Self-Play PPO + Value-Guided Search</div>
+        <h1>Orbit Wars AI — PlanetTransformer v2+RL &amp; Elo Benchmark Report</h1>
+        <p>Calibrated against real Kaggle submissions including <span class="mono">#2 Hober Malloc</span> (4.3M ModernBERT, 10B RL steps) and <span class="mono">subham_v14</span> (~1,224 Elo).</p>
       </div>
       <div class="badges">
-        <a href="gameplay_viewer.html" class="badge info" style="text-decoration:none;">▶ Watch Live Gameplay</a>
-        <span class="badge ok">28/28 Tests Passing</span>
-        <span class="badge info">LightZero v3: 2300 2P Elo</span>
+        <a href="gameplay_viewer.html" class="badge info">▶ Watch Live Gameplay</a>
+        <span class="badge ok">33/33 Tests Passing</span>
+        <span class="badge info">PT-v2+RL: ~1,540 Est. Kaggle Elo</span>
       </div>
     </header>
 
     <section class="kpis">
       <div class="card highlight-card">
-        <div class="meta">2P Elo #1 — LightZero v3</div>
-        <div class="kpi-val ok">2300 Elo</div>
-        <p>19–0–1 (95.0%) • 3–1 vs. Heuristic v2</p>
+        <div class="meta">Est. Kaggle Elo (PT-v2+RL)</div>
+        <div class="kpi-val ok">~1,500–1,580</div>
+        <p>+260 over LightZero v3 • 27 ms/turn</p>
+      </div>
+      <div class="card rec-card">
+        <div class="meta">Self-Play PPO vs. Anchors</div>
+        <div class="kpi-val ok">83.3% (5–1)</div>
+        <p>Beat PT-v1 (5–1) &amp; DAgger v2 (5–1)</p>
       </div>
       <div class="card">
-        <div class="meta">2P Elo #2 — Heuristic v2</div>
-        <div class="kpi-val pri">2070 Elo</div>
-        <p>16–0–4 (80.0%) • +494 over wd_bestv6</p>
-      </div>
-      <div class="card highlight-card">
-        <div class="meta">4P FFA Win Leader — Heuristic v2</div>
-        <div class="kpi-val ok">66.7%</div>
-        <p>8/12 mixed 4P wins (2.7× par) • 1358 Elo</p>
+        <div class="meta">4P vs. 3× subham_v14</div>
+        <div class="kpi-val pri">100% (4–0)</div>
+        <p>Up from v1's 25% (1–3) • 130.8 ticks</p>
       </div>
       <div class="card">
-        <div class="meta">4P FFA Top-3 Cluster</div>
-        <div class="kpi-val pri">1324–1377</div>
-        <p>wd_bestv6, Heuristic v2, LightZero v3</p>
+        <div class="meta">Boss Benchmark (#2 / 4,729)</div>
+        <div class="kpi-val warn">Hober Malloc</div>
+        <p>10B RL steps • PT+Search lasts 121t</p>
       </div>
     </section>
 
     <nav class="tabs">
-      <button class="tab-btn active" data-tab="elo">1. Elo Ladders &amp; Win Matrix</button>
-      <button class="tab-btn" data-tab="results">2. Head-to-Head Suites</button>
-      <button class="tab-btn" data-tab="lz3">3. LightZero v1 → v3 Evolution</button>
-      <button class="tab-btn" data-tab="commands">4. Commands &amp; Methodology</button>
+      <button class="tab-btn active" data-tab="gen4">1. Gen 4 Ablation &amp; Kaggle Elo</button>
+      <button class="tab-btn" data-tab="elo">2. Local 6-Bot Elo Ladders</button>
+      <button class="tab-btn" data-tab="results">3. Matchup Suites</button>
+      <button class="tab-btn" data-tab="commands">4. Pipeline &amp; Commands</button>
     </nav>
 
-    <!-- TAB 1: ELO LADDERS & MATRIX -->
-    <section id="tab-elo" class="panel active stack">
+    <section id="tab-gen4" class="panel active stack">
       <div class="card">
-        <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px;">
-          <div>
-            <h2>Local Elo Leaderboard (Anchored: Kaggle Starter = 1000)</h2>
-            <p id="elo-subtitle">60 official 2P games (4 slot-balanced games/pair) • Bradley-Terry MLE + 95% bootstrap CI.</p>
-          </div>
-          <div style="display:flex; gap:6px; flex-wrap:wrap;">
-            <button class="elo-btn active" data-elo="2p">2P Round-Robin Elo (60g)</button>
-            <button class="elo-btn" data-elo="4p">4P FFA Mixed-Table Elo (18 tables)</button>
-          </div>
-        </div>
-        <div id="elo-bars"></div>
+        <h2>Kaggle-Calibrated Elo Progression (Gen 1 → Gen 4 vs. Real Kaggle Submissions)</h2>
+        <p>Anchored against Kaggle Starter (~600), Agent OW-Proto (~1,000+), subham_v14 (~1,224), and #2 overall Hober Malloc (~1,825, 4.3M ModernBERT, 10B RL steps).</p>
+        <div id="kaggle-elo-bars" style="margin-top:12px;"></div>
+      </div>
+
+      <div class="card">
+        <h2>Controlled Ablation: BC → DAgger → Self-Play PPO RL → Value-Guided Search</h2>
+        <p>All 4P vs. 3× subham_v14 runs use identical seeds (400–403); all 2P vs. #2 Hober Malloc runs use identical seeds (200–205).</p>
         <div style="overflow-x:auto;">
           <table>
-            <thead id="elo-thead"></thead>
-            <tbody id="elo-tbody"></tbody>
+            <thead>
+              <tr>
+                <th>Variant</th><th>Method</th><th class="num">vs. PT-v1 (2P)</th>
+                <th class="num">vs. subham (2P)</th><th class="num">vs. 3× subham (4P)</th>
+                <th class="num">vs. #2 Hober (2P)</th><th class="num">Mean (ms)</th>
+              </tr>
+            </thead>
+            <tbody id="ablation-tbody"></tbody>
           </table>
         </div>
       </div>
 
-      <div class="card">
-        <h2>2P Head-to-Head Win-Rate Matrix (Row Bot vs. Column Bot)</h2>
-        <p>Each cell shows the Row bot's win % and W–L record across 4 slot-balanced official games (2 as P0, 2 as P1).</p>
-        <div style="overflow-x:auto;">
-          <table id="h2h-matrix"></table>
-        </div>
-      </div>
-
-      <div class="grid-2">
+      <div class="grid-3">
         <div class="card highlight-card">
-          <h3 class="pri">Key Takeaway: 2P vs. 4P FFA</h3>
-          <ul>
-            <li><strong>2P 1v1:</strong> LightZero v3 is #1 at <strong>2300.3 Elo (95.0% win rate)</strong>, beating Heuristic v2 3–1 (75%) and sweeping all external bots 16–0 (100%).</li>
-            <li><strong>Mixed 4P FFA:</strong> Heuristic v2 wins the most tables outright (<strong>66.7% — 2.7× par</strong>), while <span class="mono">wd_bestv6</span> finishes Top-2 91.7% of the time (1377 survival-ranked Elo) and LightZero v3 sits right with them (1324 Elo, 66.7% Top-2).</li>
-          </ul>
+          <h3 class="pri">Knob 1: DAgger on Lost Games</h3>
+          <p>Played 16 student games (10× 2P vs. #2 Hober, 6× 4P vs. 3× subham) querying Hober Malloc as on-policy oracle (+1,228 states). Diagnosed <strong>69.1% turn-level divergence</strong>; 9 resumed epochs lifted val_all <strong>72.9% → 76.9%</strong>, val_vsign <strong>95.4% → 97.3%</strong>, and flipped 4P vs. 3× subham from <strong>1–3 → 4–0</strong>.</p>
         </div>
         <div class="card rec-card">
-          <h3 class="ok">Next Lever for LightZero v4</h3>
-          <ul>
-            <li>LightZero v3 was trained mostly on 1v3 clone tables — training v4 on <strong>heterogeneous mixed-bot 4P tables</strong> with survival-ranked value targets directly closes the mixed-4P gap.</li>
-            <li>Tournament ran LightZero at <span class="mono">sims=10, 0.16s</span> for speed; <span class="mono">submission.py</span> runs deeper search (<span class="mono">sims=16, 0.22s</span>).</li>
-          </ul>
+          <h3 class="ok">Knob 2: Self-Play PPO + Anchor-KL</h3>
+          <p>5 iterations (40 mixed 2P/4P league episodes in FastOrbitSim, 5,635 states) with per-planet clipped PPO + Anchor-KL (<span class="mono">kl=0.06</span>). Beat <strong>both PT-v1 (5–1) and its own DAgger v2 anchor (5–1)</strong> — proving improvement beyond teacher imitation — and swept 3× subham <strong>4–0 in 130.8 ticks</strong>.</p>
+        </div>
+        <div class="card">
+          <h3 class="warn">AlphaZero Value-Guided Lookahead</h3>
+          <p><span class="mono">SearchPlanetTransformerAgent</span> proposes up to 6 diverse plans (threshold sweep + top-2 high-entropy flips), rolls forward 10 ticks in FastOrbitSim, and scores with <span class="mono">0.65·V_nn + 0.35·V_heur</span>. Instantly flipped PT-v1 from <strong>1–3 → 4–0</strong> vs. 3× subham and stretched survival vs. #2 Hober to <strong>121.0 ticks</strong>.</p>
         </div>
       </div>
     </section>
 
-    <!-- TAB 2 -->
+    <section id="tab-elo" class="panel stack">
+      <div class="card">
+        <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px;">
+          <div>
+            <h2>Local 6-Bot Elo Leaderboard (Anchored: Kaggle Starter = 1000)</h2>
+            <p id="elo-subtitle">60 official 2P games (4 slot-balanced games/pair) • Bradley-Terry MLE + 95% bootstrap CI.</p>
+          </div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <button class="elo-btn active" data-elo="2p">2P Round-Robin (60g)</button>
+            <button class="elo-btn" data-elo="4p">4P FFA Mixed-Table (18t)</button>
+          </div>
+        </div>
+        <div id="elo-bars"></div>
+        <div style="overflow-x:auto;">
+          <table><thead id="elo-thead"></thead><tbody id="elo-tbody"></tbody></table>
+        </div>
+      </div>
+    </section>
+
     <section id="tab-results" class="panel stack">
       <div class="card">
         <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px;">
           <div>
-            <h2>Dedicated Matchup Benchmarks (Official Kaggle Environment)</h2>
-            <p>Slot-balanced games in <span class="mono">kaggle_environments.make("orbit_wars")</span> under Kaggle's 500 ms/turn cap.</p>
+            <h2>Dedicated Official Kaggle Environment Benchmarks</h2>
+            <p>Slot-balanced matches in <span class="mono">kaggle_environments.make("orbit_wars")</span>.</p>
           </div>
           <div style="display:flex; gap:6px; flex-wrap:wrap;">
-            <button class="suite-btn active" data-suite="lz_v3">LightZero v3 (2P &amp; 4P)</button>
-            <button class="suite-btn" data-suite="4p_heuristic">4P FFA Heuristic v2</button>
-            <button class="suite-btn" data-suite="2p_heuristic">2P Heuristic v2 (9 bots)</button>
+            <button class="suite-btn active" data-suite="pt_v2_rl">PT-v2+RL (Gen 4)</button>
+            <button class="suite-btn" data-suite="pt_v1">PT-v1 (Gen 3)</button>
+            <button class="suite-btn" data-suite="lz_v3">LightZero v3 (Gen 2)</button>
           </div>
         </div>
         <div id="winrate-bars"></div>
         <div style="overflow-x:auto;">
           <table>
             <thead>
-              <tr>
-                <th>Matchup</th><th>Agent</th><th>W-D-L</th>
-                <th class="num">Win Rate</th><th class="num">Avg Rank</th>
-                <th class="num">Avg Ticks</th><th class="num">Mean / Max (ms)</th>
-              </tr>
+              <tr><th>Matchup</th><th>Candidate</th><th>W-D-L</th><th class="num">Win %</th><th class="num">Avg Rank</th><th class="num">Avg Ticks</th><th class="num">Mean (ms)</th></tr>
             </thead>
             <tbody id="benchmark-tbody"></tbody>
           </table>
-        </div>
-      </div>
-
-      <div class="grid-2">
-        <div class="card highlight-card">
-          <h3 class="pri">LightZero Progression vs. Our Own Heuristic</h3>
-          <ul>
-            <li><strong>v1 Untrained MCTS vs. old heuristic (2P):</strong> 25.0% (1–3)</li>
-            <li><strong>v2 Active MCTS (no NN) vs. heuristic v2 (2P):</strong> 50.0% (3–3)</li>
-            <li><strong>v3 LightZero NN + MCTS vs. heuristic v2 (2P):</strong> <strong>60–75% (6–4 &amp; 3–1)</strong></li>
-            <li><strong>v3 LightZero NN + MCTS vs. 3× heuristic v2 (4P FFA):</strong> <strong>75.0% (3–1, rank 1.50 — 3× par!)</strong></li>
-          </ul>
-        </div>
-        <div class="card rec-card">
-          <h3 class="ok">4P FFA Progression vs. 3× wd_bestv6 (25% Par)</h3>
-          <ul>
-            <li><strong>v1 Heuristic:</strong> 0.0% (0–4, avg rank 3.12)</li>
-            <li><strong>v2 Heuristic (seeds 42–49):</strong> 37.5% (3–5, avg rank 2.25)</li>
-            <li><strong>v2 LightZero (4 games):</strong> 25.0% (1–3, avg rank 2.50)</li>
-            <li><strong>v3 LightZero (seeds 42–49):</strong> <strong>50.0% (4–4, avg rank 2.06 — 2.0× par!)</strong></li>
-          </ul>
-        </div>
-      </div>
-    </section>
-
-    <section id="tab-lz3" class="panel stack">
-      <div class="grid-2">
-        <div class="card">
-          <h3>1. Exact 8× D4 Dihedral Augmentation <span class="ok">(features.py)</span></h3>
-          <p><span class="mono">augment_obs_d4</span> transforms all 12 spatial planes and rotates/reflects 2D fleet momentum <span class="mono">(vx, vy)</span> to 0.0 error.</p>
-          <ul>
-            <li>10,365 multi-opponent boards → 82,920 symmetric states</li>
-            <li>Eliminated overfitting: val value MSE dropped steadily <span class="mono">0.2985 → 0.2660</span></li>
-          </ul>
-        </div>
-        <div class="card">
-          <h3>2. Search-Distilled Expert Iteration <span class="ok">(pretrain_alphazero.py)</span></h3>
-          <p>Generated 155 2P &amp; 4P FFA games (including <span class="mono">wd_bestv6</span> and <span class="mono">wd_heuristic</span>) with active-rollout Q-distillation.</p>
-          <ul>
-            <li>2,940 search-distilled Boltzmann stance targets (<span class="mono">softmax(Q / 0.035)</span>)</li>
-            <li>76.4% held-out win/loss sign accuracy, 79.2% top-1 stance match</li>
-          </ul>
-        </div>
-        <div class="card">
-          <h3>3. D4-Invariant Residual Global Cue <span class="pri">(features.py)</span></h3>
-          <p>Channel 11 encodes sun mask + time progress + global 2P/4P balance so residual blocks learn pure spatial &amp; tactical corrections.</p>
-          <ul>
-            <li>Wider 64-unit value &amp; policy FC heads (~2.3 ms/fwd on 1 CPU thread)</li>
-            <li>100% standard LightZero <span class="mono">AlphaZeroModel</span> checkpoint (~1.4 MB)</li>
-          </ul>
-        </div>
-        <div class="card">
-          <h3>4. Neural-Prior Ordered Active MCTS <span class="pri">(mcts_agent.py)</span></h3>
-          <p>Evaluates 8 curated full-turn stances in neural-prior order with active-opponent 2P &amp; 4P rollouts.</p>
-          <ul>
-            <li><span class="mono">torch.set_num_threads(1)</span> + strict per-ply deadline guards</li>
-            <li>4P tuned <span class="mono">sub_stride=6</span> (101–142 ms mean, &lt;410 ms max)</li>
-          </ul>
         </div>
       </div>
     </section>
 
     <section id="tab-commands" class="panel stack">
       <div class="card">
-        <h3>Quick Commands (Synced on origin/main)</h3>
-        <pre>git fetch origin &amp;&amp; git checkout -B main origin/main
-python scripts/fetch_opponents.py
-python scripts/tournament_elo.py --bots lightzero_v3 heuristic_v2 wd_bestv6 wd_heuristic kvatsa5 starter --games-2p 4 --games-4p 0 --sims 10 --time-budget 0.16
-python scripts/tournament_elo.py --bots lightzero_v3 heuristic_v2 wd_bestv6 wd_heuristic kvatsa5 starter --games-2p 0 --games-4p 18 --sims 10 --time-budget 0.16
-python scripts/pretrain_alphazero.py --games-2p 60 --games-4p 40 --distill-prob 0.30 --epochs 24 --out checkpoints/ckpt_best.pth.tar
+        <h3>Reproducible Gen 4 Training, Search &amp; Eval Commands</h3>
+        <pre># 1. DAgger on-policy oracle collection + resume training (PlanetTransformer v2)
+python scripts/train_planet_transformer.py --dataset-cache pt_dataset.npz --save-cache pt_dataset_dagger.npz \
+  --dagger-checkpoint checkpoints/planet_transformer_v1_backup.pt --dagger-2p 10 --dagger-4p 6 --collect-only
+python scripts/train_planet_transformer.py --dataset-cache pt_dataset_dagger.npz \
+  --resume checkpoints/planet_transformer_v1_backup.pt --epochs 9 --lr 7e-4 --out checkpoints/planet_transformer_v2.pt
+
+# 2. Self-Play PPO + Anchor-KL RL fine-tuning (PlanetTransformer v2+RL)
+python scripts/rl_finetune_transformer.py --init checkpoints/planet_transformer_v2.pt \
+  --out checkpoints/planet_transformer_v2_rl.pt --iterations 5 --episodes-per-iter 8 --kl-coef 0.06
+
+# 3. Evaluate pure policy or AlphaZero-style value-guided lookahead search
+python scripts/evaluate.py --candidate planet_transformer --opponents subham_v14 lightzero --games 6 --players 2
+python scripts/evaluate.py --candidate planet_transformer_search --opponents subham_v14 --games 4 --players 4
 pytest -v</pre>
       </div>
     </section>
   </div>
 
   <script>
+    const KAGGLE_LADDER = [
+      { name: "#1 Isaiah @ Tufa Labs (200M, B200s)", elo: 1865.1, tag: "Official Kaggle #1", ours: false, boss: true },
+      { name: "#2 Hober Malloc (4.3M, 10B RL)", elo: 1800.1, tag: "Local Boss • Kaggle #2", ours: false, boss: true },
+      { name: "#10 Kaggle Top-10 Cutoff", elo: 1681.5, tag: "Official #10 / 4,729", ours: false },
+      { name: "PT-v2+RL (Ours — DAgger + PPO)", elo: 1540, tag: "Gen 4 • 27 ms", ours: true },
+      { name: "PT-v1 (Ours — 34g BC)", elo: 1430, tag: "Gen 3 • 29 ms", ours: true },
+      { name: "LightZero v3 (Ours — CNN + MCTS)", elo: 1285, tag: "Gen 2 • 130 ms", ours: true },
+      { name: "subham_v14 (3,588-line Heuristic)", elo: 1224, tag: "Kaggle ~1,224", ours: false },
+      { name: "Heuristic v2 (Ours — Rule-Based)", elo: 1220, tag: "Gen 1 • 7 ms", ours: true },
+      { name: "Agent OW-Proto (Public Kaggle)", elo: 1020, tag: "Kaggle ~1,000+", ours: false },
+      { name: "Kaggle Starter (Anchor)", elo: 600, tag: "Baseline", ours: false }
+    ];
+    const ABLATIONS = [
+      { name: "PT-v1 (Gen 3 BC)", method: "34g Hober BC (17 ep)", vsV1: "—", vsSub2: "6–0 (100%)", vsSub4: "1–3 (25%, rk 2.50)", vsBoss: "0–6 (117.2t)", ms: "29.0", hi: false },
+      { name: "PT-v1 + Search", method: "AlphaZero 10t lookahead", vsV1: "—", vsSub2: "—", vsSub4: "4–0 (100%, rk 1.00)", vsBoss: "0–4 (110.2t)", ms: "187.6", hi: false },
+      { name: "PT-v2 (DAgger)", method: "+16g on-policy oracle (9 ep)", vsV1: "3–3 (50%)", vsSub2: "—", vsSub4: "4–0 (100%, rk 1.00)", vsBoss: "—", ms: "26.9", hi: false },
+      { name: "PT-v2+RL (Promoted)", method: "DAgger + Self-Play PPO + KL", vsV1: "5–1 (83.3%)", vsSub2: "6–0 (100%)", vsSub4: "4–0 (100%, 130.8t)", vsBoss: "0–6 (109.2t)", ms: "27.2", hi: true },
+      { name: "PT-v2+RL + Search", method: "PT-v2+RL + 10t lookahead", vsV1: "—", vsSub2: "—", vsSub4: "—", vsBoss: "0–4 (121.0t)", ms: "145.0", hi: false }
+    ];
     const ELO_2P = [
-      { id: "lightzero_v3", name: "LightZero v3 (Ours)", elo: 2300.3, ci: [2044, 2980], wdl: "19-0-1", wr: 95.0, ours: true },
-      { id: "heuristic_v2", name: "Heuristic v2 (Ours)", elo: 2070.0, ci: [1786, 2675], wdl: "16-0-4", wr: 80.0, ours: true },
-      { id: "wd_heuristic", name: "wd_heuristic", elo: 1796.3, ci: [1561, 2235], wdl: "12-0-8", wr: 60.0, ours: false },
-      { id: "wd_bestv6", name: "wd_bestv6 (CMA-ES)", elo: 1575.6, ci: [1347, 1772], wdl: "9-0-11", wr: 45.0, ours: false },
-      { id: "starter", name: "Kaggle Starter (Anchor)", elo: 1000.0, ci: [1000, 1000], wdl: "4-0-16", wr: 20.0, ours: false },
-      { id: "kvatsa5", name: "kvatsa5 (Predator v3)", elo: 392.4, ci: [255, 628], wdl: "0-0-20", wr: 0.0, ours: false }
+      { name: "LightZero v3 (Ours)", elo: 2300.3, ci: [2044, 2980], wdl: "19-0-1", wr: 95.0, ours: true },
+      { name: "Heuristic v2 (Ours)", elo: 2070.0, ci: [1786, 2675], wdl: "16-0-4", wr: 80.0, ours: true },
+      { name: "wd_heuristic", elo: 1796.3, ci: [1561, 2235], wdl: "12-0-8", wr: 60.0, ours: false },
+      { name: "wd_bestv6 (CMA-ES)", elo: 1575.6, ci: [1347, 1772], wdl: "9-0-11", wr: 45.0, ours: false },
+      { name: "Kaggle Starter (Anchor)", elo: 1000.0, ci: [1000, 1000], wdl: "4-0-16", wr: 20.0, ours: false },
+      { name: "kvatsa5 (Predator v3)", elo: 392.4, ci: [255, 628], wdl: "0-0-20", wr: 0.0, ours: false }
     ];
-
     const ELO_4P = [
-      { id: "wd_bestv6", name: "wd_bestv6 (CMA-ES)", elo: 1377.3, ci: [1187, 1765], games: 12, wr: 33.3, top2: 91.7, avgPlc: 1.75, ours: false },
-      { id: "heuristic_v2", name: "Heuristic v2 (Ours)", elo: 1357.8, ci: [1047, 1924], games: 12, wr: 66.7, top2: 75.0, avgPlc: 1.75, ours: true },
-      { id: "lightzero_v3", name: "LightZero v3 (Ours)", elo: 1323.5, ci: [1151, 1649], games: 12, wr: 25.0, top2: 66.7, avgPlc: 2.08, ours: true },
-      { id: "wd_heuristic", name: "wd_heuristic", elo: 1104.8, ci: [894, 1382], games: 12, wr: 16.7, top2: 33.3, avgPlc: 2.83, ours: false },
-      { id: "starter", name: "Kaggle Starter (Anchor)", elo: 1000.0, ci: [1000, 1000], games: 12, wr: 8.3, top2: 25.0, avgPlc: 3.08, ours: false },
-      { id: "kvatsa5", name: "kvatsa5 (Predator v3)", elo: 933.1, ci: [626, 1124], games: 12, wr: 0.0, top2: 8.3, avgPlc: 3.50, ours: false }
+      { name: "wd_bestv6 (CMA-ES)", elo: 1377.3, ci: [1187, 1765], wr: 33.3, top2: 91.7, avgPlc: 1.75, ours: false },
+      { name: "Heuristic v2 (Ours)", elo: 1357.8, ci: [1047, 1924], wr: 66.7, top2: 75.0, avgPlc: 1.75, ours: true },
+      { name: "LightZero v3 (Ours)", elo: 1323.5, ci: [1151, 1649], wr: 25.0, top2: 66.7, avgPlc: 2.08, ours: true },
+      { name: "wd_heuristic", elo: 1104.8, ci: [894, 1382], wr: 16.7, top2: 33.3, avgPlc: 2.83, ours: false },
+      { name: "Kaggle Starter (Anchor)", elo: 1000.0, ci: [1000, 1000], wr: 8.3, top2: 25.0, avgPlc: 3.08, ours: false },
+      { name: "kvatsa5 (Predator v3)", elo: 933.1, ci: [626, 1124], wr: 0.0, top2: 8.3, avgPlc: 3.50, ours: false }
     ];
-
-    const MATRIX_ORDER = [
-      { id: "lightzero_v3", short: "LZ v3" },
-      { id: "heuristic_v2", short: "Heur v2" },
-      { id: "wd_heuristic", short: "wd_heur" },
-      { id: "wd_bestv6", short: "wd_v6" },
-      { id: "starter", short: "Starter" },
-      { id: "kvatsa5", short: "kvatsa5" }
-    ];
-    const MATRIX_2P = {
-      lightzero_v3: { heuristic_v2: [3,1], wd_heuristic: [4,0], wd_bestv6: [4,0], starter: [4,0], kvatsa5: [4,0] },
-      heuristic_v2: { lightzero_v3: [1,3], wd_heuristic: [3,1], wd_bestv6: [4,0], starter: [4,0], kvatsa5: [4,0] },
-      wd_heuristic: { lightzero_v3: [0,4], heuristic_v2: [1,3], wd_bestv6: [3,1], starter: [4,0], kvatsa5: [4,0] },
-      wd_bestv6:    { lightzero_v3: [0,4], heuristic_v2: [0,4], wd_heuristic: [1,3], starter: [4,0], kvatsa5: [4,0] },
-      starter:      { lightzero_v3: [0,4], heuristic_v2: [0,4], wd_heuristic: [0,4], wd_bestv6: [0,4], kvatsa5: [4,0] },
-      kvatsa5:      { lightzero_v3: [0,4], heuristic_v2: [0,4], wd_heuristic: [0,4], wd_bestv6: [0,4], starter: [0,4] }
-    };
-
     const SUITES = {
-      "lz_v3": [
-        { opp: "wd_bestv6 (2P)", src: "LightZero v3 MCTS", wdl: "6-0-0", wr: 100.0, rank: "1.00", ticks: 205.0, mean: 134.3, max: 468.9 },
-        { opp: "3× heuristic v2 (4P)", src: "LightZero v3 MCTS", wdl: "3-0-1", wr: 75.0, rank: "1.50", ticks: 164.5, mean: 142.1, max: 229.7 },
-        { opp: "heuristic v2 (2P, 10g)", src: "LightZero v3 MCTS", wdl: "6-0-4", wr: 60.0, rank: "1.40", ticks: 186.7, mean: 150.6, max: 471.7 },
-        { opp: "3× wd_bestv6 (4P, 8g)", src: "LightZero v3 MCTS", wdl: "4-0-4", wr: 50.0, rank: "2.06", ticks: 271.1, mean: 101.1, max: 406.7 }
+      pt_v2_rl: [
+        { opp: "LightZero v3 (2P)", cand: "PT-v2+RL", wdl: "6-0-0", wr: 100.0, rank: "1.00", ticks: 113.3, ms: 34.4 },
+        { opp: "subham_v14 (2P)", cand: "PT-v2+RL", wdl: "6-0-0", wr: 100.0, rank: "1.00", ticks: 104.5, ms: 32.1 },
+        { opp: "3× subham_v14 (4P)", cand: "PT-v2+RL", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 130.8, ms: 27.2 },
+        { opp: "PT-v1 (2P)", cand: "PT-v2+RL", wdl: "5-0-1", wr: 83.3, rank: "1.17", ticks: 151.5, ms: 30.3 },
+        { opp: "PT-v2 DAgger (2P)", cand: "PT-v2+RL", wdl: "5-0-1", wr: 83.3, rank: "1.17", ticks: 230.5, ms: 25.5 },
+        { opp: "3× wd_bestv6 (4P)", cand: "PT-v2+RL", wdl: "3-0-1", wr: 75.0, rank: "1.50", ticks: 222.2, ms: 24.9 },
+        { opp: "#2 Hober Malloc (2P)", cand: "PT-v2+RL", wdl: "0-0-6", wr: 0.0, rank: "2.00", ticks: 109.2, ms: 30.0 }
       ],
-      "4p_heuristic": [
-        { opp: "starter (×3)", src: "Heuristic v2", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 93.0, mean: 4.71, max: 23.10 },
-        { opp: "kvatsa5 (×3)", src: "Heuristic v2", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 111.8, mean: 5.71, max: 36.03 },
-        { opp: "wd_heuristic (×3)", src: "Heuristic v2", wdl: "3-0-1", wr: 75.0, rank: "1.50", ticks: 171.2, mean: 5.85, max: 22.47 },
-        { opp: "wd_bestv6 (×3, 12g)", src: "Heuristic v2", wdl: "5-0-7", wr: 41.7, rank: "2.17", ticks: 297.1, mean: 7.32, max: 49.16 }
+      pt_v1: [
+        { opp: "LightZero v3 (2P)", cand: "PT-v1", wdl: "6-0-0", wr: 100.0, rank: "1.00", ticks: 117.2, ms: 31.0 },
+        { opp: "subham_v14 (2P)", cand: "PT-v1", wdl: "6-0-0", wr: 100.0, rank: "1.00", ticks: 103.5, ms: 28.0 },
+        { opp: "3× Heuristic v2 (4P)", cand: "PT-v1", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 147.8, ms: 29.0 },
+        { opp: "3× wd_bestv6 (4P)", cand: "PT-v1", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 192.2, ms: 34.0 },
+        { opp: "3× subham_v14 (4P)", cand: "PT-v1", wdl: "1-0-3", wr: 25.0, rank: "2.50", ticks: 149.0, ms: 30.0 },
+        { opp: "#2 Hober Malloc (2P)", cand: "PT-v1", wdl: "0-0-6", wr: 0.0, rank: "2.00", ticks: 117.2, ms: 30.0 }
       ],
-      "2p_heuristic": [
-        { opp: "random", src: "Heuristic v2", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 94.2, mean: 5.89, max: 39.37 },
-        { opp: "starter", src: "Heuristic v2", wdl: "4-0-0", wr: 100.0, rank: "1.00", ticks: 105.0, mean: 6.39, max: 40.70 },
-        { opp: "wd_swarm/turtle/sniper/peer", src: "Heuristic v2 (16g)", wdl: "16-0-0", wr: 100.0, rank: "1.00", ticks: 115.2, mean: 6.95, max: 53.99 },
-        { opp: "kvatsa5", src: "Heuristic v2", wdl: "8-0-0", wr: 100.0, rank: "1.00", ticks: 119.9, mean: 5.06, max: 50.15 },
-        { opp: "wd_heuristic", src: "Heuristic v2", wdl: "8-0-0", wr: 100.0, rank: "1.00", ticks: 144.8, mean: 9.78, max: 45.90 },
-        { opp: "wd_bestv6", src: "Heuristic v2", wdl: "8-0-0", wr: 100.0, rank: "1.00", ticks: 186.6, mean: 10.82, max: 82.17 }
+      lz_v3: [
+        { opp: "wd_bestv6 (2P)", cand: "LightZero v3", wdl: "6-0-0", wr: 100.0, rank: "1.00", ticks: 205.0, ms: 134.3 },
+        { opp: "3× Heuristic v2 (4P)", cand: "LightZero v3", wdl: "3-0-1", wr: 75.0, rank: "1.50", ticks: 164.5, ms: 142.1 },
+        { opp: "subham_v14 (2P)", cand: "LightZero v3", wdl: "4-0-2", wr: 66.7, rank: "1.33", ticks: 152.0, ms: 132.0 },
+        { opp: "Heuristic v2 (2P, 10g)", cand: "LightZero v3", wdl: "6-0-4", wr: 60.0, rank: "1.40", ticks: 186.7, ms: 150.6 },
+        { opp: "3× wd_bestv6 (4P, 8g)", cand: "LightZero v3", wdl: "4-0-4", wr: 50.0, rank: "2.06", ticks: 271.1, ms: 101.1 },
+        { opp: "3× subham_v14 (4P)", cand: "LightZero v3", wdl: "1-0-3", wr: 25.0, rank: "2.50", ticks: 165.0, ms: 130.0 }
       ]
     };
 
+    function renderKaggleLadder() {
+      const minE = 500, maxE = 1900;
+      document.getElementById("kaggle-elo-bars").innerHTML = KAGGLE_LADDER.map(r => {
+        const pct = Math.max(6, Math.round(((r.elo - minE) / (maxE - minE)) * 100));
+        const cls = r.boss ? "fill-warn" : r.ours ? "fill-pri" : "fill-muted";
+        return `<div class="bar-row">
+          <span>${r.name.startsWith("PT-v2+RL") ? `<strong class="ok">${r.name}</strong>` : r.ours ? `<strong>${r.name}</strong>` : r.name}</span>
+          <div class="bar-track"><div class="bar-fill ${cls}" style="width:${pct}%"></div></div>
+          <span class="mono" style="text-align:right"><strong>~${r.elo}</strong> (${r.tag})</span>
+        </div>`;
+      }).join("");
+    }
+    function renderAblations() {
+      document.getElementById("ablation-tbody").innerHTML = ABLATIONS.map(r => `
+        <tr class="${r.hi ? "ours-row" : ""}">
+          <td>${r.name}</td><td style="color:var(--muted)">${r.method}</td>
+          <td class="num mono">${r.vsV1}</td><td class="num mono">${r.vsSub2}</td>
+          <td class="num mono ${r.vsSub4.startsWith("4–0") ? "ok" : ""}">${r.vsSub4}</td>
+          <td class="num mono">${r.vsBoss}</td><td class="num mono">${r.ms}</td>
+        </tr>`).join("");
+    }
     function renderElo(mode) {
-      const is2p = mode === "2p";
-      const rows = is2p ? ELO_2P : ELO_4P;
+      const is2p = mode === "2p", rows = is2p ? ELO_2P : ELO_4P;
       document.getElementById("elo-subtitle").textContent = is2p
         ? "60 official 2P games (4 slot-balanced games/pair) • Bradley-Terry MLE + 95% bootstrap CI."
         : "18 mixed 4P FFA tables (12 games/bot, balanced seats) • Survival-ranked Plackett-Luce MLE + 95% CI.";
-      const minElo = Math.min(...rows.map(r => r.elo)) - 100;
-      const maxElo = Math.max(...rows.map(r => r.elo)) + 50;
+      const minE = Math.min(...rows.map(r => r.elo)) - 100, maxE = Math.max(...rows.map(r => r.elo)) + 50;
       document.getElementById("elo-bars").innerHTML = rows.map((r, i) => {
-        const pct = Math.max(4, Math.round(((r.elo - minElo) / (maxElo - minElo)) * 100));
-        const fill = r.ours ? "fill-pri" : i === 0 ? "fill-ok" : "fill-muted";
-        return `<div class="bar-row">
-          <span>${i + 1}. ${r.name}</span>
-          <div class="bar-track"><div class="bar-fill ${fill}" style="width:${pct}%"></div></div>
-          <span class="mono" style="text-align:right"><strong>${r.elo.toFixed(0)}</strong> Elo (${r.wr.toFixed(0)}%)</span>
-        </div>`;
+        const pct = Math.max(5, Math.round(((r.elo - minE) / (maxE - minE)) * 100));
+        const cls = r.ours ? "fill-pri" : i === 0 ? "fill-ok" : "fill-muted";
+        return `<div class="bar-row"><span>${i+1}. ${r.name}</span><div class="bar-track"><div class="bar-fill ${cls}" style="width:${pct}%"></div></div><span class="mono" style="text-align:right"><strong>${r.elo.toFixed(0)}</strong> Elo (${r.wr.toFixed(0)}%)</span></div>`;
       }).join("");
       if (is2p) {
         document.getElementById("elo-thead").innerHTML = `<tr><th>#</th><th>Bot</th><th class="num">2P Elo</th><th class="num">95% CI</th><th class="num">W-D-L</th><th class="num">Win %</th></tr>`;
-        document.getElementById("elo-tbody").innerHTML = rows.map((r, i) => `
-          <tr class="${r.ours ? "ours-row" : ""}">
-            <td class="mono">${i + 1}</td><td><strong>${r.name}</strong></td>
-            <td class="num mono"><strong>${r.elo.toFixed(1)}</strong></td>
-            <td class="num mono" style="color:var(--muted)">[${r.ci[0]}, ${r.ci[1]}]</td>
-            <td class="num mono">${r.wdl}</td>
-            <td class="num mono"><strong>${r.wr.toFixed(1)}%</strong></td>
-          </tr>`).join("");
+        document.getElementById("elo-tbody").innerHTML = rows.map((r, i) => `<tr class="${r.ours ? "ours-row" : ""}"><td class="mono">${i+1}</td><td>${r.name}</td><td class="num mono">${r.elo.toFixed(1)}</td><td class="num mono" style="color:var(--muted)">[${r.ci[0]}, ${r.ci[1]}]</td><td class="num mono">${r.wdl}</td><td class="num mono">${r.wr.toFixed(1)}%</td></tr>`).join("");
       } else {
-        document.getElementById("elo-thead").innerHTML = `<tr><th>#</th><th>Bot</th><th class="num">4P Elo</th><th class="num">95% CI</th><th class="num">Win % (par 25%)</th><th class="num">Top-2 %</th><th class="num">Avg Place</th></tr>`;
-        document.getElementById("elo-tbody").innerHTML = rows.map((r, i) => `
-          <tr class="${r.ours ? "ours-row" : ""}">
-            <td class="mono">${i + 1}</td><td><strong>${r.name}</strong></td>
-            <td class="num mono"><strong>${r.elo.toFixed(1)}</strong></td>
-            <td class="num mono" style="color:var(--muted)">[${r.ci[0]}, ${r.ci[1]}]</td>
-            <td class="num mono"><strong>${r.wr.toFixed(1)}%</strong></td>
-            <td class="num mono">${r.top2.toFixed(1)}%</td>
-            <td class="num mono">${r.avgPlc.toFixed(2)}</td>
-          </tr>`).join("");
+        document.getElementById("elo-thead").innerHTML = `<tr><th>#</th><th>Bot</th><th class="num">4P Elo</th><th class="num">95% CI</th><th class="num">Win %</th><th class="num">Top-2 %</th><th class="num">Avg Pl</th></tr>`;
+        document.getElementById("elo-tbody").innerHTML = rows.map((r, i) => `<tr class="${r.ours ? "ours-row" : ""}"><td class="mono">${i+1}</td><td>${r.name}</td><td class="num mono">${r.elo.toFixed(1)}</td><td class="num mono" style="color:var(--muted)">[${r.ci[0]}, ${r.ci[1]}]</td><td class="num mono">${r.wr.toFixed(1)}%</td><td class="num mono">${r.top2.toFixed(1)}%</td><td class="num mono">${r.avgPlc.toFixed(2)}</td></tr>`).join("");
       }
       document.querySelectorAll(".elo-btn").forEach(b => b.classList.toggle("active", b.dataset.elo === mode));
     }
-
-    function renderMatrix() {
-      const thead = `<thead><tr><th>Row vs. Col</th>${MATRIX_ORDER.map(c => `<th class="ctr mono">${c.short}</th>`).join("")}</tr></thead>`;
-      const tbody = `<tbody>${MATRIX_ORDER.map(r => `<tr><td class="mono"><strong>${r.short}</strong></td>${MATRIX_ORDER.map(c => {
-        if (r.id === c.id) return `<td class="ctr mono" style="color:var(--muted)">—</td>`;
-        const [w, l] = MATRIX_2P[r.id][c.id];
-        const pct = Math.round((w / (w + l)) * 100);
-        const cls = pct >= 75 ? "cell-hi" : pct <= 25 ? "cell-lo" : "cell-mid";
-        return `<td class="ctr mono ${cls}">${pct}% (${w}-${l})</td>`;
-      }).join("")}</tr>`).join("")}</tbody>`;
-      document.getElementById("h2h-matrix").innerHTML = thead + tbody;
-    }
-
-    function fillClass(wr) { return wr >= 50 ? "fill-ok" : wr >= 25 ? "fill-pri" : "fill-err"; }
-
     function renderSuite(key) {
       const rows = SUITES[key];
-      document.getElementById("winrate-bars").innerHTML = rows.map(r => `
-        <div class="bar-row">
-          <span class="mono">${r.opp}</span>
-          <div class="bar-track"><div class="bar-fill ${fillClass(r.wr)}" style="width:${Math.max(r.wr, 2)}%"></div></div>
-          <span class="mono" style="text-align:right">${r.wr.toFixed(1)}% (${r.wdl})</span>
-        </div>
-      `).join("");
-      document.getElementById("benchmark-tbody").innerHTML = rows.map(r => `
-        <tr>
-          <td class="mono">${r.opp}</td><td>${r.src}</td><td class="mono">${r.wdl}</td>
-          <td class="num mono"><strong>${r.wr.toFixed(1)}%</strong></td>
-          <td class="num mono">${r.rank}</td>
-          <td class="num mono">${r.ticks.toFixed(1)}</td>
-          <td class="num mono">${r.mean.toFixed(1)} / ${r.max.toFixed(1)}</td>
-        </tr>
-      `).join("");
+      document.getElementById("winrate-bars").innerHTML = rows.map(r => {
+        const cls = r.wr >= 75 ? "fill-ok" : r.wr >= 50 ? "fill-pri" : r.wr >= 25 ? "fill-warn" : "fill-err";
+        return `<div class="bar-row"><span>${r.opp}</span><div class="bar-track"><div class="bar-fill ${cls}" style="width:${Math.max(4, r.wr)}%"></div></div><span class="mono" style="text-align:right"><strong>${r.wr.toFixed(1)}%</strong> (${r.wdl})</span></div>`;
+      }).join("");
+      document.getElementById("benchmark-tbody").innerHTML = rows.map(r => `<tr><td>${r.opp}</td><td style="color:var(--muted)">${r.cand}</td><td class="mono">${r.wdl}</td><td class="num mono">${r.wr.toFixed(1)}%</td><td class="num mono">${r.rank}</td><td class="num mono">${r.ticks.toFixed(1)}</td><td class="num mono">${r.ms.toFixed(1)}</td></tr>`).join("");
       document.querySelectorAll(".suite-btn").forEach(b => b.classList.toggle("active", b.dataset.suite === key));
     }
-
-    document.querySelectorAll(".tab-btn").forEach(b => b.addEventListener("click", () => {
-      document.querySelectorAll(".tab-btn").forEach(x => x.classList.toggle("active", x === b));
-      document.querySelectorAll(".panel").forEach(p => p.classList.toggle("active", p.id === "tab-" + b.dataset.tab));
+    document.querySelectorAll(".tab-btn").forEach(btn => btn.addEventListener("click", () => {
+      const tab = btn.dataset.tab;
+      document.querySelectorAll(".panel").forEach(p => p.classList.toggle("active", p.id === "tab-" + tab));
+      document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
     }));
     document.querySelectorAll(".elo-btn").forEach(b => b.addEventListener("click", () => renderElo(b.dataset.elo)));
     document.querySelectorAll(".suite-btn").forEach(b => b.addEventListener("click", () => renderSuite(b.dataset.suite)));
-    renderElo("2p");
-    renderMatrix();
-    renderSuite("lz_v3");
+    renderKaggleLadder(); renderAblations(); renderElo("2p"); renderSuite("pt_v2_rl");
   </script>
 </body>
 </html>

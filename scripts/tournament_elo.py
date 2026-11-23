@@ -48,6 +48,7 @@ DEFAULT_BOTS = [
 ]
 
 BOT_DISPLAY_NAMES: Dict[str, str] = {
+    "planet_transformer_search": "PlanetTransformer+Search",
     "planet_transformer": "PlanetTransformer (Ours)",
     "lightzero_v3": "LightZero v3 (Ours)",
     "lightzero_v2": "LightZero v2 (Ours)",
@@ -80,7 +81,10 @@ def _resolve_tournament_bot(name: str, sims: int, time_budget: float):
 
     from evaluate import resolve_agent
 
-    if name == "planet_transformer":
+    if name == "planet_transformer_search":
+        ckpt = str(REPO_ROOT / "checkpoints" / "planet_transformer_best.pt")
+        agent = resolve_agent("planet_transformer_search", checkpoint=ckpt, time_budget=time_budget)
+    elif name == "planet_transformer":
         ckpt = str(REPO_ROOT / "checkpoints" / "planet_transformer_best.pt")
         agent = resolve_agent("planet_transformer", checkpoint=ckpt)
     elif name == "lightzero_v3":

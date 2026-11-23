@@ -288,6 +288,239 @@ def collect_dataset(
     return data
 
 
+def _collect_dagger_game(task: Tuple[List[str], int, int, bool]) -> Dict[str, Any]:
+    """Play one game with our student bot and query Hober Malloc as on-policy DAgger oracle.
+
+    Oversamples lost/weak games (every turn sampled) compared to won games (stride 2)
+    so training specifically repairs compounding distribution-shift errors.
+    """
+    bot_specs, seed, student_slot, fast_teacher = task
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    if fast_teacher:
+        os.environ["OW_ROTATION_TTA"] = "0"
+        os.environ["OW_OPPONENT_TTA"] = "0"
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+
+    from kaggle_environments import make
+
+    agents = [_get_worker_agent(s) for s in bot_specs]
+    oracle = _get_worker_agent("hober_malloc")
+    random.seed(seed)
+    np.random.seed(seed)
+    cfg = {"seed": seed, "actTimeout": 30, "agentTimeout": 60}
+    env = make("orbit_wars", configuration=cfg, debug=False)
+    steps = env.run(agents)
+    n_players = len(bot_specs)
+    final = steps[-1]
+    rewards = [
+        float(final[i]["reward"]) if final[i]["reward"] is not None else -1.0
+        for i in range(n_players)
+    ]
+
+    if n_players == 2:
+        val_targets = [1.0 if r > 0 else (-1.0 if r < 0 else 0.0) for r in rewards]
+    else:
+        last_alive = [0] * n_players
+        for t_idx, st in enumerate(steps):
+            obs = st[0]["observation"]
+            alive = [0] * n_players
+            for p in obs.get("planets", []):
+                if 0 <= int(p[1]) < n_players:
+                    alive[int(p[1])] += int(p[5])
+            for fl in obs.get("fleets", []):
+                if 0 <= int(fl[1]) < n_players:
+                    alive[int(fl[1])] += int(fl[6])
+            for i in range(n_players):
+                if alive[i] > 0:
+                    last_alive[i] = t_idx
+        order = sorted(range(n_players), key=lambda i: (rewards[i], last_alive[i]), reverse=True)
+        grad = [1.0, 0.25, -0.35, -1.0]
+        val_targets = [0.0] * n_players
+        for rank_idx, pid in enumerate(order):
+            val_targets[pid] = grad[rank_idx]
+
+    student_won = rewards[student_slot] == max(rewards) and rewards.count(max(rewards)) == 1
+    # Focus heavily on lost games (every tick), lighter on already-won games (stride 2)
+    stride = 2 if student_won else 1
+
+    pf_list: List[np.ndarray] = []
+    tf_list: List[np.ndarray] = []
+    ef_list: List[np.ndarray] = []
+    le_list: List[np.ndarray] = []
+    om_list: List[np.ndarray] = []
+    pm_list: List[np.ndarray] = []
+    act_list: List[np.ndarray] = []
+    frac_list: List[np.ndarray] = []
+    val_list: List[float] = []
+
+    matched_moves = 0
+    total_moves = 0
+    disagree_turns = 0
+    queried_turns = 0
+
+    for t in range(0, len(steps) - 1, stride):
+        obs_t = steps[t][student_slot]["observation"]
+        enc = extract_planet_features(obs_t, player=student_slot)
+        if not np.any(enc.owned_mask):
+            continue
+
+        oracle_obs = dict(obs_t)
+        oracle_obs["player"] = student_slot
+        oracle_moves = oracle(oracle_obs, env.configuration) or []
+        student_moves = steps[t + 1][student_slot].get("action") or []
+        queried_turns += 1
+        if len(oracle_moves) != len(student_moves):
+            disagree_turns += 1
+
+        padded = pad_encoded_state(enc, MAX_PLANETS)
+        target_cls = np.zeros((MAX_PLANETS,), dtype=np.int64)
+        target_frac = np.ones((MAX_PLANETS,), dtype=np.float32)
+
+        for mv in oracle_moves:
+            total_moves += 1
+            rec = match_action_to_target(mv, enc)
+            if rec is None:
+                continue
+            src_i, dst_i, frac = rec
+            if padded["legal_edges"][src_i, dst_i]:
+                target_cls[src_i] = 1 + dst_i
+                target_frac[src_i] = frac
+                matched_moves += 1
+
+        pf_list.append(padded["planet_feats"])
+        tf_list.append(padded["timeline_feats"])
+        ef_list.append(padded["edge_feats"])
+        le_list.append(padded["legal_edges"])
+        om_list.append(padded["owned_mask"])
+        pm_list.append(padded["pad_mask"])
+        act_list.append(target_cls)
+        frac_list.append(target_frac)
+        val_list.append(val_targets[student_slot])
+
+    return {
+        "n_samples": len(val_list),
+        "matched_moves": matched_moves,
+        "total_moves": total_moves,
+        "student_won": int(student_won),
+        "disagree_turns": disagree_turns,
+        "queried_turns": queried_turns,
+        "steps": len(steps) - 1,
+        "planet_feats": np.stack(pf_list, axis=0) if pf_list else np.zeros((0, MAX_PLANETS, PLANET_FEAT_DIM), np.float32),
+        "timeline_feats": np.stack(tf_list, axis=0) if tf_list else np.zeros((0, MAX_PLANETS, TIMELINE_HORIZON, TIMELINE_FEAT_DIM), np.float32),
+        "edge_feats": np.stack(ef_list, axis=0) if ef_list else np.zeros((0, MAX_PLANETS, MAX_PLANETS, EDGE_FEAT_DIM), np.float32),
+        "legal_edges": np.stack(le_list, axis=0) if le_list else np.zeros((0, MAX_PLANETS, MAX_PLANETS), bool),
+        "owned_mask": np.stack(om_list, axis=0) if om_list else np.zeros((0, MAX_PLANETS), bool),
+        "pad_mask": np.stack(pm_list, axis=0) if pm_list else np.zeros((0, MAX_PLANETS), bool),
+        "target_cls": np.stack(act_list, axis=0) if act_list else np.zeros((0, MAX_PLANETS), np.int64),
+        "target_frac": np.stack(frac_list, axis=0) if frac_list else np.zeros((0, MAX_PLANETS), np.float32),
+        "val_targets": np.asarray(val_list, dtype=np.float32),
+    }
+
+
+def collect_dagger_dataset(
+    student_checkpoint: str,
+    dagger_2p: int,
+    dagger_4p: int,
+    workers: int,
+    seed: int,
+    fast_teacher: bool = True,
+) -> Dict[str, np.ndarray]:
+    """Run DAgger: pit our student against tough opponents and label visited states with Hober Malloc."""
+    student_spec = f"planet_transformer:{student_checkpoint}"
+    tasks: List[Tuple[List[str], int, int, bool]] = []
+
+    # 2P DAgger: mostly against Hober Malloc (our primary boss) + occasional subham_v14
+    for g in range(dagger_2p):
+        opp = "hober_malloc" if (g % 5 != 4) else "subham_v14"
+        if g % 2 == 0:
+            tasks.append(([student_spec, opp], seed + 20000 + g, 0, fast_teacher))
+        else:
+            tasks.append(([opp, student_spec], seed + 20000 + g, 1, fast_teacher))
+
+    # 4P DAgger: against 3x subham_v14 (our biggest 4P weakness!) and mixed Hober+subham tables
+    for g in range(dagger_4p):
+        s = seed + 30000 + g
+        slot = g % 4
+        if g % 3 != 2:
+            roster = ["subham_v14"] * 4
+            roster[slot] = student_spec
+        else:
+            roster = ["subham_v14", "hober_malloc", "heuristic", "subham_v14"]
+            roster[slot] = student_spec
+        tasks.append((roster, s, slot, fast_teacher))
+
+    print(
+        f"[DAgger] Collecting {dagger_2p} 2P + {dagger_4p} 4P on-policy oracle games "
+        f"(student={student_checkpoint}, workers={workers})...",
+        flush=True,
+    )
+    t0 = time.time()
+    parts: List[Dict[str, Any]] = []
+    tot_matched = tot_moves = tot_wins = tot_disagree = tot_queried = 0
+
+    if workers <= 1:
+        for idx, task in enumerate(tasks, 1):
+            res = _collect_dagger_game(task)
+            parts.append(res)
+            tot_matched += res["matched_moves"]
+            tot_moves += res["total_moves"]
+            tot_wins += res["student_won"]
+            tot_disagree += res["disagree_turns"]
+            tot_queried += res["queried_turns"]
+            if idx % 4 == 0 or idx == len(tasks):
+                print(
+                    f"  dagger {idx}/{len(tasks)} ({time.time()-t0:.1f}s) | "
+                    f"student_wins={tot_wins}/{idx} | launch_cnt_diff={100*tot_disagree/max(1,tot_queried):.1f}% | "
+                    f"oracle_match={100*tot_matched/max(1,tot_moves):.1f}%",
+                    flush=True,
+                )
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futs = [pool.submit(_collect_dagger_game, t) for t in tasks]
+            for idx, fut in enumerate(as_completed(futs), 1):
+                res = fut.result()
+                parts.append(res)
+                tot_matched += res["matched_moves"]
+                tot_moves += res["total_moves"]
+                tot_wins += res["student_won"]
+                tot_disagree += res["disagree_turns"]
+                tot_queried += res["queried_turns"]
+                if idx % 4 == 0 or idx == len(tasks):
+                    print(
+                        f"  dagger {idx}/{len(tasks)} ({time.time()-t0:.1f}s) | "
+                        f"student_wins={tot_wins}/{idx} | launch_cnt_diff={100*tot_disagree/max(1,tot_queried):.1f}% | "
+                        f"oracle_match={100*tot_matched/max(1,tot_moves):.1f}%",
+                        flush=True,
+                    )
+
+    keys = [
+        "planet_feats",
+        "timeline_feats",
+        "edge_feats",
+        "legal_edges",
+        "owned_mask",
+        "pad_mask",
+        "target_cls",
+        "target_frac",
+        "val_targets",
+    ]
+    data = {k: np.concatenate([p[k] for p in parts], axis=0) for k in keys}
+    n_samples = len(data["val_targets"])
+    n_owned = int(data["owned_mask"].sum())
+    n_launch = int(((data["target_cls"] > 0) & data["owned_mask"]).sum())
+    print(
+        f"[DAgger] Done in {time.time()-t0:.1f}s: {n_samples} states, {n_owned} decisions "
+        f"({n_launch} launches = {100*n_launch/max(1,n_owned):.1f}%), "
+        f"oracle target recovery={100*tot_matched/max(1,tot_moves):.1f}%.",
+        flush=True,
+    )
+    return data
+
+
 def _compute_batch_loss(
     model: PlanetTimelineTransformer,
     pf: torch.Tensor,
@@ -368,6 +601,7 @@ def train_model(
     dim_ff: int = 256,
     out_path: Path,
     seed: int = 42,
+    resume_from: str | None = None,
 ) -> Path:
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -395,9 +629,16 @@ def train_model(
     tr_loader = DataLoader(make_ds(tr_idx), batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader = DataLoader(make_ds(val_idx), batch_size=batch_size, shuffle=False, drop_last=False)
 
-    model = PlanetTimelineTransformer(
-        d_model=d_model, n_heads=n_heads, n_layers=n_layers, dim_ff=dim_ff
-    )
+    if resume_from:
+        ckpt = torch.load(resume_from, map_location="cpu", weights_only=False)
+        cfg = ckpt.get("model_config", {})
+        model = PlanetTimelineTransformer(**cfg)
+        model.load_state_dict(ckpt["model_state_dict"])
+        print(f"[Train] Resumed weights from {resume_from} (config={cfg})", flush=True)
+    else:
+        model = PlanetTimelineTransformer(
+            d_model=d_model, n_heads=n_heads, n_layers=n_layers, dim_ff=dim_ff
+        )
     n_params = sum(p.numel() for p in model.parameters())
     print(
         f"[Train] PlanetTimelineTransformer ({n_params/1e3:.1f}K params) | "
@@ -459,7 +700,7 @@ def train_model(
                 out_path,
             )
 
-        if ep == 1 or ep % 4 == 0 or ep == epochs:
+        if ep == 1 or ep % 2 == 0 or ep == epochs:
             print(
                 f"  ep {ep:2d}/{epochs} ({time.time()-t0:5.1f}s) | "
                 f"tr_pol={avg(tr_metrics,'pol_loss'):.3f} val_pol={v_pol:.3f} | "
@@ -475,15 +716,20 @@ def train_model(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Train PlanetTimelineTransformer on Hober Malloc replays.")
+    parser = argparse.ArgumentParser(description="Train PlanetTimelineTransformer on Hober Malloc replays & DAgger.")
     parser.add_argument("--games-2p", type=int, default=20, help="Number of 2P teacher games to collect.")
     parser.add_argument("--games-4p", type=int, default=8, help="Number of 4P FFA teacher games to collect.")
+    parser.add_argument("--dagger-checkpoint", default=None, help="Student checkpoint for on-policy DAgger collection.")
+    parser.add_argument("--dagger-2p", type=int, default=0, help="Number of 2P DAgger games (vs Hober Malloc).")
+    parser.add_argument("--dagger-4p", type=int, default=0, help="Number of 4P DAgger games (vs 3x subham_v14).")
     parser.add_argument("--sample-stride", type=int, default=2, help="Stride for quiet (non-launch) turns.")
     parser.add_argument("--workers", type=int, default=min(2, os.cpu_count() or 1))
-    parser.add_argument("--dataset-cache", default=None, help="Optional .npz cache path to save/load dataset.")
-    parser.add_argument("--append-cache", action="store_true", help="Collect new games and append to existing cache.")
+    parser.add_argument("--dataset-cache", default=None, help="Optional .npz cache path to load/save dataset.")
+    parser.add_argument("--save-cache", default=None, help="Optional separate .npz path to save merged dataset.")
+    parser.add_argument("--append-cache", action="store_true", help="Collect new/DAgger games and append to existing cache.")
     parser.add_argument("--collect-only", action="store_true", help="Only collect/cache dataset without training.")
     parser.add_argument("--full-tta-teacher", action="store_true", help="Keep Hober Malloc 8x JAX TTA enabled (~5x slower).")
+    parser.add_argument("--resume", default=None, help="Resume training from an existing PlanetTransformer checkpoint.")
     parser.add_argument("--epochs", type=int, default=24)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1.5e-3)
@@ -494,31 +740,50 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cache = Path(args.dataset_cache) if args.dataset_cache else None
-    if cache is not None and cache.is_file() and not args.append_cache:
+    save_cache = Path(args.save_cache) if args.save_cache else cache
+
+    data: Dict[str, np.ndarray] | None = None
+    if cache is not None and cache.is_file():
         print(f"[Collect] Loading cached dataset from {cache}...", flush=True)
         with np.load(cache) as npz:
             data = {k: npz[k] for k in npz.files}
-    else:
-        new_data = collect_dataset(
-            games_2p=args.games_2p,
-            games_4p=args.games_4p,
-            workers=args.workers,
-            seed=args.seed,
-            sample_stride=args.sample_stride,
-            fast_teacher=not args.full_tta_teacher,
-        )
-        if cache is not None and cache.is_file() and args.append_cache:
-            with np.load(cache) as npz:
-                prev = {k: npz[k] for k in npz.files}
-            data = {k: np.concatenate([prev[k], new_data[k]], axis=0) for k in new_data}
-            print(f"[Collect] Appended to cache -> {len(data['val_targets'])} total samples.", flush=True)
-        else:
-            data = new_data
-        if cache is not None:
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            np.savez_compressed(cache, **data)
-            print(f"[Collect] Cached dataset -> {cache} ({cache.stat().st_size/1e6:.2f} MB)", flush=True)
+        print(f"[Collect] Loaded {len(data['val_targets'])} cached board states.", flush=True)
 
+    need_collect = (data is None) or args.append_cache or (args.dagger_checkpoint is not None and (args.dagger_2p > 0 or args.dagger_4p > 0))
+    if need_collect:
+        new_parts: List[Dict[str, np.ndarray]] = []
+        if data is not None:
+            new_parts.append(data)
+        if args.dagger_checkpoint and (args.dagger_2p > 0 or args.dagger_4p > 0):
+            dagger_data = collect_dagger_dataset(
+                student_checkpoint=args.dagger_checkpoint,
+                dagger_2p=args.dagger_2p,
+                dagger_4p=args.dagger_4p,
+                workers=args.workers,
+                seed=args.seed,
+                fast_teacher=not args.full_tta_teacher,
+            )
+            new_parts.append(dagger_data)
+        elif (data is None) or args.append_cache:
+            bc_data = collect_dataset(
+                games_2p=args.games_2p,
+                games_4p=args.games_4p,
+                workers=args.workers,
+                seed=args.seed,
+                sample_stride=args.sample_stride,
+                fast_teacher=not args.full_tta_teacher,
+            )
+            new_parts.append(bc_data)
+
+        keys = list(new_parts[0].keys())
+        data = {k: np.concatenate([p[k] for p in new_parts], axis=0) for k in keys}
+        print(f"[Collect] Combined dataset -> {len(data['val_targets'])} total board states.", flush=True)
+        if save_cache is not None:
+            save_cache.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(save_cache, **data)
+            print(f"[Collect] Cached dataset -> {save_cache} ({save_cache.stat().st_size/1e6:.2f} MB)", flush=True)
+
+    assert data is not None
     if args.collect_only:
         return 0
 
@@ -531,6 +796,7 @@ def main(argv: list[str] | None = None) -> int:
         n_layers=args.n_layers,
         out_path=Path(args.out),
         seed=args.seed,
+        resume_from=args.resume,
     )
     return 0
 
