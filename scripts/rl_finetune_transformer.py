@@ -1,35 +1,40 @@
 #!/usr/bin/env python3
-"""Self-Play PPO + Anchor-KL Reinforcement Learning for ``PlanetTimelineTransformer``.
+"""Self-Play League PPO + Delayed Teacher KL for ``PlanetTimelineTransformer``.
 
-Moves beyond pure teacher imitation (Behavior Cloning / DAgger) by optimizing
-directly for actual 2P and 4P FFA game wins inside ``FastOrbitSim``:
+Upgraded Gen 5 RL trainer incorporating key lessons from Kaggle Orbit Wars top-10
+solutions (#5 TonyK 1754.6 & #7 Audun 1717.3):
 
-- **Per-planet clipped PPO surrogate:** Computes importance ratios per owned
-  planet decision ``r_{t,i} = pi_theta(a_{t,i}|s_t) / pi_old(a_{t,i}|s_t)``,
-  keeping updates numerically stable whether the player controls 1 or 20 planets.
-- **Anchor KL regularization:** Penalizes ``KL(pi_theta || pi_ref)`` against the
-  frozen BC/DAgger checkpoint so precision orbital launch timing is preserved
-  while letting the policy discover stronger strategic lines that beat its anchor.
-- **Mixed 2P + 4P league:** Trains against the frozen anchor, current self-play
-  snapshot, and ``Heuristic v2`` with exact 8x D4 symmetry augmentation.
+- **Historical Opponent Pool + External Diversity:** Plays against frozen past
+  generations (e.g. ``v1``, ``v2``, ``v2_rl``), newly frozen training snapshots,
+  ``Heuristic v2``, and ``subham_v14`` — avoiding live self-play overfitting.
+- **Delayed Moving Teacher KL (EMA):** Regularizes per-planet policy logits toward
+  a slow EMA teacher (updated only on positive-reward iterations) so the policy can
+  climb steadily past its starting anchor without catastrophic forgetting.
+- **Zero-Planet Early Reset:** Ends training episodes cleanly as soon as a player
+  loses their last planet (or only 1 player holds planets), eliminating doomed-fleet
+  garbage frames and accelerating rollout collection ~25%.
+- **Parallel CPU Rollouts + Frozen-Anchor Gate:** Collects episodes across worker
+  processes and tracks best checkpoint against the frozen starting anchor.
 
 Example:
     python scripts/rl_finetune_transformer.py \
-        --init checkpoints/planet_transformer_v2.pt \
-        --out checkpoints/planet_transformer_v2_rl.pt \
-        --iterations 8 --episodes-per-iter 8
+        --init checkpoints/planet_transformer_v2_rl.pt \
+        --pool checkpoints/planet_transformer_v1_backup.pt checkpoints/planet_transformer_v2.pt \
+        --out checkpoints/planet_transformer_v3_rl.pt \
+        --iterations 6 --episodes-per-iter 12 --workers 2
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
-import math
+import os
 import random
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -39,6 +44,8 @@ import torch.nn.functional as F
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+if str(REPO_ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from orbit_wars_bot.fast_sim import FastOrbitSim  # noqa: E402
 from orbit_wars_bot.features import evaluate_state  # noqa: E402
@@ -53,6 +60,18 @@ from orbit_wars_bot.planet_transformer import (  # noqa: E402
     extract_planet_features,
     pad_encoded_state,
 )
+
+# Cached external opponent callable per process (for subham_v14 league diversity)
+_SUBHAM_AGENT: Any = None
+
+
+def _get_subham_agent():
+    global _SUBHAM_AGENT
+    if _SUBHAM_AGENT is None:
+        from evaluate import resolve_agent
+
+        _SUBHAM_AGENT = resolve_agent("subham_v14")
+    return _SUBHAM_AGENT
 
 
 def _decode_sampled_actions(
@@ -111,7 +130,7 @@ def _policy_step(
     enc: EncodedPlanetState,
     *,
     sample: bool = True,
-    temperature: float = 0.90,
+    temperature: float = 0.85,
     launch_threshold: float = 0.50,
     rng: np.random.Generator | None = None,
 ) -> Tuple[List[List[float]], np.ndarray, np.ndarray, float]:
@@ -178,16 +197,19 @@ def collect_episode(
     num_players: int,
     opponent_kind: str,
     seed: int,
-    temperature: float = 0.85,
-    max_steps: int = 240,
+    temperature: float = 0.80,
+    max_steps: int = 220,
     gamma: float = 0.99,
     gae_lambda: float = 0.95,
-    shaping_coef: float = 0.12,
+    shaping_coef: float = 0.02,
+    early_reset: bool = True,
+    opp_model: Optional[PlanetTimelineTransformer] = None,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, float]]:
     """Run one on-policy 2P or 4P episode in ``FastOrbitSim`` and compute GAE returns."""
     rng = np.random.default_rng(seed)
     sim = FastOrbitSim.from_seed(seed=seed, num_agents=num_players, max_steps=max_steps)
     hero_slot = int(rng.integers(0, num_players))
+    active_opp_model = opp_model if opp_model is not None else anchor
 
     traj_pf: List[np.ndarray] = []
     traj_tf: List[np.ndarray] = []
@@ -202,6 +224,7 @@ def collect_episode(
 
     last_alive = [0] * num_players
     prev_phi = float(evaluate_state(sim, hero_slot))
+    early_winner: Optional[int] = None
 
     while not sim.done:
         actions: List[List[List[float]]] = [[] for _ in range(num_players)]
@@ -230,15 +253,22 @@ def collect_episode(
             else:
                 if opponent_kind == "heuristic":
                     actions[pid] = heuristic_moves(sim, pid)
+                elif opponent_kind == "subham_v14":
+                    sub_fn = _get_subham_agent()
+                    obs_o = sim.to_observation(player=pid)
+                    try:
+                        actions[pid] = sub_fn(obs_o, sim.to_config()) or []
+                    except Exception:
+                        actions[pid] = heuristic_moves(sim, pid)
                 elif opponent_kind == "self":
                     obs_o = sim.to_observation(player=pid)
                     enc_o = extract_planet_features(obs_o, player=pid, max_speed=sim.ship_speed)
                     mv_o, _, _, _ = _policy_step(policy, enc_o, sample=True, temperature=0.55, rng=rng)
                     actions[pid] = mv_o
-                else:  # frozen anchor
+                else:  # frozen anchor or historical pool snapshot
                     obs_o = sim.to_observation(player=pid)
                     enc_o = extract_planet_features(obs_o, player=pid, max_speed=sim.ship_speed)
-                    mv_o, _, _, _ = _policy_step(anchor, enc_o, sample=False, rng=rng)
+                    mv_o, _, _, _ = _policy_step(active_opp_model, enc_o, sample=False, rng=rng)
                     actions[pid] = mv_o
 
         sim.step(actions)
@@ -252,13 +282,34 @@ def collect_episode(
             traj_rews.append(shaping_coef * (gamma * cur_phi - prev_phi))
             prev_phi = cur_phi
 
+        # Zero-planet early reset (#7 Kaggle lesson): cut off dead-fleet garbage frames
+        if early_reset and not sim.done and sim.step_count >= 12:
+            p_counts = [sim.planet_count(p) for p in range(num_players)]
+            alive_planet_players = [p for p, c in enumerate(p_counts) if c > 0]
+            if len(alive_planet_players) == 1:
+                sole = alive_planet_players[0]
+                if totals[sole] >= max(totals) and sum(totals) > 0:
+                    early_winner = sole
+                    break
+            elif p_counts[hero_slot] == 0 and totals[hero_slot] == 0:
+                # Hero completely eliminated in 4P FFA — no further decisions possible
+                break
+
     # Terminal outcome reward in [-1, +1]
-    win_pid = sim.winner()
+    totals = sim.scores()
+    if early_winner is not None:
+        win_pid = early_winner
+    elif sim.done:
+        win_pid = sim.winner()
+    else:
+        max_s = max(totals)
+        winners = [i for i, s in enumerate(totals) if s == max_s]
+        win_pid = winners[0] if len(winners) == 1 else -1
+
     if num_players == 2:
         term_rew = 1.0 if win_pid == hero_slot else (0.0 if win_pid < 0 else -1.0)
         hero_rank = 1.0 if win_pid == hero_slot else (1.5 if win_pid < 0 else 2.0)
     else:
-        totals = sim.scores()
         order = sorted(range(num_players), key=lambda i: (totals[i], last_alive[i]), reverse=True)
         grad = [1.0, 0.25, -0.35, -1.0]
         rank_idx = order.index(hero_slot)
@@ -268,7 +319,6 @@ def collect_episode(
     if traj_rews:
         traj_rews[-1] += term_rew
 
-    # Compute GAE advantages & returns
     T = len(traj_rews)
     advs = np.zeros((T,), dtype=np.float32)
     rets = np.zeros((T,), dtype=np.float32)
@@ -282,9 +332,9 @@ def collect_episode(
 
     if T == 0:
         empty = {
-            "planet_feats": np.zeros((0, MAX_PLANETS, 15), np.float32),
-            "timeline_feats": np.zeros((0, MAX_PLANETS, 20, 4), np.float32),
-            "edge_feats": np.zeros((0, MAX_PLANETS, MAX_PLANETS, 8), np.float32),
+            "planet_feats": np.zeros((0, MAX_PLANETS, 22), np.float32),
+            "timeline_feats": np.zeros((0, MAX_PLANETS, 20, 8), np.float32),
+            "edge_feats": np.zeros((0, MAX_PLANETS, MAX_PLANETS, 12), np.float32),
             "legal_edges": np.zeros((0, MAX_PLANETS, MAX_PLANETS), bool),
             "owned_mask": np.zeros((0, MAX_PLANETS), bool),
             "pad_mask": np.zeros((0, MAX_PLANETS), bool),
@@ -312,8 +362,107 @@ def collect_episode(
         "rank": hero_rank,
         "steps": float(sim.step_count),
         "term_rew": float(term_rew),
+        "num_players": float(num_players),
     }
     return batch, stats
+
+
+def _worker_collect_episode(task: Tuple[Dict[str, Any], Dict[str, Any], Optional[Dict[str, Any]], int, str, int, float, int, float, bool]) -> Tuple[Dict[str, np.ndarray], Dict[str, float]]:
+    """Multiprocessing worker entry point for parallel episode collection."""
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+
+    model_cfg, policy_sd, opp_sd, num_players, opponent_kind, seed, temperature, max_steps, shaping_coef, early_reset = task
+    policy = PlanetTimelineTransformer(**model_cfg)
+    policy.load_state_dict(policy_sd)
+    policy.eval()
+
+    opp_model: Optional[PlanetTimelineTransformer] = None
+    if opp_sd is not None:
+        opp_model = PlanetTimelineTransformer(**model_cfg)
+        opp_model.load_state_dict(opp_sd)
+        opp_model.eval()
+
+    return collect_episode(
+        policy,
+        opp_model if opp_model is not None else policy,
+        num_players=num_players,
+        opponent_kind=opponent_kind,
+        seed=seed,
+        temperature=temperature,
+        max_steps=max_steps,
+        shaping_coef=shaping_coef,
+        early_reset=early_reset,
+        opp_model=opp_model,
+    )
+
+
+def _eval_vs_fixed_anchor(
+    policy: PlanetTimelineTransformer,
+    fixed_anchor: PlanetTimelineTransformer,
+    *,
+    seed_base: int = 12000,
+    games_2p: int = 6,
+    games_4p: int = 4,
+    max_steps: int = 240,
+) -> Dict[str, float]:
+    """Deterministic greedy evaluation against the frozen starting anchor (2P + 4P)."""
+    policy.eval()
+    fixed_anchor.eval()
+    w2 = 0
+    for g in range(games_2p):
+        sim = FastOrbitSim.from_seed(seed=seed_base + g, num_agents=2, max_steps=max_steps)
+        hero = g % 2
+        while not sim.done:
+            acts = []
+            for pid in range(2):
+                obs = sim.to_observation(player=pid)
+                enc = extract_planet_features(obs, player=pid, max_speed=sim.ship_speed)
+                m = policy if pid == hero else fixed_anchor
+                mv, _, _, _ = _policy_step(m, enc, sample=False)
+                acts.append(mv)
+            sim.step(acts)
+        if sim.winner() == hero:
+            w2 += 1
+
+    w4 = 0
+    r4_sum = 0.0
+    for g in range(games_4p):
+        sim = FastOrbitSim.from_seed(seed=seed_base + 500 + g, num_agents=4, max_steps=max_steps)
+        hero = g % 4
+        last_alive = [0] * 4
+        while not sim.done:
+            acts = []
+            for pid in range(4):
+                obs = sim.to_observation(player=pid)
+                enc = extract_planet_features(obs, player=pid, max_speed=sim.ship_speed)
+                m = policy if pid == hero else fixed_anchor
+                mv, _, _, _ = _policy_step(m, enc, sample=False)
+                acts.append(mv)
+            sim.step(acts)
+            sc = sim.scores()
+            for pid in range(4):
+                if sc[pid] > 0:
+                    last_alive[pid] = sim.step_count
+        sc = sim.scores()
+        order = sorted(range(4), key=lambda i: (sc[i], last_alive[i]), reverse=True)
+        rk = order.index(hero) + 1
+        r4_sum += rk
+        if rk == 1:
+            w4 += 1
+
+    wr2 = w2 / max(1, games_2p)
+    wr4 = w4 / max(1, games_4p)
+    return {
+        "eval_2p_wr": wr2,
+        "eval_4p_wr": wr4,
+        "eval_4p_rank": r4_sum / max(1, games_4p),
+        "eval_score": 0.55 * wr2 + 0.45 * wr4,
+    }
 
 
 def ppo_update(
@@ -325,11 +474,11 @@ def ppo_update(
     ppo_epochs: int = 3,
     batch_size: int = 64,
     clip_eps: float = 0.20,
-    kl_coef: float = 0.06,
+    kl_coef: float = 0.05,
     ent_coef: float = 0.008,
     value_coef: float = 0.30,
 ) -> Dict[str, float]:
-    """Perform clipped per-planet PPO + Anchor-KL updates on collected rollout transitions."""
+    """Perform clipped per-planet PPO + Delayed-Teacher KL updates on collected rollout transitions."""
     n = len(rollout["returns"])
     if n == 0:
         return {"loss": 0.0, "kl": 0.0, "entropy": 0.0, "val_loss": 0.0}
@@ -379,10 +528,10 @@ def ppo_update(
                 ref_logp_all = F.log_softmax(ref_logits, dim=-1)
                 probs_all = logp_all.exp()
 
-                flat_logp = logp_all[valid]  # (M, N+1)
+                flat_logp = logp_all[valid]
                 flat_ref_logp = ref_logp_all[valid]
                 flat_probs = probs_all[valid]
-                flat_act = act[valid]  # (M,)
+                flat_act = act[valid]
                 flat_old_lp = old_lp[valid]
                 flat_adv = adv_t.unsqueeze(1).expand(B, N)[valid]
 
@@ -392,7 +541,6 @@ def ppo_update(
                 surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * flat_adv
                 pol_loss = -torch.min(surr1, surr2).mean()
 
-                # Exact per-planet KL(pi || pi_ref) and entropy over valid actions
                 kl_per = (flat_probs * (flat_logp - flat_ref_logp)).sum(dim=-1).clamp_min(0.0)
                 kl_mean = kl_per.mean()
                 ent_mean = -(flat_probs * flat_logp).sum(dim=-1).mean()
@@ -422,19 +570,33 @@ def ppo_update(
     }
 
 
+def _ema_update_teacher(teacher: PlanetTimelineTransformer, policy: PlanetTimelineTransformer, tau: float) -> None:
+    if tau <= 0.0:
+        return
+    with torch.no_grad():
+        for tp, pp in zip(teacher.parameters(), policy.parameters()):
+            tp.data.mul_(1.0 - tau).add_(pp.data, alpha=tau)
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Self-Play PPO + Anchor-KL RL fine-tuning for PlanetTimelineTransformer.")
-    parser.add_argument("--init", required=True, help="Starting BC/DAgger checkpoint path.")
-    parser.add_argument("--out", default="checkpoints/planet_transformer_v2_rl.pt")
-    parser.add_argument("--iterations", type=int, default=8)
-    parser.add_argument("--episodes-per-iter", type=int, default=8)
+    parser = argparse.ArgumentParser(description="Self-Play League PPO + Delayed Teacher KL for PlanetTimelineTransformer.")
+    parser.add_argument("--init", required=True, help="Starting checkpoint path.")
+    parser.add_argument("--pool", nargs="*", default=[], help="Additional historical opponent checkpoints.")
+    parser.add_argument("--out", default="checkpoints/planet_transformer_v3_rl.pt")
+    parser.add_argument("--iterations", type=int, default=6)
+    parser.add_argument("--episodes-per-iter", type=int, default=12)
+    parser.add_argument("--workers", type=int, default=min(2, os.cpu_count() or 1))
     parser.add_argument("--ppo-epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=1.5e-4)
-    parser.add_argument("--kl-coef", type=float, default=0.06)
-    parser.add_argument("--temperature", type=float, default=0.80)
+    parser.add_argument("--lr", type=float, default=9e-5)
+    parser.add_argument("--kl-coef", type=float, default=0.05)
+    parser.add_argument("--ent-coef", type=float, default=0.003, help="Entropy bonus coefficient (keep low during RL sharpening).")
+    parser.add_argument("--teacher-ema", type=float, default=0.12, help="EMA rate to update KL teacher on positive iters.")
+    parser.add_argument("--shaping-coef", type=float, default=0.02, help="Near-sparse shaping weight (0=pure terminal).")
+    parser.add_argument("--temperature", type=float, default=0.75)
     parser.add_argument("--max-steps", type=int, default=220)
-    parser.add_argument("--seed", type=int, default=9000)
+    parser.add_argument("--eval-every", type=int, default=2, help="Run deterministic anchor eval every N iters.")
+    parser.add_argument("--seed", type=int, default=9500)
     args = parser.parse_args(argv)
 
     torch.manual_seed(args.seed)
@@ -446,59 +608,96 @@ def main(argv: list[str] | None = None) -> int:
     policy = PlanetTimelineTransformer(**cfg)
     policy.load_state_dict(ckpt["model_state_dict"])
 
-    anchor = copy.deepcopy(policy)
-    anchor.eval()
-    for p in anchor.parameters():
-        p.requires_grad_(False)
+    fixed_anchor = copy.deepcopy(policy)
+    fixed_anchor.eval()
+    teacher = copy.deepcopy(policy)
+    teacher.eval()
+    for m in (fixed_anchor, teacher):
+        for p in m.parameters():
+            p.requires_grad_(False)
+
+    # Build historical opponent state-dict pool (init + any --pool checkpoints)
+    pool_sds: List[Tuple[str, Dict[str, Any]]] = [("init", {k: v.cpu().clone() for k, v in policy.state_dict().items()})]
+    for p_path in args.pool:
+        pp = Path(p_path)
+        if pp.is_file():
+            p_ckpt = torch.load(pp, map_location="cpu", weights_only=False)
+            pool_sds.append((pp.stem, p_ckpt["model_state_dict"]))
 
     opt = torch.optim.AdamW(policy.parameters(), lr=args.lr, weight_decay=1e-4)
     out_path = Path(args.out)
+    latest_path = out_path.with_name(out_path.stem + "_latest" + out_path.suffix)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     print(
-        f"[RL-PPO] Loaded {args.init} | iters={args.iterations} eps/iter={args.episodes_per_iter} "
-        f"lr={args.lr} kl_coef={args.kl_coef} temp={args.temperature}",
+        f"[RL-League-PPO] Loaded {args.init} | pool={[n for n, _ in pool_sds]} | "
+        f"iters={args.iterations} eps/iter={args.episodes_per_iter} workers={args.workers} "
+        f"lr={args.lr} kl={args.kl_coef} ema={args.teacher_ema} shaping={args.shaping_coef}",
         flush=True,
     )
     t0 = time.time()
-    best_winrate = -1.0
+    best_eval_score = -1.0
 
-    # Mixed 2P & 4P league schedule: beat anchor (2P & 4P), self-play, and Heuristic v2
+    # Diverse league schedule: frozen historical pool (2P & 4P), subham_v14 (2P & 4P), Heuristic v2
     league_cycle = [
-        (2, "anchor"),
-        (2, "anchor"),
-        (4, "anchor"),
-        (2, "self"),
+        (2, "pool"),
+        (2, "pool"),
+        (4, "pool"),
+        (2, "pool"),
+        (4, "subham_v14"),
+        (2, "subham_v14"),
+        (4, "pool"),
+        (2, "pool"),
         (4, "heuristic"),
-        (2, "anchor"),
-        (4, "anchor"),
+        (2, "pool"),
+        (4, "subham_v14"),
         (2, "heuristic"),
     ]
 
     for it in range(1, args.iterations + 1):
         policy.eval()
+        pol_sd = {k: v.cpu().clone() for k, v in policy.state_dict().items()}
+        tasks = []
+        for e in range(args.episodes_per_iter):
+            n_pl, opp_kind = league_cycle[(it * args.episodes_per_iter + e) % len(league_cycle)]
+            ep_seed = args.seed + it * 1000 + e
+            opp_sd = None
+            if opp_kind == "pool":
+                # 50% latest/init anchor, 50% random historical pool snapshot
+                if e % 2 == 0 or len(pool_sds) == 1:
+                    opp_sd = pool_sds[-1][1]
+                else:
+                    opp_sd = pool_sds[random.randrange(len(pool_sds))][1]
+            tasks.append((
+                cfg,
+                pol_sd,
+                opp_sd,
+                n_pl,
+                opp_kind,
+                ep_seed,
+                args.temperature,
+                args.max_steps,
+                args.shaping_coef,
+                True,
+            ))
+
+        if args.workers > 1:
+            with ProcessPoolExecutor(max_workers=args.workers) as ex:
+                results = list(ex.map(_worker_collect_episode, tasks))
+        else:
+            results = [_worker_collect_episode(t) for t in tasks]
+
         batches: List[Dict[str, np.ndarray]] = []
         ep_wins_2p: List[float] = []
         ep_wins_4p: List[float] = []
         ep_ranks_4p: List[float] = []
         ep_rews: List[float] = []
 
-        for e in range(args.episodes_per_iter):
-            n_pl, opp_kind = league_cycle[(it * args.episodes_per_iter + e) % len(league_cycle)]
-            ep_seed = args.seed + it * 1000 + e
-            b, st = collect_episode(
-                policy,
-                anchor,
-                num_players=n_pl,
-                opponent_kind=opp_kind,
-                seed=ep_seed,
-                temperature=args.temperature,
-                max_steps=args.max_steps,
-            )
+        for b, st in results:
             if len(b["returns"]) > 0:
                 batches.append(b)
             ep_rews.append(st["term_rew"])
-            if n_pl == 2:
+            if int(st.get("num_players", 2)) == 2:
                 ep_wins_2p.append(st["win"])
             else:
                 ep_wins_4p.append(st["win"])
@@ -508,12 +707,13 @@ def main(argv: list[str] | None = None) -> int:
         rollout = {k: np.concatenate([b[k] for b in batches], axis=0) for k in keys}
         upd = ppo_update(
             policy,
-            anchor,
+            teacher,
             opt,
             rollout,
             ppo_epochs=args.ppo_epochs,
             batch_size=args.batch_size,
             kl_coef=args.kl_coef,
+            ent_coef=args.ent_coef,
         )
 
         wr2 = 100.0 * float(np.mean(ep_wins_2p)) if ep_wins_2p else 0.0
@@ -521,28 +721,48 @@ def main(argv: list[str] | None = None) -> int:
         rk4 = float(np.mean(ep_ranks_4p)) if ep_ranks_4p else 0.0
         mean_rew = float(np.mean(ep_rews)) if ep_rews else 0.0
 
+        # Delayed moving teacher EMA update on positive-reward iterations
+        if mean_rew > 0.05:
+            _ema_update_teacher(teacher, policy, args.teacher_ema)
+
+        # Periodically add a frozen snapshot of our improving policy into the historical pool
+        if it % 2 == 0:
+            pool_sds.append((f"snap_it{it}", {k: v.cpu().clone() for k, v in policy.state_dict().items()}))
+            if len(pool_sds) > 6:
+                # Keep init + most recent 5 snapshots
+                pool_sds = [pool_sds[0]] + pool_sds[-5:]
+
+        eval_str = ""
+        save_best = False
+        if it % args.eval_every == 0 or it == args.iterations:
+            ev = _eval_vs_fixed_anchor(policy, fixed_anchor, seed_base=args.seed + 50000, games_2p=4, games_4p=4)
+            eval_str = f" | EVAL_vs_init: 2P={100*ev['eval_2p_wr']:.0f}% 4P={100*ev['eval_4p_wr']:.0f}% (rk={ev['eval_4p_rank']:.2f})"
+            if ev["eval_score"] >= best_eval_score:
+                best_eval_score = ev["eval_score"]
+                save_best = True
+        elif best_eval_score < 0.0:
+            save_best = True
+
         print(
             f"  iter {it:2d}/{args.iterations} ({time.time()-t0:5.1f}s) | "
-            f"states={len(rollout['returns']):4d} | 2P_win={wr2:5.1f}% 4P_win={wr4:5.1f}% (rk={rk4:.2f}) | "
-            f"rew={mean_rew:+.2f} | kl={upd['kl']:.4f} ent={upd['entropy']:.3f} vloss={upd['val_loss']:.3f}",
+            f"states={len(rollout['returns']):4d} | 2P={wr2:5.1f}% 4P={wr4:5.1f}% (rk={rk4:.2f}) | "
+            f"rew={mean_rew:+.2f} kl={upd['kl']:.4f} ent={upd['entropy']:.3f} vl={upd['val_loss']:.3f}{eval_str}",
             flush=True,
         )
 
-        # Save latest + track best league win-rate checkpoint
-        torch.save(
-            {
-                "model_config": policy.config,
-                "model_state_dict": policy.state_dict(),
-                "rl_iteration": it,
-                "rl_mean_reward": mean_rew,
-                "rl_kl": upd["kl"],
-            },
-            out_path,
-        )
-        if mean_rew >= best_winrate:
-            best_winrate = mean_rew
+        payload = {
+            "model_config": policy.config,
+            "model_state_dict": policy.state_dict(),
+            "rl_iteration": it,
+            "rl_mean_reward": mean_rew,
+            "rl_kl": upd["kl"],
+            "best_eval_score": best_eval_score,
+        }
+        torch.save(payload, latest_path)
+        if save_best:
+            torch.save(payload, out_path)
 
-    print(f"[RL-PPO] Saved RL fine-tuned checkpoint -> {out_path} ({out_path.stat().st_size/1024:.1f} KB)", flush=True)
+    print(f"[RL-League-PPO] Saved best -> {out_path} ({out_path.stat().st_size/1024:.1f} KB)", flush=True)
     return 0
 
 

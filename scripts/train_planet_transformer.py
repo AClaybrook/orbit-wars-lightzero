@@ -521,6 +521,111 @@ def collect_dagger_dataset(
     return data
 
 
+def collect_search_selfplay_dataset(
+    checkpoint: str,
+    search_2p: int,
+    search_4p: int,
+    workers: int,
+    seed: int,
+    sample_stride: int = 1,
+) -> Dict[str, np.ndarray]:
+    """AlphaZero Expert Iteration: collect self-play games guided by ``SearchPlanetTransformerAgent``.
+
+    Uses zero external teacher — our own 10-tick lookahead search (+250 Elo stronger than
+    the raw neural policy) generates higher-quality tactical moves and win/loss targets
+    that are distilled back into the fast 28 ms/turn neural network.
+    """
+    search_spec = f"planet_transformer_search:{checkpoint}"
+    pure_spec = f"planet_transformer:{checkpoint}"
+    tasks: List[Tuple[List[str], int, List[int], int, bool]] = []
+
+    for g in range(search_2p):
+        s = seed + 40000 + g
+        if g % 2 == 0:
+            # Pure AlphaZero 2P Search mirror (collect both sides!)
+            tasks.append(([search_spec, search_spec], s, [0, 1], sample_stride, False))
+        else:
+            # Search vs pure policy (collect Search perspective)
+            if g % 4 == 1:
+                tasks.append(([search_spec, pure_spec], s, [0], sample_stride, False))
+            else:
+                tasks.append(([pure_spec, search_spec], s, [1], sample_stride, False))
+
+    for g in range(search_4p):
+        s = seed + 50000 + g
+        slot = g % 4
+        if g % 2 == 0:
+            # 2 Search agents vs 2 subham_v14 (collect both Search perspectives)
+            roster = [search_spec, "subham_v14", search_spec, "subham_v14"]
+            roster = roster[slot:] + roster[:slot]
+            t_slots = [i for i, b in enumerate(roster) if b == search_spec]
+        else:
+            # 1 Search agent vs 3x wd_bestv6
+            roster = ["wd_bestv6"] * 4
+            roster[slot] = search_spec
+            t_slots = [slot]
+        tasks.append((roster, s, t_slots, sample_stride, False))
+
+    print(
+        f"[AlphaZero-Search] Collecting {search_2p} 2P + {search_4p} 4P search self-play games "
+        f"(ckpt={checkpoint}, workers={workers})...",
+        flush=True,
+    )
+    t0 = time.time()
+    parts: List[Dict[str, Any]] = []
+    tot_matched = tot_moves = 0
+
+    if workers <= 1:
+        for idx, task in enumerate(tasks, 1):
+            res = _collect_one_game(task)
+            parts.append(res)
+            tot_matched += res["matched_moves"]
+            tot_moves += res["total_moves"]
+            if idx % 2 == 0 or idx == len(tasks):
+                print(
+                    f"  az_search {idx}/{len(tasks)} ({time.time()-t0:.1f}s) | "
+                    f"move match={100*tot_matched/max(1,tot_moves):.1f}%",
+                    flush=True,
+                )
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futs = [pool.submit(_collect_one_game, t) for t in tasks]
+            for idx, fut in enumerate(as_completed(futs), 1):
+                res = fut.result()
+                parts.append(res)
+                tot_matched += res["matched_moves"]
+                tot_moves += res["total_moves"]
+                if idx % 2 == 0 or idx == len(tasks):
+                    print(
+                        f"  az_search {idx}/{len(tasks)} ({time.time()-t0:.1f}s) | "
+                        f"move match={100*tot_matched/max(1,tot_moves):.1f}%",
+                        flush=True,
+                    )
+
+    keys = [
+        "planet_feats",
+        "timeline_feats",
+        "edge_feats",
+        "legal_edges",
+        "owned_mask",
+        "pad_mask",
+        "target_cls",
+        "target_frac",
+        "val_targets",
+    ]
+    data = {k: np.concatenate([p[k] for p in parts], axis=0) for k in keys}
+    n_samples = len(data["val_targets"])
+    n_owned = int(data["owned_mask"].sum())
+    n_launch = int(((data["target_cls"] > 0) & data["owned_mask"]).sum())
+    print(
+        f"[AlphaZero-Search] Done in {time.time()-t0:.1f}s: {n_samples} states, {n_owned} decisions "
+        f"({n_launch} launches = {100*n_launch/max(1,n_owned):.1f}%), "
+        f"target recovery={100*tot_matched/max(1,tot_moves):.1f}%.",
+        flush=True,
+    )
+    return data
+
+
 def _compute_batch_loss(
     model: PlanetTimelineTransformer,
     pf: torch.Tensor,
@@ -722,6 +827,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dagger-checkpoint", default=None, help="Student checkpoint for on-policy DAgger collection.")
     parser.add_argument("--dagger-2p", type=int, default=0, help="Number of 2P DAgger games (vs Hober Malloc).")
     parser.add_argument("--dagger-4p", type=int, default=0, help="Number of 4P DAgger games (vs 3x subham_v14).")
+    parser.add_argument("--search-selfplay-checkpoint", default=None, help="Checkpoint for AlphaZero Search self-play distillation.")
+    parser.add_argument("--search-2p", type=int, default=0, help="Number of 2P AlphaZero Search self-play games.")
+    parser.add_argument("--search-4p", type=int, default=0, help="Number of 4P AlphaZero Search self-play games.")
     parser.add_argument("--sample-stride", type=int, default=2, help="Stride for quiet (non-launch) turns.")
     parser.add_argument("--workers", type=int, default=min(2, os.cpu_count() or 1))
     parser.add_argument("--dataset-cache", default=None, help="Optional .npz cache path to load/save dataset.")
@@ -749,12 +857,24 @@ def main(argv: list[str] | None = None) -> int:
             data = {k: npz[k] for k in npz.files}
         print(f"[Collect] Loaded {len(data['val_targets'])} cached board states.", flush=True)
 
-    need_collect = (data is None) or args.append_cache or (args.dagger_checkpoint is not None and (args.dagger_2p > 0 or args.dagger_4p > 0))
+    has_dagger = args.dagger_checkpoint is not None and (args.dagger_2p > 0 or args.dagger_4p > 0)
+    has_search_sp = args.search_selfplay_checkpoint is not None and (args.search_2p > 0 or args.search_4p > 0)
+    need_collect = (data is None) or args.append_cache or has_dagger or has_search_sp
     if need_collect:
         new_parts: List[Dict[str, np.ndarray]] = []
         if data is not None:
             new_parts.append(data)
-        if args.dagger_checkpoint and (args.dagger_2p > 0 or args.dagger_4p > 0):
+        if has_search_sp:
+            az_data = collect_search_selfplay_dataset(
+                checkpoint=args.search_selfplay_checkpoint,
+                search_2p=args.search_2p,
+                search_4p=args.search_4p,
+                workers=args.workers,
+                seed=args.seed,
+                sample_stride=args.sample_stride,
+            )
+            new_parts.append(az_data)
+        if has_dagger:
             dagger_data = collect_dagger_dataset(
                 student_checkpoint=args.dagger_checkpoint,
                 dagger_2p=args.dagger_2p,
@@ -764,7 +884,7 @@ def main(argv: list[str] | None = None) -> int:
                 fast_teacher=not args.full_tta_teacher,
             )
             new_parts.append(dagger_data)
-        elif (data is None) or args.append_cache:
+        if (not has_search_sp) and (not has_dagger) and ((data is None) or args.append_cache):
             bc_data = collect_dataset(
                 games_2p=args.games_2p,
                 games_4p=args.games_4p,
