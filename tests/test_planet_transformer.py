@@ -155,3 +155,83 @@ def test_rl_ppo_rollout_and_update():
     assert metrics["kl"] >= 0.0
     changed = any(not torch.allclose(b, a) for b, a in zip(before, policy.parameters()))
     assert changed
+
+
+def test_d4_tta_and_ensemble_agent(tmp_path: Path):
+    from orbit_wars_bot.planet_transformer import EnsemblePlanetTransformerAgent
+
+    env = make("orbit_wars", configuration={"seed": 123})
+    obs = env.reset(2)[0]["observation"]
+    enc = extract_planet_features(obs, player=0)
+
+    m1 = PlanetTimelineTransformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
+    m2 = PlanetTimelineTransformer(d_model=48, n_heads=4, n_layers=2, dim_ff=96)
+    p1 = tmp_path / "m1.pt"
+    p2 = tmp_path / "m2.pt"
+    torch.save({"model_config": m1.config, "model_state_dict": m1.state_dict()}, p1)
+    torch.save({"model_config": m2.config, "model_state_dict": m2.state_dict()}, p2)
+
+    a_d4 = PlanetTransformerAgent(p1, launch_threshold=0.05, use_d4_tta=True)
+    probs_d4, fracs_d4, val_d4 = a_d4.predict_probs_and_value(enc)
+    assert probs_d4.shape == (len(enc.planet_ids), len(enc.planet_ids) + 1)
+    assert np.allclose(probs_d4.sum(axis=-1), 1.0, atol=1e-4)
+    assert -1.0 <= val_d4 <= 1.0
+
+    # Verify exact D4 invariance under reflection + rotation when use_d4_tta=True
+    enc_ref = extract_planet_features(obs, player=0)
+    enc_ref.planet_feats = apply_d4_planet_feats(enc_ref.planet_feats, k_rot=2, flip_x=True)
+    probs_ref, _, val_ref = a_d4.predict_probs_and_value(enc_ref)
+    assert np.allclose(probs_d4, probs_ref, atol=1e-4)
+    assert abs(val_d4 - val_ref) < 1e-4
+
+    # Heterogeneous ensemble (different d_model sizes)
+    ens = EnsemblePlanetTransformerAgent([p1, p2], weights=[0.7, 0.3], launch_threshold=0.05, use_d4_tta=True)
+    p_ens, f_ens, v_ens = ens.predict_probs_and_value(enc)
+    assert p_ens.shape == probs_d4.shape
+    assert np.allclose(p_ens.sum(axis=-1), 1.0, atol=1e-4)
+    assert -1.0 <= v_ens <= 1.0
+    moves = ens.act(obs)
+    assert isinstance(moves, list)
+
+
+def test_decode_plan_blocked_shot_fallback(tmp_path: Path, monkeypatch):
+    import orbit_wars_bot.planet_transformer as pt_mod
+
+    env = make("orbit_wars", configuration={"seed": 55})
+    obs = env.reset(2)[0]["observation"]
+    enc = extract_planet_features(obs, player=0)
+
+    model = PlanetTimelineTransformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
+    ckpt = tmp_path / "fallback.pt"
+    torch.save({"model_config": model.config, "model_state_dict": model.state_dict()}, ckpt)
+    agent = PlanetTransformerAgent(ckpt, launch_threshold=0.50, use_rot_tta=False)
+
+    n = len(enc.planet_ids)
+    owned_idx = int(np.flatnonzero(enc.owned_mask)[0])
+    legal_targets = [j for j in range(n) if enc.legal_edges[owned_idx, j]]
+    assert len(legal_targets) >= 2
+    t1, t2 = legal_targets[0], legal_targets[1]
+
+    probs = np.zeros((n, n + 1), dtype=np.float32)
+    probs[:, 0] = 1.0
+    probs[owned_idx, 0] = 0.05
+    probs[owned_idx, 1 + t1] = 0.65
+    probs[owned_idx, 1 + t2] = 0.30
+    fracs = np.full((n, n), 0.75, dtype=np.float32)
+
+    orig_solve = pt_mod.solve_intercept
+    blocked_dst_id = int(enc.planet_rows[t1][0])
+    calls = []
+
+    def fake_solve(src_row, dst_row, *args, **kwargs):
+        calls.append(int(dst_row[0]))
+        if int(dst_row[0]) == blocked_dst_id:
+            return None
+        return orig_solve(src_row, dst_row, *args, **kwargs)
+
+    monkeypatch.setattr(pt_mod, "solve_intercept", fake_solve)
+    moves = agent._decode_plan(enc, probs, fracs, launch_threshold=0.50, force_all_in=False, max_speed=6.0)
+    assert blocked_dst_id in calls
+    assert len(moves) == 1
+    assert int(moves[0][0]) == int(enc.planet_rows[owned_idx][0])
+

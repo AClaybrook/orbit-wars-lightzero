@@ -700,6 +700,7 @@ def train_model(
     epochs: int = 24,
     batch_size: int = 64,
     lr: float = 1.5e-3,
+    launch_weight: float = 1.0,
     d_model: int = 128,
     n_heads: int = 4,
     n_layers: int = 4,
@@ -747,7 +748,8 @@ def train_model(
     n_params = sum(p.numel() for p in model.parameters())
     print(
         f"[Train] PlanetTimelineTransformer ({n_params/1e3:.1f}K params) | "
-        f"train={len(tr_idx)} val={len(val_idx)} | epochs={epochs} batch={batch_size} lr={lr}",
+        f"train={len(tr_idx)} val={len(val_idx)} | epochs={epochs} batch={batch_size} "
+        f"lr={lr} launch_w={launch_weight:.2f}",
         flush=True,
     )
 
@@ -769,7 +771,9 @@ def train_model(
             pf_aug = torch.from_numpy(apply_d4_planet_feats(pf.numpy(), k_rot=k_rot, flip_x=flip_x))
 
             opt.zero_grad(set_to_none=True)
-            loss, m = _compute_batch_loss(model, pf_aug, tf, ef, le, om, pm, tcls, tfrac, vtar)
+            loss, m = _compute_batch_loss(
+                model, pf_aug, tf, ef, le, om, pm, tcls, tfrac, vtar, launch_weight=launch_weight
+            )
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
@@ -781,7 +785,9 @@ def train_model(
         with torch.no_grad():
             for batch in val_loader:
                 pf, tf, ef, le, om, pm, tcls, tfrac, vtar = batch
-                _, m = _compute_batch_loss(model, pf, tf, ef, le, om, pm, tcls, tfrac, vtar)
+                _, m = _compute_batch_loss(
+                    model, pf, tf, ef, le, om, pm, tcls, tfrac, vtar, launch_weight=launch_weight
+                )
                 val_metrics.append(m)
 
         def avg(lst: List[Dict[str, float]], key: str) -> float:
@@ -835,12 +841,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset-cache", default=None, help="Optional .npz cache path to load/save dataset.")
     parser.add_argument("--save-cache", default=None, help="Optional separate .npz path to save merged dataset.")
     parser.add_argument("--append-cache", action="store_true", help="Collect new/DAgger games and append to existing cache.")
+    parser.add_argument("--oversample-new", type=int, default=1, help="Repeat newly collected DAgger/BC samples K times when merging.")
     parser.add_argument("--collect-only", action="store_true", help="Only collect/cache dataset without training.")
     parser.add_argument("--full-tta-teacher", action="store_true", help="Keep Hober Malloc 8x JAX TTA enabled (~5x slower).")
     parser.add_argument("--resume", default=None, help="Resume training from an existing PlanetTransformer checkpoint.")
     parser.add_argument("--epochs", type=int, default=24)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1.5e-3)
+    parser.add_argument("--launch-weight", type=float, default=1.0, help="Loss weight multiplier on non-HOLD (launch) decisions.")
     parser.add_argument("--d-model", type=int, default=128)
     parser.add_argument("--n-heads", type=int, default=4)
     parser.add_argument("--n-layers", type=int, default=4)
@@ -866,6 +874,7 @@ def main(argv: list[str] | None = None) -> int:
         new_parts: List[Dict[str, np.ndarray]] = []
         if data is not None:
             new_parts.append(data)
+        oversample = max(1, int(args.oversample_new))
         if has_search_sp:
             az_data = collect_search_selfplay_dataset(
                 checkpoint=args.search_selfplay_checkpoint,
@@ -875,7 +884,8 @@ def main(argv: list[str] | None = None) -> int:
                 seed=args.seed,
                 sample_stride=args.sample_stride,
             )
-            new_parts.append(az_data)
+            for _ in range(oversample):
+                new_parts.append(az_data)
         if has_dagger:
             dagger_data = collect_dagger_dataset(
                 student_checkpoint=args.dagger_checkpoint,
@@ -885,7 +895,8 @@ def main(argv: list[str] | None = None) -> int:
                 seed=args.seed,
                 fast_teacher=not args.full_tta_teacher,
             )
-            new_parts.append(dagger_data)
+            for _ in range(oversample):
+                new_parts.append(dagger_data)
         if (not has_search_sp) and (not has_dagger) and ((data is None) or args.append_cache):
             bc_data = collect_dataset(
                 games_2p=args.games_2p,
@@ -895,7 +906,8 @@ def main(argv: list[str] | None = None) -> int:
                 sample_stride=args.sample_stride,
                 fast_teacher=not args.full_tta_teacher,
             )
-            new_parts.append(bc_data)
+            for _ in range(oversample):
+                new_parts.append(bc_data)
 
         keys = list(new_parts[0].keys())
         data = {k: np.concatenate([p[k] for p in new_parts], axis=0) for k in keys}
@@ -914,6 +926,7 @@ def main(argv: list[str] | None = None) -> int:
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
+        launch_weight=args.launch_weight,
         d_model=args.d_model,
         n_heads=args.n_heads,
         n_layers=args.n_layers,

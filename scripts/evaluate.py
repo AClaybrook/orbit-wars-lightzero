@@ -133,6 +133,12 @@ def resolve_agent(spec: str, checkpoint: str | None = None, sims: int = 20, time
         override_ckpt = spec.split(":", 1)[1] if ":" in spec else None
         ckpt_path = override_ckpt or checkpoint or str(REPO_ROOT / "checkpoints" / "planet_transformer_best.pt")
         return create_planet_transformer_agent(checkpoint_path=ckpt_path)
+    if spec in ("planet_transformer_d4", "pt_d4") or spec.startswith("planet_transformer_d4:") or spec.startswith("pt_d4:"):
+        from orbit_wars_bot.planet_transformer import create_planet_transformer_agent
+
+        override_ckpt = spec.split(":", 1)[1] if ":" in spec else None
+        ckpt_path = override_ckpt or checkpoint or str(REPO_ROOT / "checkpoints" / "planet_transformer_best.pt")
+        return create_planet_transformer_agent(checkpoint_path=ckpt_path, use_d4_tta=True)
     if spec in ("planet_transformer_search", "pt_search") or spec.startswith("planet_transformer_search:") or spec.startswith("pt_search:"):
         from orbit_wars_bot.planet_transformer import create_search_planet_transformer_agent
 
@@ -141,6 +147,26 @@ def resolve_agent(spec: str, checkpoint: str | None = None, sims: int = 20, time
         return create_search_planet_transformer_agent(
             checkpoint_path=ckpt_path,
             time_budget_sec=min(0.24, time_budget),
+        )
+    if spec in ("planet_transformer_search_d4", "pt_search_d4") or spec.startswith("planet_transformer_search_d4:") or spec.startswith("pt_search_d4:"):
+        from orbit_wars_bot.planet_transformer import create_search_planet_transformer_agent
+
+        override_ckpt = spec.split(":", 1)[1] if ":" in spec else None
+        ckpt_path = override_ckpt or checkpoint or str(REPO_ROOT / "checkpoints" / "planet_transformer_best.pt")
+        return create_search_planet_transformer_agent(
+            checkpoint_path=ckpt_path,
+            use_d4_tta=True,
+            time_budget_sec=min(0.26, time_budget),
+        )
+    if spec.startswith("planet_transformer_ensemble:") or spec.startswith("pt_ens:") or spec.startswith("pt_ens_d4:"):
+        from orbit_wars_bot.planet_transformer import create_ensemble_planet_transformer_agent
+
+        use_d4 = spec.startswith("pt_ens_d4:")
+        raw_paths = spec.split(":", 1)[1]
+        ckpt_paths = [p.strip() for p in raw_paths.split(",") if p.strip()]
+        return create_ensemble_planet_transformer_agent(
+            checkpoint_paths=ckpt_paths,
+            use_d4_tta=use_d4,
         )
     if spec == "kvatsa5":
         kv_path = OPP_DIR / "kvatsa5_agent.py"
