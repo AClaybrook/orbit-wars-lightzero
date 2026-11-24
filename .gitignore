@@ -30,6 +30,8 @@ checkpoints/*
 !checkpoints/planet_transformer_4p_best.pt
 !checkpoints/planet_transformer_gen9_balanced.pt
 !checkpoints/planet_transformer_gen9_softkd.pt
+!checkpoints/planet_transformer_gen10_4m_ppo.pt
+!checkpoints/planet_transformer_gen10_4m_ppo_latest.pt
 ckpts/
 *.pth
 *.pth.tar
@@ -41,6 +43,8 @@ ckpts/
 !checkpoints/planet_transformer_4p_best.pt
 !checkpoints/planet_transformer_gen9_balanced.pt
 !checkpoints/planet_transformer_gen9_softkd.pt
+!checkpoints/planet_transformer_gen10_4m_ppo.pt
+!checkpoints/planet_transformer_gen10_4m_ppo_latest.pt
 *.onnx
 runs/
 wandb/

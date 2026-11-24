@@ -13,10 +13,13 @@ Supports:
 from __future__ import annotations
 
 import argparse
+import atexit
 import importlib.util
 import inspect
+import os
 import random
 import sys
+import tarfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List
@@ -28,6 +31,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 OPP_DIR = REPO_ROOT / "external" / "opponents"
+_HOBER_AGENT_CACHE: Callable | None = None
 
 
 def _adapt_kaggle_callable(fn: Callable) -> Callable:
@@ -109,6 +113,44 @@ def _load_wanderduck_agent(kind: str) -> Callable:
 
         return _adapt_kaggle_callable(defensive_turtle.agent)
     raise ValueError(f"Unknown wanderduck agent {kind!r}")
+
+
+def _resolve_hober_main_path() -> Path:
+    """Return Hober Malloc's ``main.py``, extracting the prebuilt package when ``ow-agent`` is absent."""
+    hober_root = OPP_DIR / "simjeg_hober_malloc"
+    direct_main = hober_root / "main.py"
+    if not direct_main.is_file():
+        raise FileNotFoundError(
+            f"Missing {direct_main}. Run `python scripts/fetch_opponents.py` first."
+        )
+    compiled_bins = (
+        hober_root / "ow-agent",
+        hober_root / "target" / "release" / "ow-agent",
+        hober_root / "target" / "debug" / "ow-agent",
+    )
+    if any(b.is_file() for b in compiled_bins):
+        return direct_main
+
+    archive = hober_root / "submitted_packages" / "submission1.tar.gz"
+    if archive.is_file():
+        pkg_dir = OPP_DIR / "hober_malloc_pkg"
+        cli_bin = pkg_dir / "agent_cli"
+        pkg_main = pkg_dir / "main.py"
+        if not (cli_bin.is_file() and pkg_main.is_file()):
+            pkg_dir.mkdir(parents=True, exist_ok=True)
+            dest_root = pkg_dir.resolve()
+            with tarfile.open(archive, "r:gz") as tar:
+                for member in tar.getmembers():
+                    target = (dest_root / member.name).resolve()
+                    if target != dest_root and dest_root not in target.parents:
+                        raise RuntimeError(f"Unsafe path in {archive.name}: {member.name!r}")
+                if sys.version_info >= (3, 12):
+                    tar.extractall(dest_root, filter="data")
+                else:
+                    tar.extractall(dest_root)
+            os.chmod(cli_bin, 0o755)
+        return pkg_main
+    return direct_main
 
 
 def resolve_agent(spec: str, checkpoint: str | None = None, sims: int = 20, time_budget: float = 0.35):
@@ -227,15 +269,41 @@ def resolve_agent(spec: str, checkpoint: str | None = None, sims: int = 20, time
             )
         return _load_py_agent(p)
     if spec == "hober_malloc":
-        import os
+        global _HOBER_AGENT_CACHE
+        if _HOBER_AGENT_CACHE is not None:
+            return _HOBER_AGENT_CACHE
 
+        main_py = _resolve_hober_main_path()
         os.environ.setdefault("OW_PYTHON", sys.executable)
-        p = OPP_DIR / "simjeg_hober_malloc" / "main.py"
-        if not p.is_file():
-            raise FileNotFoundError(
-                f"Missing {p}. Run `python scripts/fetch_opponents.py` first."
-            )
-        raw_fn = _load_py_agent(p)
+        os.environ.setdefault("ORBIT_WARS_BC_ALL_IN_PYTHON", sys.executable)
+        os.environ.setdefault("JAX_PLATFORM_NAME", "cpu")
+        os.environ.setdefault("JAX_PLATFORMS", "cpu")
+        os.environ.setdefault("AGENT_LOG_EVERY", "0")
+        os.environ.setdefault("AGENT_MAX_CHILD_LOG_LINES", "0")
+        venv_bin = str(Path(sys.executable).parent)
+        path_parts = os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
+        if not path_parts or path_parts[0] != venv_bin:
+            os.environ["PATH"] = os.pathsep.join([venv_bin, *[p for p in path_parts if p != venv_bin]])
+
+        mod_spec = importlib.util.spec_from_file_location("ext_agent_hober_malloc", str(main_py))
+        if mod_spec is None or mod_spec.loader is None:
+            raise ImportError(f"Could not load agent from {main_py}")
+        mod = importlib.util.module_from_spec(mod_spec)
+        mod_spec.loader.exec_module(mod)
+        if not hasattr(mod, "agent"):
+            raise AttributeError(f"{main_py} does not define an `agent` function")
+        raw_fn = _adapt_kaggle_callable(mod.agent)
+
+        def _cleanup_hober_proc() -> None:
+            proc = getattr(mod, "_PROC", None)
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except Exception:
+                    proc.kill()
+
+        atexit.register(_cleanup_hober_proc)
 
         def _hober_wrapped(obs, config=None):
             # kaggle_environments(debug=False) replaces sys.stderr with StringIO,
@@ -248,7 +316,8 @@ def resolve_agent(spec: str, checkpoint: str | None = None, sims: int = 20, time
             finally:
                 sys.stderr = prev_err
 
-        return _hober_wrapped
+        _HOBER_AGENT_CACHE = _hober_wrapped
+        return _HOBER_AGENT_CACHE
     if spec.startswith("wd_"):
         return _load_wanderduck_agent(spec)
 
