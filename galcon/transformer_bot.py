@@ -1300,6 +1300,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         enc: EncodedGalconState,
         probs: np.ndarray,
         *,
+        ms_probs: Optional[np.ndarray] = None,
         max_targets_per_planet: int = 4,
         reserve_ratio: float = 0.15,
         base_redirs: Sequence[Order] = (),
@@ -1344,7 +1345,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                 roi = (dst.production / max(1.0, PRODUCTION_DIVISOR)) * 20.0 / max(4.0, need + 0.55 * eta)
                 if dst.owner != 0:
                     roi *= 1.35
-                p_prior = float(probs[i, 1 + j])
+                p_prior = float(ms_probs[i, j]) if ms_probs is not None else float(probs[i, 1 + j])
                 sc = (0.35 + p_prior * 3.0) * roi
                 scored.append((sc, j, need))
 
@@ -1375,6 +1376,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         enc: EncodedGalconState,
         probs: np.ndarray,
         *,
+        ms_probs: Optional[np.ndarray] = None,
         max_sources: int = 4,
         base_redirs: Sequence[Order] = (),
     ) -> List[Order]:
@@ -1426,7 +1428,9 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
             max_single = max(x[2] for x in chosen)
             if dst.owner == 0 and max_single >= need * 1.15:
                 continue
-            prior_boost = float(max(probs[i, 1 + j] for _, i, _ in chosen))
+            prior_boost = float(
+                max((ms_probs[i, j] if ms_probs is not None else probs[i, 1 + j]) for _, i, _ in chosen)
+            )
             val = (dst.production / max(1.0, PRODUCTION_DIVISOR)) * (1.85 if dst.owner != 0 else 1.0)
             sc = val * (0.45 + 2.5 * prior_boost) / max(4.0, need * 0.35 + max_eta)
             if sc > best_score:
@@ -1670,19 +1674,28 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
 
         # Neural-guided ROI multi-target fan-out proposals (evaluated alongside neural candidates)
         base_redirs = [o for o in raw_cands[0] if isinstance(o, RedirOrder)]
+        prior_ms = ms_probs if using_ms else None
         fan_cons = self._build_fanout_plan(
-            sim, enc, probs, max_targets_per_planet=3, reserve_ratio=0.25, base_redirs=base_redirs
+            sim, enc, probs, ms_probs=prior_ms, max_targets_per_planet=3, reserve_ratio=0.25, base_redirs=base_redirs
         )
         if fan_cons:
             raw_cands.append(fan_cons)
         fan_agg = self._build_fanout_plan(
-            sim, enc, probs, max_targets_per_planet=5, reserve_ratio=0.10, base_redirs=base_redirs
+            sim, enc, probs, ms_probs=prior_ms, max_targets_per_planet=5, reserve_ratio=0.10, base_redirs=base_redirs
         )
         if fan_agg:
             raw_cands.append(fan_agg)
+        if sim.tick <= 20 and n >= 16:
+            fan_open = self._build_fanout_plan(
+                sim, enc, probs, ms_probs=prior_ms, max_targets_per_planet=6, reserve_ratio=0.06, base_redirs=base_redirs
+            )
+            if fan_open:
+                raw_cands.append(fan_open)
 
         if self.adversarial_search:
-            ff_plan = self._build_focus_fire_plan(sim, enc, probs, max_sources=4, base_redirs=base_redirs)
+            ff_plan = self._build_focus_fire_plan(
+                sim, enc, probs, ms_probs=prior_ms, max_sources=4, base_redirs=base_redirs
+            )
             if ff_plan:
                 raw_cands.append(ff_plan)
             tun_plan = self._build_tunnel_feed_plan(sim, enc, base_redirs=base_redirs)

@@ -585,4 +585,42 @@ def test_wave6b_stratified_schedule_and_sparky_val_gate():
     assert _should_promote_gen4_val(improved, start, start, has_lua1=True)
 
 
+def test_wave7_ms_probs_search_and_ensemble_gbots(tmp_path):
+    import numpy as np
+    from galcon.gbots_client import _build_bot
+    from galcon.sim import GalconSim
+    from galcon.transformer_bot import (
+        GalconSearchTransformerAgent,
+        build_galcon_gen4_transformer,
+        extract_galcon_features,
+    )
+
+    m1 = build_galcon_gen4_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
+    ckpt1 = tmp_path / "m1.pt"
+    ckpt2 = tmp_path / "m2.pt"
+    for p in (ckpt1, ckpt2):
+        torch.save(
+            {
+                "model_config": m1.config,
+                "model_state_dict": m1.state_dict(),
+                "has_trained_redir": True,
+                "has_trained_multi_send": True,
+                "use_canonical_d4": True,
+            },
+            p,
+        )
+
+    sim = GalconSim.create(seed=14700, num_planets=18, width=400.0, height=240.0)
+    ag = GalconSearchTransformerAgent(ckpt1, use_d4_canonical=True, use_d4_tta=False)
+    enc = extract_galcon_features(sim, 1, feature_version=2)
+    probs = np.full((len(enc.planet_ids), len(enc.planet_ids) + 1), 0.05, dtype=np.float32)
+    ms_probs = np.full((len(enc.planet_ids), len(enc.planet_ids)), 0.75, dtype=np.float32)
+    fan = ag._build_fanout_plan(sim, enc, probs, ms_probs=ms_probs, max_targets_per_planet=6, reserve_ratio=0.06)
+    assert isinstance(fan, list)
+
+    ens_act = _build_bot("ensemble", str(ckpt1), str(ckpt2))
+    orders = ens_act(sim, 1)
+    assert isinstance(orders, list)
+
+
 

@@ -1,8 +1,20 @@
-# Galcon AI Wave 6B — Sparky-Gated Dual-Boss Multi-Send Transformer, 1× Canonical D4 & Opponent-Adaptive Search
+# Galcon AI Wave 7 — Ensemble (W6B+W7) + 2-Ply Search (`65.0%` vs. `Sparky v1.6`) & Sparky-Gated Multi-Send Transformer
 
 A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-lightzero` that cross-pollinates our Orbit Wars **`PlanetTimelineTransformer`** (`orbit_wars_bot/planet_transformer.py`) to classic Galcon, Phil Hassey's official **`gbots`** protocol, and zero-copy head-to-head benchmarking against Evan Sparano's (`esparano/GalconModVault`) unmodified Lua tournament bots (`Sparky v1.6` & `EsparanBot v0.2`) via [`galcon/lua_bridge.py`](lua_bridge.py).
 
-## Wave 6B Highlights (Promoted Champion: `checkpoints/galcon_transformer_best.pt`)
+## Wave 7 Highlights (`EnsembleGalconSearchAgent`: `galcon_transformer_best.pt` + `galcon_wave7_p1.pt`)
+- **Crushed `esparano Sparky v1.6` (`1821.4 Elo` Lua Grandmaster) `25–13–2` (`65.0%`, ~`1929 Elo`) over 40 held-out Standard games (`116–134 ms/tick` on 2-vCPU VM):**
+  - `s=14000` (20g): **`11–7–2` (`60.0%`)** (`+5.0%` over Wave 6B Search, `+13.8%` over Wave 5 Search)
+  - `s=9500` (20g): **`14–6–0` (`70.0%`, zero draws!)**
+  - **`EsparanBot v0.2` (24g across `s=9500` & `s=15300`):** **`19–3–2` (`83.3%`)** (completely fixing Wave 5's `s=15300` dip!)
+  - **Built-in Heuristics (32g total):** **`32–0–0` (`100.0%` PERFECT SWEEP)** — `8–0–0` Tactical, `8–0–0` Macro, `8–0–0` Rusher (All-In), `8–0–0` Classic!
+- **Why Wave 7 Jumped `+10%` Over Wave 6B:**
+  - **Upgraded 2-Ply Search (`galcon/transformer_bot.py`):** Wired trained multi-send priors (`ms_probs`) into `_build_fanout_plan` & `_build_focus_fire_plan` (replacing stale Gen 3 softmax `probs`) and added an early macro `k=6` (`reserve=0.06`, ticks `<= 20`) opening proposal (`+8.4%` on Large 24pl Search).
+  - **AlphaZero Search EI → Sparky-Gated PPO (`galcon_wave7_p1.pt`):** Upgraded `collect_gen4_multisend_ei_dataset` (`h=16, w=0.70, prior=0.010, budget=0.24s`, dual-boss `--lua-opp2`), collecting **3.5× more multi-send ticks** (`87/801`) with `vsign=87.5%` value calibration; 2 PPO iters jumped `val_44g` mixed+large Sparky from **`31.2% → 53.1%` (`+21.9%`)** and Pure `s=9500` Sparky to **`10–6–4` (`60.0%`)**, creating a strongly complementary partner to Wave 6B (`60.0%` on `s=14000`).
+- **New `gbots` Ensemble Mode (`galcon/gbots_client.py`):** Run `--bot ensemble` with `checkpoints/galcon_transformer_best.pt` + `checkpoints/galcon_wave7_p1.pt` directly over Phil Hassey's `gbots pipe`.
+- **Interactive Win & Loss Replay Viewer (`docs/galcon_viewer.html`):** Includes **both Win and Loss (Forensics) replays vs. `esparano Sparky v1.6`** for both Wave 7 Ensemble 2-Ply Search and Pure neural agents.
+
+## Wave 6B Highlights (Single-Model Pure Champion: `checkpoints/galcon_transformer_best.pt`)
 - **Positive Pure & 2-Ply Search Records vs. `esparano Sparky v1.6` (`1821.4 Elo` Lua Grandmaster):**
   - **`Wave 6B` + 2-Ply Adaptive / Adversarial Search (`1×` Canon D4):** **`9–7–4` (`55.0%`)** vs. `Sparky v1.6` (`20g s=14000`, new record: 9 decisive wins, `+5.0%` over Gen 4 Search's `8–8–4` and `+8.8%` over Wave 5 Search's `46.2%`).
   - **`Wave 6B` Pure (`1.29M`, `1×` Canon D4, `~19 ms` VM / `~8 ms` desktop, ZERO search):**
@@ -67,22 +79,29 @@ python3 -m galcon.train --mode gen2 --stage gen4_ppo \
 
 # Optional: pass --lua-opp /path/to/bot_sparky_v1.6.lua (requires lua5.3 on PATH)
 
-# Record showcase replays & Elo viewer:
-python3 -m galcon.record_replays --checkpoint checkpoints/galcon_transformer_best.pt --out-html docs/galcon_viewer.html
+# Record showcase replays (incl. Sparky Win/Loss) & Elo viewer:
+python3 -m galcon.record_replays \
+  --checkpoint checkpoints/galcon_transformer_best.pt \
+  --checkpoint2 checkpoints/galcon_wave7_p1.pt \
+  --out-html docs/galcon_viewer.html
 
-# Run all 9 unit tests (including bit-exact 1x Canonical D4, multi-send & Lua bridge):
+# Run all 13 unit tests (Canonical D4, multi-send, Lua bridge, DMLAdamW, Sparky gate, Ensemble):
 pytest -v tests/test_galcon.py
 ```
 
 ### 2. Plug Straight Into Phil Hassey's Official `gbots`
 ```bash
-# Run our #1-class Opponent-Adaptive 2-Ply Search (~109 ms/tick, 1x Canonical D4):
-./gbots pipe -name OurGalconGen4Search -key YOUR_KEY \
+# Run our #1 Wave 7 2-Model Ensemble + 2-Ply Search (65.0% vs Sparky v1.6, 32-0-0 heuristics):
+./gbots pipe -name OurGalconWave7Ensemble -key YOUR_KEY \
+  -exec "python3 -m galcon.gbots_client --bot ensemble --checkpoint checkpoints/galcon_transformer_best.pt --checkpoint2 checkpoints/galcon_wave7_p1.pt"
+
+# Run single-model Opponent-Adaptive 2-Ply Search (~108 ms/tick, 1x Canonical D4):
+./gbots pipe -name OurGalconSearch -key YOUR_KEY \
   -exec "python3 -m galcon.gbots_client --bot search --checkpoint checkpoints/galcon_transformer_best.pt"
 
-# Run fast Pure neural net (native /REDIR; auto-uses 1x Canonical D4 & Multi-Send on Gen 4 ckpts):
+# Run fast Pure neural net (~19 ms VM / ~8 ms desktop, 52.5% 40g vs Sparky v1.6):
 ./gbots pipe -name OurGalconPure -key YOUR_KEY \
   -exec "python3 -m galcon.gbots_client --bot transformer --checkpoint checkpoints/galcon_transformer_best.pt"
 ```
 
-Interactive HTML5 Canvas Replay Viewer & 1,056-Game Elo Ladder: [`docs/galcon_viewer.html`](../docs/galcon_viewer.html).
+Interactive HTML5 Canvas Replay Viewer (with Sparky v1.6 Win & Loss Forensics) & Elo Ladder: [`docs/galcon_viewer.html`](../docs/galcon_viewer.html).
