@@ -118,12 +118,13 @@ def test_rl_ppo_paired_rollout_aux_dual_kl_cpu_and_dml():
             policy,
             teacher,
             num_players=2,
-            opponent_kind="heuristic",
+            opponent_kind="pool" if slot == 1 else "heuristic",
             seed=77,
             max_steps=20,
             force_all_in=True,
             hero_slot=slot,
             rollout_d4=True,
+            opp_temperature=0.55 if slot == 1 else 0.0,
         )
         assert len(b["returns"]) > 0
         assert b["aux_owner"].shape == (len(b["returns"]), MAX_PLANETS)
@@ -237,6 +238,14 @@ def test_soft_kd_and_supervised_loss_dml_zero_fallback():
         m_cpu, pf, tf, ef, le, om, pm, soft_q, vtar, ao, ash, av,
         midgame_weight=2.5, comet_weight=2.0, hold_boost=1.25, launch_boost=1.1,
     )
+    kd_loss_t, kd_m_t = compute_soft_kd_loss(
+        m_cpu, pf, tf, ef, le, om, pm, soft_q, vtar, ao, ash, av,
+        midgame_weight=2.5, comet_weight=2.0, hold_boost=1.25, launch_boost=1.1,
+        return_tensor_metrics=True,
+    )
+    assert torch.allclose(kd_loss_c, kd_loss_t, atol=1e-6)
+    assert abs(kd_m_c["kl"] - float(kd_m_t["kl"].item())) < 1e-6
+    assert abs(kd_m_c["acc_all"] - float(kd_m_t["all_hits"].item()) / max(1.0, float(kd_m_t["all_tot"].item()))) < 1e-6
     bc_loss_c, bc_m_c = _compute_batch_loss(m_cpu, pf, tf, ef, le, om, pm, tcls, tfrac, vtar, launch_weight=1.2)
     assert torch.isfinite(kd_loss_c) and torch.isfinite(bc_loss_c)
     assert kd_m_c["kl"] >= 0.0 and bc_m_c["pol_loss"] >= 0.0
@@ -255,9 +264,10 @@ def test_soft_kd_and_supervised_loss_dml_zero_fallback():
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         opt.zero_grad(set_to_none=True)
-        kd_loss_d, _ = compute_soft_kd_loss(
+        kd_loss_d, kd_m_d = compute_soft_kd_loss(
             m_dml, pf_d, tf_d, ef_d, le_d, om_d, pm_d, sq_d, vt_d, ao_d, ash_d, av_d,
             midgame_weight=2.5, comet_weight=2.0, hold_boost=1.25, launch_boost=1.1,
+            return_tensor_metrics=True,
         )
         kd_loss_d.backward()
         torch.nn.utils.clip_grad_norm_(m_dml.parameters(), 1.0, foreach=False)
@@ -270,5 +280,47 @@ def test_soft_kd_and_supervised_loss_dml_zero_fallback():
         bc_loss_d.backward()
         torch.nn.utils.clip_grad_norm_(m_dml.parameters(), 1.0, foreach=False)
         opt.step()
-        assert torch.isfinite(kd_loss_d).item() and torch.isfinite(bc_loss_d).item()
+        assert torch.isfinite(kd_loss_d).item() and torch.isfinite(kd_m_d["kl"]).item() and torch.isfinite(bc_loss_d).item()
     _assert_no_dml_fallback(caught)
+
+
+def test_ensemble_labeler_gpu_and_cpu():
+    from distill_ensemble_4m import label_boards_with_ensemble_gpu
+
+    sim = FastOrbitSim.from_seed(seed=202, num_agents=2, max_steps=60)
+    for _ in range(25):
+        sim.step([[], []])
+    obs = sim.to_observation(player=0)
+    enc = extract_planet_features(obs, player=0, max_speed=sim.ship_speed)
+    pad = pad_encoded_state(enc, MAX_PLANETS)
+    n_pl = len(enc.planet_ids)
+
+    data = {
+        "planet_feats": np.stack([pad["planet_feats"].astype(np.float16)] * 2, axis=0),
+        "timeline_feats": np.stack([pad["timeline_feats"].astype(np.float16)] * 2, axis=0),
+        "edge_feats": np.stack([pad["edge_feats"].astype(np.float16)] * 2, axis=0),
+        "legal_edges": np.stack([pad["legal_edges"]] * 2, axis=0),
+        "owned_mask": np.stack([pad["owned_mask"]] * 2, axis=0),
+        "pad_mask": np.stack([pad["pad_mask"]] * 2, axis=0),
+        "val_targets": np.array([1.0, -1.0], dtype=np.float32),
+    }
+
+    dev = resolve_train_device("dml" if _HAS_DML_GPU else "cpu")[0]
+    t1 = PlanetTimelineTransformer(d_model=32, n_heads=2, n_layers=1, dim_ff=64, use_aux_future=False).to(dev).eval()
+    t2 = PlanetTimelineTransformer(d_model=32, n_heads=2, n_layers=1, dim_ff=64, use_aux_future=True).to(dev).eval()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        labeled = label_boards_with_ensemble_gpu(
+            data, [(t1, 0.55), (t2, 0.45)], device=dev, batch_size=2, val_blend_outcome=0.5
+        )
+    if _HAS_DML_GPU:
+        _assert_no_dml_fallback(caught)
+
+    sp = labeled["soft_probs"].astype(np.float32)
+    assert sp.shape == (2, MAX_PLANETS, MAX_PLANETS + 1)
+    assert np.all(np.isfinite(sp))
+    row_sums = sp[:, :n_pl, : n_pl + 1].sum(axis=-1)
+    assert np.allclose(row_sums, 1.0, atol=2e-3)
+    assert np.all(np.isfinite(labeled["val_targets"]))
+    assert np.all((labeled["val_targets"] >= -1.05) & (labeled["val_targets"] <= 1.05))

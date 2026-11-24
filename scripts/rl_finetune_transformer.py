@@ -259,6 +259,7 @@ def collect_episode(
     hero_slot: Optional[int] = None,
     rollout_d4: bool = False,
     future_horizon: int = 10,
+    opp_temperature: float = 0.0,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, float]]:
     """Run one on-policy 2P or 4P episode in ``FastOrbitSim`` and compute GAE returns."""
     rng = np.random.default_rng(seed)
@@ -342,8 +343,15 @@ def collect_episode(
                 else:  # frozen anchor or historical pool snapshot
                     obs_o = sim.to_observation(player=pid)
                     enc_o = extract_planet_features(obs_o, player=pid, max_speed=sim.ship_speed)
+                    opp_sample = opp_temperature > 1e-4
+                    opp_temp = opp_temperature if opp_sample else 1.0
                     mv_o, _, _, _ = _policy_step(
-                        active_opp_model, enc_o, sample=False, force_all_in=force_all_in, rng=rng
+                        active_opp_model,
+                        enc_o,
+                        sample=opp_sample,
+                        temperature=opp_temp,
+                        force_all_in=force_all_in,
+                        rng=rng,
                     )
                     actions[pid] = mv_o
 
@@ -506,6 +514,7 @@ def _worker_collect_episode(
         bool,
         bool,
         bool,
+        float,
     ]
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, float]]:
     """Persistent worker entry point using file-cached checkpoints (zero tensor IPC)."""
@@ -524,6 +533,7 @@ def _worker_collect_episode(
         early_reset,
         force_all_in,
         rollout_d4,
+        opp_temperature,
     ) = task
     policy = _get_worker_policy(policy_path, policy_version)
     opp_model = _get_worker_opp(opp_path)
@@ -541,6 +551,7 @@ def _worker_collect_episode(
         opp_model=opp_model,
         hero_slot=hero_slot,
         rollout_d4=rollout_d4,
+        opp_temperature=opp_temperature,
     )
 
 
@@ -810,55 +821,57 @@ def ppo_update(
     if fixed_anchor is not None:
         fixed_anchor.eval()
 
-    losses: List[float] = []
-    kls: List[float] = []
-    akls: List[float] = []
-    ents: List[float] = []
-    vlosses: List[float] = []
-    alosses: List[float] = []
-    aaccs: List[float] = []
+    loss_acc = torch.zeros((), device=train_dev)
+    kl_acc = torch.zeros((), device=train_dev)
+    akl_acc = torch.zeros((), device=train_dev)
+    ent_acc = torch.zeros((), device=train_dev)
+    vl_acc = torch.zeros((), device=train_dev)
+    aux_loss_acc = torch.zeros((), device=train_dev)
+    aux_hits_acc = torch.zeros((), device=train_dev)
+    aux_tot_acc = torch.zeros((), device=train_dev)
+    n_steps = 0
 
     for _ in range(ppo_epochs):
         perm = np.random.permutation(n)
         for start in range(0, n, batch_size):
             idx = perm[start : start + batch_size]
-            pf_np = rollout["planet_feats"][idx]
+            pm_full = rollout["pad_mask"][idx]
+            max_n = max(2, int(pm_full.sum(axis=1).max()))
+
+            pf_np = rollout["planet_feats"][idx, :max_n]
             if augment_d4:
                 k_rot = random.randrange(4)
                 flip_x = bool(random.randrange(2))
                 pf_np = apply_d4_planet_feats(pf_np, k_rot=k_rot, flip_x=flip_x)
 
-            pf_c = torch.from_numpy(pf_np)
-            tf_c = torch.from_numpy(rollout["timeline_feats"][idx])
-            ef_c = torch.from_numpy(rollout["edge_feats"][idx])
-            le_c = torch.from_numpy(rollout["legal_edges"][idx])
-            om_c = torch.from_numpy(rollout["owned_mask"][idx])
-            pm_c = torch.from_numpy(rollout["pad_mask"][idx])
-            act_c = torch.from_numpy(rollout["action_cls"][idx])
-            old_lp_c = torch.from_numpy(rollout["old_logp"][idx])
-            aux_o_c = torch.from_numpy(rollout["aux_owner"][idx]) if want_aux else None
-            aux_s_c = torch.from_numpy(rollout["aux_ships"][idx]) if want_aux else None
-            aux_v_c = torch.from_numpy(rollout["aux_valid"][idx]) if want_aux else None
+            le_np = np.ascontiguousarray(rollout["legal_edges"][idx, :max_n, :max_n])
+            om_np = np.ascontiguousarray(rollout["owned_mask"][idx, :max_n])
+            has_valid = bool(np.any(om_np & le_np.any(axis=-1)))
 
-            pf_c, tf_c, ef_c, le_c, om_c, pm_c, act_c, old_lp_c, aux_o_c, aux_s_c, aux_v_c = _trim_batch_n(
-                pf_c, tf_c, ef_c, le_c, om_c, pm_c, act_c, old_lp_c, aux_o_c, aux_s_c, aux_v_c
-            )
-            has_valid = bool((om_c & le_c.any(dim=-1)).any().item())
-            has_aux_valid = bool(aux_v_c is not None and aux_v_c.any().item())
+            aux_v_np = np.ascontiguousarray(rollout["aux_valid"][idx, :max_n]) if want_aux else None
+            has_aux_valid = bool(aux_v_np is not None and np.any(aux_v_np))
 
-            pf = pf_c.to(train_dev)
-            tf = tf_c.to(train_dev)
-            ef = ef_c.to(train_dev)
-            le = le_c.to(train_dev)
-            om = om_c.to(train_dev)
-            pm = pm_c.to(train_dev)
-            act = act_c.to(train_dev)
-            old_lp = old_lp_c.to(train_dev)
+            pf = torch.from_numpy(np.ascontiguousarray(pf_np)).to(train_dev)
+            tf = torch.from_numpy(np.ascontiguousarray(rollout["timeline_feats"][idx, :max_n])).to(train_dev)
+            ef = torch.from_numpy(np.ascontiguousarray(rollout["edge_feats"][idx, :max_n, :max_n])).to(train_dev)
+            le = torch.from_numpy(le_np).to(train_dev)
+            om = torch.from_numpy(om_np).to(train_dev)
+            pm = torch.from_numpy(np.ascontiguousarray(pm_full[:, :max_n])).to(train_dev)
+            act = torch.from_numpy(np.ascontiguousarray(rollout["action_cls"][idx, :max_n])).to(train_dev)
+            old_lp = torch.from_numpy(np.ascontiguousarray(rollout["old_logp"][idx, :max_n])).to(train_dev)
             adv_t = torch.from_numpy(adv[idx]).to(train_dev)
             ret_t = torch.from_numpy(rollout["returns"][idx]).to(train_dev)
-            aux_o = aux_o_c.to(train_dev) if aux_o_c is not None else None
-            aux_s = aux_s_c.to(train_dev) if aux_s_c is not None else None
-            aux_v = aux_v_c.to(train_dev) if aux_v_c is not None else None
+            aux_o = (
+                torch.from_numpy(np.ascontiguousarray(rollout["aux_owner"][idx, :max_n])).to(train_dev)
+                if want_aux
+                else None
+            )
+            aux_s = (
+                torch.from_numpy(np.ascontiguousarray(rollout["aux_ships"][idx, :max_n])).to(train_dev)
+                if want_aux
+                else None
+            )
+            aux_v = torch.from_numpy(aux_v_np).to(train_dev) if aux_v_np is not None else None
 
             if want_aux:
                 logits, _, val, aux_pred = policy(pf, tf, ef, pm, return_aux=True)
@@ -924,11 +937,10 @@ def ppo_update(
                 as_loss = (F.smooth_l1_loss(aux_pred[..., 3], aux_s, reduction="none") * av_f).sum() / av_denom
                 aux_loss = ao_loss + as_loss
                 with torch.no_grad():
-                    ao_match = (aux_pred[..., :3].argmax(dim=-1) == aux_o).float()
-                    aux_acc = float((ao_match * av_f).sum().item() / float(av_denom.item()))
+                    aux_hits_acc = aux_hits_acc + ((aux_pred[..., :3].argmax(dim=-1) == aux_o).float() * av_f).sum()
+                    aux_tot_acc = aux_tot_acc + av_f.sum()
             else:
                 aux_loss = logits.sum() * 0.0
-                aux_acc = 0.0
 
             total_loss = (
                 pol_loss
@@ -944,22 +956,24 @@ def ppo_update(
             nn.utils.clip_grad_norm_(policy.parameters(), 0.7, foreach=not is_dml_dev)
             optimizer.step()
 
-            losses.append(float(total_loss.item()))
-            kls.append(float(kl_mean.item()))
-            akls.append(float(anchor_kl_mean.item()))
-            ents.append(float(ent_mean.item()))
-            vlosses.append(float(v_loss.item()))
-            alosses.append(float(aux_loss.item()))
-            aaccs.append(aux_acc)
+            loss_acc = loss_acc + total_loss.detach()
+            kl_acc = kl_acc + kl_mean.detach()
+            akl_acc = akl_acc + anchor_kl_mean.detach()
+            ent_acc = ent_acc + ent_mean.detach()
+            vl_acc = vl_acc + v_loss.detach()
+            aux_loss_acc = aux_loss_acc + aux_loss.detach()
+            n_steps += 1
 
+    denom_steps = max(1, n_steps)
+    aux_tot_val = float(aux_tot_acc.item())
     return {
-        "loss": float(np.mean(losses)) if losses else 0.0,
-        "kl": float(np.mean(kls)) if kls else 0.0,
-        "anchor_kl": float(np.mean(akls)) if akls else 0.0,
-        "entropy": float(np.mean(ents)) if ents else 0.0,
-        "val_loss": float(np.mean(vlosses)) if vlosses else 0.0,
-        "aux_loss": float(np.mean(alosses)) if alosses else 0.0,
-        "aux_acc": float(np.mean(aaccs)) if aaccs else 0.0,
+        "loss": float(loss_acc.item()) / denom_steps,
+        "kl": float(kl_acc.item()) / denom_steps,
+        "anchor_kl": float(akl_acc.item()) / denom_steps,
+        "entropy": float(ent_acc.item()) / denom_steps,
+        "val_loss": float(vl_acc.item()) / denom_steps,
+        "aux_loss": float(aux_loss_acc.item()) / denom_steps,
+        "aux_acc": (float(aux_hits_acc.item()) / aux_tot_val) if aux_tot_val > 0.0 else 0.0,
     }
 
 
@@ -1000,6 +1014,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--teacher-ema", type=float, default=0.12, help="EMA rate to update KL teacher on positive iters.")
     parser.add_argument("--shaping-coef", type=float, default=0.02, help="Near-sparse shaping weight (0=pure terminal).")
     parser.add_argument("--temperature", type=float, default=0.75)
+    parser.add_argument("--opp-temperature", type=float, default=0.0, help="Pool opponent sampling temperature (0=greedy).")
     parser.add_argument("--max-steps", type=int, default=220)
     parser.add_argument("--eval-every", type=int, default=2, help="Run deterministic anchor eval every N iters.")
     parser.add_argument("--eval-pairs", type=int, default=8, help="Paired-seed games per eval anchor.")
@@ -1089,7 +1104,7 @@ def main(argv: list[str] | None = None) -> int:
         + (f"pairs={n_pairs} (2P={2*n_pairs}ep)" if use_paired else f"eps/iter={args.episodes_per_iter}")
         + f" workers={args.workers} | lr={args.lr} clip={args.clip_eps} kl={args.kl_coef} akl={args.anchor_kl_coef} "
         f"ema={args.teacher_ema} aux={args.aux_coef} shaping={args.shaping_coef} T={args.temperature} "
-        f"all_in={args.force_all_in} 2p_only={args.two_player_only} mid_adv={args.midgame_adv_weight}",
+        f"oppT={args.opp_temperature} all_in={args.force_all_in} 2p_only={args.two_player_only} mid_adv={args.midgame_adv_weight}",
         flush=True,
     )
 
@@ -1175,6 +1190,7 @@ def main(argv: list[str] | None = None) -> int:
                                 True,
                                 args.force_all_in,
                                 True,
+                                args.opp_temperature,
                             ))
                         else:
                             direct_opps.append(opp_model)
@@ -1210,6 +1226,7 @@ def main(argv: list[str] | None = None) -> int:
                             True,
                             args.force_all_in,
                             True,
+                            args.opp_temperature,
                         ))
                     else:
                         direct_opps.append(opp_model)
@@ -1237,6 +1254,7 @@ def main(argv: list[str] | None = None) -> int:
                             opp_model=opp_m,
                             hero_slot=seat,
                             rollout_d4=True,
+                            opp_temperature=args.opp_temperature,
                         )
                     )
             roll_sec = time.time() - t_roll
@@ -1267,6 +1285,8 @@ def main(argv: list[str] | None = None) -> int:
                     elif (wa > 0.5 and wb < 0.5) or (wb > 0.5 and wa < 0.5):
                         splits += 1
 
+            if not batches:
+                continue
             keys = list(batches[0].keys())
             rollout = {k: np.concatenate([b[k] for b in batches], axis=0) for k in keys}
 
