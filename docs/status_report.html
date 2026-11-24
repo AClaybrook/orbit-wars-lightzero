@@ -58,39 +58,39 @@
   <div class="wrap">
     <header>
       <div>
-        <div class="meta">AClaybrook/orbit-wars-lightzero • High-Elo Neural Tier • Gen 3 → Gen 8 (1.89M PT-Gen8)</div>
+        <div class="meta">AClaybrook/orbit-wars-lightzero • High-Elo Neural Tier • Gen 3 → Gen 9 (1.89M PT-Gen9)</div>
         <h1>Orbit Wars AI — High-Elo Progression &amp; Benchmark Report</h1>
         <p>Elo-fair comparisons for competitive neural generations (&gt;1,200). Gen 1–2 heuristic ladders preserved in the Historical Archive tab.</p>
       </div>
       <div class="badges">
-        <a href="gameplay_viewer.html" class="badge info">▶ Watch Live Gameplay</a>
-        <a href="boss_forensics.html" class="badge info">◆ #2 Boss Forensics</a>
+        <a href="gameplay_viewer.html" class="badge info">▶ Watch Live Gameplay (22 Matches)</a>
+        <a href="boss_forensics.html" class="badge info">◆ #2 Boss Forensics (Gen 8 → 9)</a>
         <a href="wargame_report.html" class="badge info">◆ 3v1 Wargaming Study</a>
-        <span class="badge ok">41/41 Orbit Wars Tests</span>
-        <span class="badge info">Best: 1.89M PT-Gen8 (~1,740 Est.)</span>
+        <span class="badge ok">43/43 Orbit Wars Tests</span>
+        <span class="badge info">Best: 1.89M PT-Gen9 (~1,770 Est.)</span>
       </div>
     </header>
 
     <section class="kpis">
       <div class="card highlight-card">
-        <div class="meta">Current Best (1.89M PT-Gen8)</div>
-        <div class="kpi-val ok">~1,720–1,760</div>
-        <p>Top-7 range (#7 = 1717.3) • 53.8 ms</p>
+        <div class="meta">Current Best (1.89M PT-Gen9)</div>
+        <div class="kpi-val ok">~1,750–1,790</div>
+        <p>Top-5 range (#5 = 1754.6) • 98 ms</p>
       </div>
       <div class="card rec-card">
-        <div class="meta">Gen 8 vs. Gen 7 (Elo-Fair 2P)</div>
-        <div class="kpi-val ok">6–2 (75.0%)</div>
-        <p>+190 Elo jump via Soft-KD + Aux t+10</p>
+        <div class="meta">Gen 9 vs. Gen 8 (Official 2P)</div>
+        <div class="kpi-val ok">5–3 (62.5%)</div>
+        <p>+90 Elo • 63t blitz KO • val_kl -33%</p>
+      </div>
+      <div class="card">
+        <div class="meta">Pure Boss Survival Record</div>
+        <div class="kpi-val pri">140t Pure</div>
+        <p>Seed 201 vs #2 • 115.2t avg (no search)</p>
       </div>
       <div class="card">
         <div class="meta">Aux t+10 World-Model Head</div>
-        <div class="kpi-val pri">94.2% acc</div>
-        <p>Predicts real t+10 owners • 0 ms cost</p>
-      </div>
-      <div class="card">
-        <div class="meta">4P Specialist KO Speed (Gen 7)</div>
-        <div class="kpi-val pri">133.8–137.2t</div>
-        <p>8–0 sweep • Auto-routed 2P/4P</p>
+        <div class="kpi-val pri">94.9% acc</div>
+        <p>val_kl 0.369 → 0.247 • 0 ms cost</p>
       </div>
     </section>
 
@@ -129,12 +129,12 @@
     <section id="tab-boss" class="panel stack">
       <div class="card">
         <h2>Lookahead Internalization &amp; Compute Tradeoff (Search vs. Exact Same Weights)</h2>
-        <p>As model capacity scaled 3.2× (0.59M → 1.89M) and added Soft-Logit KD + Aux t+10 world modeling, pure 54 ms weights jumped +190 Elo over Gen 7.</p>
+        <p>With Gen 9 Midgame+Comet Soft-KD Ensemble, pure neural weights match Gen 8 + Search avg survival (115.2t) and hit a new 140t pure record vs #2.</p>
         <div id="search-bars" style="margin-top:12px;"></div>
         <div style="overflow-x:auto;">
           <table>
             <thead>
-              <tr><th>Base Model</th><th>Search vs. Same Pure Net (2P)</th><th class="num">Pure Latency</th><th class="num">Search Latency</th><th class="num">vs. #2 Hober (Pure → Search)</th></tr>
+              <tr><th>Base Model</th><th>Search / Gen Progress (2P)</th><th class="num">Pure Latency</th><th class="num">Search Latency</th><th class="num">vs. #2 Hober (Pure → Search)</th></tr>
             </thead>
             <tbody id="search-tbody"></tbody>
           </table>
@@ -142,12 +142,12 @@
       </div>
       <div class="grid-2">
         <div class="card highlight-card">
-          <h3 class="pri">Gen 8: 3 Top-10 Tricks Combined (+190 Elo vs. Gen 7!)</h3>
-          <p>1) <strong>Full Soft-Logit KL Distillation</strong> from #2 Hober Malloc's JAX logits (val_kl 0.489 → 0.369, val_tgt +10.9%). 2) <strong>#7 Audun Aux t+10 World-Model Head</strong> (94.2% owner accuracy, 0 ms inference cost). 3) <strong>#5 TonyK 2P Specialist + All-In</strong> (crushed Gen 7 6–2 at 53.8 ms).</p>
+          <h3 class="pri">Gen 9: 5-Fix Midgame Forensics (+90 Elo vs. Gen 8!)</h3>
+          <p>1) <strong>Dense Midgame (2.5×) &amp; Comet (2.0×) Soft-KD</strong> (+961 fresh DAgger boards → 3,383 total; <code>val_kl 0.369 → 0.247</code>, <code>-33%</code>!). 2) <strong>Complementary Ens-2x</strong> (0.55 Balanced + 0.45 Hold-Boost, 8× D4 All-In, 98 ms) beat Gen 8 <strong>5–3 (62.5%, 63t KO)</strong> and hit <strong>140t pure</strong> vs #2. 3) Proved hard-coded neutral caps (2–4), anti-bounce guards (1–5), and tiny CPU PPO (1–7 unseen) hurt relative to neural timing.</p>
         </div>
         <div class="card">
           <h3 class="warn">The Remaining Compute Wall vs. #2 Hober Malloc (1800.1)</h3>
-          <p>PT-Gen8 sits around ~1,720–1,760 (solid Top-7 territory) with zero copied weights. Closing the final ~50–80 Elo to consistently beat #2 (4.3M ModernBERT, 10B RL steps) and #1 (200M, 15B RL steps on B200s) is now a pure GPU self-play RL throughput wall.</p>
+          <p>PT-Gen9 sits around ~1,750–1,790 (solid Kaggle Top-5 territory) with zero copied weights and <10% of the 1,000 ms budget. Closing the final ~20–50 Elo to consistently beat #2 (4.3M ModernBERT, 10B RL steps) and #1 (200M, 15B RL steps on B200s) is now a pure GPU self-play RL throughput wall.</p>
         </div>
       </div>
     </section>
@@ -177,26 +177,29 @@
 
     <section id="tab-commands" class="panel stack">
       <div class="card">
-        <h3>Reproducible Gen 8 Soft-Logit KD + Aux t+10 + 2P Specialist Commands</h3>
-        <pre># 1. Collect exact Full-TTA Soft-Logit + t+10 World-Model 2P boards (incremental --append)
+        <h3>Reproducible Gen 9 Midgame + Comet Soft-KD Ensemble Commands</h3>
+        <pre># 1. Append dense midgame (t=22..78) &amp; comet-window DAgger boards (+961 -&gt; 3,383 total)
 python scripts/distill_soft_kd.py --dataset-cache pt_softkd_2p.npz \
-  --hober-games 0 --dagger-games 12 --student-checkpoint checkpoints/planet_transformer_v5_boss.pt \
-  --sample-stride 3 --workers 1 --collect-only
-python scripts/distill_soft_kd.py --dataset-cache pt_softkd_2p.npz \
-  --hober-games 3 --dagger-games 4 --student-checkpoint checkpoints/planet_transformer_v5_boss.pt \
-  --sample-stride 4 --workers 1 --seed 14000 --append --collect-only
+  --hober-games 0 --dagger-games 10 --student-checkpoint checkpoints/planet_transformer_gen8_2p_softkd.pt \
+  --sample-stride 4 --workers 1 --seed 22000 --append --collect-only
 
-# 2. Train 1.89M PT-Gen8 (Soft-KL + #7 Audun Aux t+10 World Model + 2P Specialist)
+# 2. Train complementary Gen 9 Soft-KD specialists (val_kl 0.369 -&gt; 0.247, -33%)
 python scripts/distill_soft_kd.py --dataset-cache pt_softkd_2p.npz \
-  --resume checkpoints/planet_transformer_v5_boss.pt --epochs 12 --batch-size 64 --lr 3.5e-4 \
-  --aux-weight 0.20 --launch-boost 1.25 --out checkpoints/planet_transformer_gen8_2p_softkd.pt
+  --resume checkpoints/planet_transformer_gen8_2p_softkd.pt --epochs 9 --batch-size 48 --lr 2.5e-4 \
+  --midgame-weight 2.5 --comet-weight 2.0 --hold-boost 1.0 --launch-boost 1.18 \
+  --out checkpoints/planet_transformer_gen9_balanced.pt
 
-# 3. Evaluate PT-Gen8 (or auto-routed 2P/4P Specialist) vs. Gen 7 &amp; #2 Hober Malloc
-python scripts/evaluate.py --candidate pt_d4_allin:checkpoints/planet_transformer_gen8_2p_softkd.pt \
-  --opponents pt_d4:checkpoints/planet_transformer_v5_boss.pt hober_malloc --games 6 --players 2
+python scripts/distill_soft_kd.py --dataset-cache pt_softkd_2p.npz \
+  --resume checkpoints/planet_transformer_gen8_2p_softkd.pt --epochs 10 --batch-size 48 --lr 2.5e-4 \
+  --midgame-weight 2.5 --comet-weight 2.0 --hold-boost 1.25 --launch-boost 1.0 \
+  --out checkpoints/planet_transformer_gen9_softkd.pt
+
+# 3. Evaluate PT-Gen9 (auto-routed 2P Ens-2x | 4P Gen 7) &amp; run #2 Hober Malloc Forensics
 python scripts/evaluate.py \
-  --candidate "pt_specialist:checkpoints/planet_transformer_gen8_2p_softkd.pt|checkpoints/planet_transformer_v5_boss.pt" \
-  --opponents subham_v14 --games 4 --players 4
+  --candidate "pt_specialist:checkpoints/planet_transformer_gen9_balanced.pt,checkpoints/planet_transformer_gen9_softkd.pt|checkpoints/planet_transformer_v5_boss.pt" \
+  --opponents pt_d4_allin:checkpoints/planet_transformer_gen8_2p_softkd.pt hober_malloc --games 8 --players 2
+python scripts/analyze_boss_gap.py --seeds 200 201 202 203 204 205 \
+  --ckpt checkpoints/planet_transformer_gen9_balanced.pt,checkpoints/planet_transformer_gen9_softkd.pt --weights 0.55 0.45
 pytest -v</pre>
       </div>
     </section>
@@ -206,6 +209,7 @@ pytest -v</pre>
     const KAGGLE_LADDER = [
       { name: "#1 Isaiah @ Tufa Labs (200M, B200s)", elo: 1865.1, tag: "Official Kaggle #1", ours: false, boss: true },
       { name: "#2 Hober Malloc (4.3M, 10B RL)", elo: 1800.1, tag: "Local Boss • Kaggle #2", ours: false, boss: true },
+      { name: "1.89M PT-Gen9 (Midgame Soft-KD Ens-2x)", elo: 1770, tag: "Gen 9 • 5–3 vs Gen 8 • 98 ms", ours: true },
       { name: "#5 TonyK (IMPALA + BC, RTX 5090)", elo: 1754.6, tag: "Official #5 / 4,729", ours: false },
       { name: "1.89M PT-Gen8 (Soft-KD + Aux 2P)", elo: 1740, tag: "Gen 8 • 6–2 vs Gen 7 • 54 ms", ours: true },
       { name: "#7 Audun (Official Top-10)", elo: 1717.3, tag: "Official #7 / 4,729", ours: false },
@@ -219,8 +223,9 @@ pytest -v</pre>
       { name: "subham_v14 (Top Heuristic Ceiling)", elo: 1224, tag: "Kaggle ~1,224", ours: false }
     ];
     const ABLATIONS = [
-      { name: "Gen 8: 1.89M PT-Gen8 (2P Specialist)", method: "Soft-KD + Aux t+10 + 8× D4 All-In", vsPrior: "6–2 vs Gen 7 (75.0%)", sub4: "Routes → Gen 7", wd4: "Routes → Gen 7", boss: "0–6 (111.3t / 134t w/S)", ms: "53.8", hi: true },
-      { name: "Gen 8: Ensemble (Gen8 + Gen7)", method: "2× 1.89M 8× D4 All-In Blend", vsPrior: "4–2 vs Gen 7 (66.7%)", sub4: "—", wd4: "—", boss: "—", ms: "96.3", hi: true },
+      { name: "Gen 9: 1.89M PT-Gen9 (Ens-2x 2P Specialist)", method: "Midgame+Comet Soft-KD (0.247 KL) • 0.55 Bal + 0.45 Hold", vsPrior: "5–3 vs Gen 8 (62.5%, 63t KO)", sub4: "Routes → Gen 7", wd4: "Routes → Gen 7", boss: "0–6 (115.2t, 140t pure!)", ms: "98.0", hi: true },
+      { name: "Gen 9: 1.89M PT-Gen9 Single-Net (Bal / Hold)", method: "Midgame 2.5× + Comet 2.0× Soft-KD • 8× D4", vsPrior: "4–4 vs Gen 8 (50.0%)", sub4: "Routes → Gen 7", wd4: "Routes → Gen 7", boss: "0–6 (110.7t, 1v0 comets)", ms: "54.0", hi: false },
+      { name: "Gen 8: 1.89M PT-Gen8 (2P Specialist)", method: "Soft-KD + Aux t+10 + 8× D4 All-In", vsPrior: "6–2 vs Gen 7 (75.0%)", sub4: "Routes → Gen 7", wd4: "Routes → Gen 7", boss: "0–6 (111.3t / 134t w/S)", ms: "53.8", hi: false },
       { name: "Gen 7: 1.89M PT-v5-Boss (4P Specialist)", method: "1.89M • Full-TTA DAgger + 8× D4", vsPrior: "4–2 vs Gen 6 (66.7%)", sub4: "4–0 (133.8t)", wd4: "4–0 (137.2t)", boss: "0–6 (119.0t, max 127t)", ms: "55.4", hi: false },
       { name: "Gen 7: Ensemble-3x (v5+v4+v4rl)", method: "3× 1.89M Probability Blend", vsPrior: "4–2 vs Gen 6 (66.7%)", sub4: "—", wd4: "—", boss: "0–6 (119.0t, max 132t)", ms: "72.0", hi: false },
       { name: "Gen 6: 1.89M PT-v4-Large Pure", method: "1.89M • 12.8K BC+DAgger", vsPrior: "4–2 vs Gen 5 (66.7%)", sub4: "4–0 (135.8t)", wd4: "4–0 (142.5t)", boss: "0–6 (111.2t, max 131t)", ms: "36.6", hi: false },
@@ -233,7 +238,8 @@ pytest -v</pre>
       { model: "Gen 5: 0.59M PT-v3-RL", vsPure: "6–0 (100.0%)", wr: 100.0, pureMs: "29.9 ms", searchMs: "131.9 ms", boss: "— → 116.8t" },
       { model: "Gen 6: 1.89M PT-v4-Large", vsPure: "2–2 (50.0%)", wr: 50.0, pureMs: "36.6 ms", searchMs: "145.5 ms", boss: "111.2t → 119.2t (max 135t)" },
       { model: "Gen 7: 1.89M PT-v5-Boss (8× D4)", vsPure: "Internalized (Pure = Search vs #2)", wr: 50.0, pureMs: "55.4 ms", searchMs: "160 ms", boss: "119.0t → 118.0t (max 129t)" },
-      { model: "Gen 8: 1.89M PT-Gen8 (Soft-KD + Aux)", vsPure: "6–2 vs Gen 7 Pure (+190 Elo)", wr: 75.0, pureMs: "53.8 ms", searchMs: "160 ms", boss: "111.3t → 115.2t (max 134t)" }
+      { model: "Gen 8: 1.89M PT-Gen8 (Soft-KD + Aux)", vsPure: "6–2 vs Gen 7 Pure (+190 Elo)", wr: 75.0, pureMs: "53.8 ms", searchMs: "160 ms", boss: "111.3t → 115.2t (max 134t)" },
+      { model: "Gen 9: 1.89M PT-Gen9 (Ens-2x Soft-KD)", vsPure: "5–3 vs Gen 8 Pure (+90 Elo)", wr: 62.5, pureMs: "98.0 ms", searchMs: "— (Pure matches Gen 8+S!)", boss: "115.2t Pure (140t record!)" }
     ];
     const ELO_2P = [
       { name: "LightZero v3 (Gen 2)", elo: 2300.3, ci: [2044, 2980], wdl: "19-0-1", wr: 95.0, ours: true },
@@ -264,7 +270,7 @@ pytest -v</pre>
       document.getElementById("ablation-tbody").innerHTML = ABLATIONS.map(r => `
         <tr class="${r.hi ? "ours-row" : ""}">
           <td>${r.name}</td><td style="color:var(--muted)">${r.method}</td>
-          <td class="num mono ${r.vsPrior.startsWith("4–2") || r.vsPrior.startsWith("5–1") || r.vsPrior.startsWith("6–0") || r.vsPrior.startsWith("6–2") ? "ok" : ""}">${r.vsPrior}</td>
+          <td class="num mono ${r.vsPrior.startsWith("4–2") || r.vsPrior.startsWith("5–1") || r.vsPrior.startsWith("5–3") || r.vsPrior.startsWith("6–0") || r.vsPrior.startsWith("6–2") ? "ok" : ""}">${r.vsPrior}</td>
           <td class="num mono ${r.sub4.startsWith("4–0") ? "ok" : ""}">${r.sub4}</td>
           <td class="num mono ${r.wd4.startsWith("4–0") ? "ok" : ""}">${r.wd4}</td>
           <td class="num mono">${r.boss}</td><td class="num mono">${r.ms}</td>

@@ -80,6 +80,7 @@ def _decode_sampled_actions(
     fracs: np.ndarray,
     *,
     max_speed: float = DEFAULT_SHIP_SPEED,
+    force_all_in: bool = False,
 ) -> List[List[float]]:
     """Convert sampled per-planet action indices (0=HOLD, 1+j=target j) into Kaggle moves."""
     n = len(enc.planet_ids)
@@ -104,7 +105,7 @@ def _decode_sampled_actions(
 
         forced = i in expiring_set
         f = float(fracs[i, dst_j])
-        send_ships = avail if (forced or f >= 0.88) else max(1, min(avail, int(round(avail * f))))
+        send_ships = avail if (force_all_in or forced or f >= 0.88) else max(1, min(avail, int(round(avail * f))))
 
         sol = solve_intercept(
             src_row,
@@ -132,6 +133,7 @@ def _policy_step(
     sample: bool = True,
     temperature: float = 0.85,
     launch_threshold: float = 0.50,
+    force_all_in: bool = False,
     rng: np.random.Generator | None = None,
 ) -> Tuple[List[List[float]], np.ndarray, np.ndarray, float]:
     """Run one forward pass and return ``(moves, action_cls[MAX_PLANETS], old_logp[MAX_PLANETS], value)``."""
@@ -186,7 +188,7 @@ def _policy_step(
         action_cls[i] = cls
         old_logp[i] = float(log_probs_np[i, cls])
 
-    moves = _decode_sampled_actions(enc, action_cls, fracs_np)
+    moves = _decode_sampled_actions(enc, action_cls, fracs_np, force_all_in=force_all_in)
     return moves, action_cls, old_logp, v_scalar
 
 
@@ -203,6 +205,7 @@ def collect_episode(
     gae_lambda: float = 0.95,
     shaping_coef: float = 0.02,
     early_reset: bool = True,
+    force_all_in: bool = False,
     opp_model: Optional[PlanetTimelineTransformer] = None,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, float]]:
     """Run one on-policy 2P or 4P episode in ``FastOrbitSim`` and compute GAE returns."""
@@ -221,6 +224,7 @@ def collect_episode(
     traj_logp: List[np.ndarray] = []
     traj_vals: List[float] = []
     traj_rews: List[float] = []
+    traj_steps: List[int] = []
 
     last_alive = [0] * num_players
     prev_phi = float(evaluate_state(sim, hero_slot))
@@ -236,7 +240,7 @@ def collect_episode(
                 enc_h = extract_planet_features(obs_h, player=hero_slot, max_speed=sim.ship_speed)
                 if np.any(enc_h.owned_mask):
                     moves_h, act_cls, old_lp, val_h = _policy_step(
-                        policy, enc_h, sample=True, temperature=temperature, rng=rng
+                        policy, enc_h, sample=True, temperature=temperature, force_all_in=force_all_in, rng=rng
                     )
                     actions[pid] = moves_h
                     padded = pad_encoded_state(enc_h, MAX_PLANETS)
@@ -249,6 +253,7 @@ def collect_episode(
                     traj_act.append(act_cls)
                     traj_logp.append(old_lp)
                     traj_vals.append(val_h)
+                    traj_steps.append(int(sim.step_count))
                     recorded_hero = True
             else:
                 if opponent_kind == "heuristic":
@@ -263,12 +268,16 @@ def collect_episode(
                 elif opponent_kind == "self":
                     obs_o = sim.to_observation(player=pid)
                     enc_o = extract_planet_features(obs_o, player=pid, max_speed=sim.ship_speed)
-                    mv_o, _, _, _ = _policy_step(policy, enc_o, sample=True, temperature=0.55, rng=rng)
+                    mv_o, _, _, _ = _policy_step(
+                        policy, enc_o, sample=True, temperature=0.55, force_all_in=force_all_in, rng=rng
+                    )
                     actions[pid] = mv_o
                 else:  # frozen anchor or historical pool snapshot
                     obs_o = sim.to_observation(player=pid)
                     enc_o = extract_planet_features(obs_o, player=pid, max_speed=sim.ship_speed)
-                    mv_o, _, _, _ = _policy_step(active_opp_model, enc_o, sample=False, rng=rng)
+                    mv_o, _, _, _ = _policy_step(
+                        active_opp_model, enc_o, sample=False, force_all_in=force_all_in, rng=rng
+                    )
                     actions[pid] = mv_o
 
         sim.step(actions)
@@ -342,6 +351,7 @@ def collect_episode(
             "old_logp": np.zeros((0, MAX_PLANETS), np.float32),
             "advantages": np.zeros((0,), np.float32),
             "returns": np.zeros((0,), np.float32),
+            "step_ticks": np.zeros((0,), np.int32),
         }
         return empty, {"win": float(win_pid == hero_slot), "rank": hero_rank, "steps": float(sim.step_count), "term_rew": term_rew}
 
@@ -356,6 +366,7 @@ def collect_episode(
         "old_logp": np.stack(traj_logp, axis=0),
         "advantages": advs,
         "returns": rets,
+        "step_ticks": np.asarray(traj_steps, dtype=np.int32),
     }
     stats = {
         "win": 1.0 if win_pid == hero_slot else 0.0,
@@ -367,7 +378,9 @@ def collect_episode(
     return batch, stats
 
 
-def _worker_collect_episode(task: Tuple[Dict[str, Any], Dict[str, Any], Optional[Dict[str, Any]], int, str, int, float, int, float, bool]) -> Tuple[Dict[str, np.ndarray], Dict[str, float]]:
+def _worker_collect_episode(
+    task: Tuple[Dict[str, Any], Dict[str, Any], Optional[Dict[str, Any]], int, str, int, float, int, float, bool, bool]
+) -> Tuple[Dict[str, np.ndarray], Dict[str, float]]:
     """Multiprocessing worker entry point for parallel episode collection."""
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -376,7 +389,7 @@ def _worker_collect_episode(task: Tuple[Dict[str, Any], Dict[str, Any], Optional
     except Exception:
         pass
 
-    model_cfg, policy_sd, opp_sd, num_players, opponent_kind, seed, temperature, max_steps, shaping_coef, early_reset = task
+    model_cfg, policy_sd, opp_sd, num_players, opponent_kind, seed, temperature, max_steps, shaping_coef, early_reset, force_all_in = task
     policy = PlanetTimelineTransformer(**model_cfg)
     policy.load_state_dict({k: torch.as_tensor(v) for k, v in policy_sd.items()})
     policy.eval()
@@ -384,7 +397,7 @@ def _worker_collect_episode(task: Tuple[Dict[str, Any], Dict[str, Any], Optional
     opp_model: Optional[PlanetTimelineTransformer] = None
     if opp_sd is not None:
         opp_model = PlanetTimelineTransformer(**model_cfg)
-        opp_model.load_state_dict({k: torch.as_tensor(v) for k, v in opp_sd.items()})
+        opp_model.load_state_dict({k: torch.as_tensor(v) for k, v in opp_sd.items()}, strict=False)
         opp_model.eval()
 
     return collect_episode(
@@ -397,6 +410,7 @@ def _worker_collect_episode(task: Tuple[Dict[str, Any], Dict[str, Any], Optional
         max_steps=max_steps,
         shaping_coef=shaping_coef,
         early_reset=early_reset,
+        force_all_in=force_all_in,
         opp_model=opp_model,
     )
 
@@ -409,8 +423,9 @@ def _eval_vs_fixed_anchor(
     games_2p: int = 6,
     games_4p: int = 4,
     max_steps: int = 240,
+    force_all_in: bool = False,
 ) -> Dict[str, float]:
-    """Deterministic greedy evaluation against the frozen starting anchor (2P + 4P)."""
+    """Deterministic greedy evaluation against the frozen starting anchor (2P + optional 4P)."""
     policy.eval()
     fixed_anchor.eval()
     w2 = 0
@@ -423,7 +438,7 @@ def _eval_vs_fixed_anchor(
                 obs = sim.to_observation(player=pid)
                 enc = extract_planet_features(obs, player=pid, max_speed=sim.ship_speed)
                 m = policy if pid == hero else fixed_anchor
-                mv, _, _, _ = _policy_step(m, enc, sample=False)
+                mv, _, _, _ = _policy_step(m, enc, sample=False, force_all_in=force_all_in)
                 acts.append(mv)
             sim.step(acts)
         if sim.winner() == hero:
@@ -441,7 +456,7 @@ def _eval_vs_fixed_anchor(
                 obs = sim.to_observation(player=pid)
                 enc = extract_planet_features(obs, player=pid, max_speed=sim.ship_speed)
                 m = policy if pid == hero else fixed_anchor
-                mv, _, _, _ = _policy_step(m, enc, sample=False)
+                mv, _, _, _ = _policy_step(m, enc, sample=False, force_all_in=force_all_in)
                 acts.append(mv)
             sim.step(acts)
             sc = sim.scores()
@@ -457,11 +472,12 @@ def _eval_vs_fixed_anchor(
 
     wr2 = w2 / max(1, games_2p)
     wr4 = w4 / max(1, games_4p)
+    score = wr2 if games_4p == 0 else (0.55 * wr2 + 0.45 * wr4)
     return {
         "eval_2p_wr": wr2,
         "eval_4p_wr": wr4,
-        "eval_4p_rank": r4_sum / max(1, games_4p),
-        "eval_score": 0.55 * wr2 + 0.45 * wr4,
+        "eval_4p_rank": (r4_sum / games_4p) if games_4p > 0 else 0.0,
+        "eval_score": score,
     }
 
 
@@ -477,6 +493,7 @@ def ppo_update(
     kl_coef: float = 0.05,
     ent_coef: float = 0.008,
     value_coef: float = 0.30,
+    midgame_adv_weight: float = 1.0,
 ) -> Dict[str, float]:
     """Perform clipped per-planet PPO + Delayed-Teacher KL updates on collected rollout transitions."""
     n = len(rollout["returns"])
@@ -485,6 +502,12 @@ def ppo_update(
 
     adv = rollout["advantages"].copy()
     adv = (adv - adv.mean()) / (adv.std() + 1e-6)
+    step_ticks = rollout.get("step_ticks")
+    if step_ticks is not None and midgame_adv_weight != 1.0:
+        mid_mask = (step_ticks >= 25) & (step_ticks <= 75)
+        w = np.where(mid_mask, float(midgame_adv_weight), 1.0).astype(np.float32)
+        w /= max(1e-6, float(w.mean()))
+        adv = adv * w
 
     policy.train()
     anchor.eval()
@@ -596,6 +619,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--temperature", type=float, default=0.75)
     parser.add_argument("--max-steps", type=int, default=220)
     parser.add_argument("--eval-every", type=int, default=2, help="Run deterministic anchor eval every N iters.")
+    parser.add_argument("--force-all-in", action="store_true", help="Train with 100% all-in sends matching Gen 8/9 2P inference.")
+    parser.add_argument("--two-player-only", action="store_true", help="Focus 100% of rollouts and anchor eval on 2P matches.")
+    parser.add_argument("--midgame-adv-weight", type=float, default=1.0, help="Policy-gradient multiplier for midgame ticks t in [25, 75].")
     parser.add_argument("--seed", type=int, default=9500)
     args = parser.parse_args(argv)
 
@@ -632,27 +658,40 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"[RL-League-PPO] Loaded {args.init} | pool={[n for n, _ in pool_sds]} | "
         f"iters={args.iterations} eps/iter={args.episodes_per_iter} workers={args.workers} "
-        f"lr={args.lr} kl={args.kl_coef} ema={args.teacher_ema} shaping={args.shaping_coef}",
+        f"lr={args.lr} kl={args.kl_coef} ema={args.teacher_ema} shaping={args.shaping_coef} "
+        f"all_in={args.force_all_in} 2p_only={args.two_player_only} mid_adv={args.midgame_adv_weight}",
         flush=True,
     )
     t0 = time.time()
     best_eval_score = -1.0
 
-    # Diverse league schedule: frozen historical pool (2P & 4P), subham_v14 (2P & 4P), Heuristic v2
-    league_cycle = [
-        (2, "pool"),
-        (2, "pool"),
-        (4, "pool"),
-        (2, "pool"),
-        (4, "subham_v14"),
-        (2, "subham_v14"),
-        (4, "pool"),
-        (2, "pool"),
-        (4, "heuristic"),
-        (2, "pool"),
-        (4, "subham_v14"),
-        (2, "heuristic"),
-    ]
+    # Diverse league schedule: frozen historical pool, subham_v14, Heuristic v2
+    if args.two_player_only:
+        league_cycle = [
+            (2, "pool"),
+            (2, "pool"),
+            (2, "pool"),
+            (2, "subham_v14"),
+            (2, "pool"),
+            (2, "pool"),
+            (2, "pool"),
+            (2, "heuristic"),
+        ]
+    else:
+        league_cycle = [
+            (2, "pool"),
+            (2, "pool"),
+            (4, "pool"),
+            (2, "pool"),
+            (4, "subham_v14"),
+            (2, "subham_v14"),
+            (4, "pool"),
+            (2, "pool"),
+            (4, "heuristic"),
+            (2, "pool"),
+            (4, "subham_v14"),
+            (2, "heuristic"),
+        ]
 
     for it in range(1, args.iterations + 1):
         policy.eval()
@@ -679,6 +718,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.max_steps,
                 args.shaping_coef,
                 True,
+                args.force_all_in,
             ))
 
         if args.workers > 1:
@@ -714,6 +754,7 @@ def main(argv: list[str] | None = None) -> int:
             batch_size=args.batch_size,
             kl_coef=args.kl_coef,
             ent_coef=args.ent_coef,
+            midgame_adv_weight=args.midgame_adv_weight,
         )
 
         wr2 = 100.0 * float(np.mean(ep_wins_2p)) if ep_wins_2p else 0.0
@@ -735,8 +776,18 @@ def main(argv: list[str] | None = None) -> int:
         eval_str = ""
         save_best = False
         if it % args.eval_every == 0 or it == args.iterations:
-            ev = _eval_vs_fixed_anchor(policy, fixed_anchor, seed_base=args.seed + 50000, games_2p=4, games_4p=4)
-            eval_str = f" | EVAL_vs_init: 2P={100*ev['eval_2p_wr']:.0f}% 4P={100*ev['eval_4p_wr']:.0f}% (rk={ev['eval_4p_rank']:.2f})"
+            ev = _eval_vs_fixed_anchor(
+                policy,
+                fixed_anchor,
+                seed_base=args.seed + 50000,
+                games_2p=8 if args.two_player_only else 4,
+                games_4p=0 if args.two_player_only else 4,
+                force_all_in=args.force_all_in,
+            )
+            if args.two_player_only:
+                eval_str = f" | EVAL_vs_init: 2P={100*ev['eval_2p_wr']:.0f}%"
+            else:
+                eval_str = f" | EVAL_vs_init: 2P={100*ev['eval_2p_wr']:.0f}% 4P={100*ev['eval_4p_wr']:.0f}% (rk={ev['eval_4p_rank']:.2f})"
             if ev["eval_score"] >= best_eval_score:
                 best_eval_score = ev["eval_score"]
                 save_best = True

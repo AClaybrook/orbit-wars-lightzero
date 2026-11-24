@@ -145,6 +145,17 @@ def resolve_agent(spec: str, checkpoint: str | None = None, sims: int = 20, time
         override_ckpt = spec.split(":", 1)[1] if ":" in spec else None
         ckpt_path = override_ckpt or checkpoint or str(REPO_ROOT / "checkpoints" / "planet_transformer_best.pt")
         return create_planet_transformer_agent(checkpoint_path=ckpt_path, use_d4_tta=True, force_all_in=True)
+    if spec.startswith("pt_d4_gen9:") or spec == "pt_d4_gen9":
+        from orbit_wars_bot.planet_transformer import create_planet_transformer_agent
+
+        override_ckpt = spec.split(":", 1)[1] if ":" in spec else None
+        ckpt_path = override_ckpt or checkpoint or str(REPO_ROOT / "checkpoints" / "planet_transformer_gen9_balanced.pt")
+        return create_planet_transformer_agent(
+            checkpoint_path=ckpt_path,
+            use_d4_tta=True,
+            force_all_in=True,
+            reinforce_threshold=0.60,
+        )
     if spec in ("planet_transformer_search", "pt_search") or spec.startswith("planet_transformer_search:") or spec.startswith("pt_search:"):
         from orbit_wars_bot.planet_transformer import create_search_planet_transformer_agent
 
@@ -177,10 +188,15 @@ def resolve_agent(spec: str, checkpoint: str | None = None, sims: int = 20, time
             force_all_in=all_in,
         )
     if spec.startswith("pt_specialist:"):
-        from orbit_wars_bot.planet_transformer import PlanetTransformerAgent
+        from orbit_wars_bot.planet_transformer import EnsemblePlanetTransformerAgent, PlanetTransformerAgent
 
-        p2_path, p4_path = [p.strip() for p in spec.split(":", 1)[1].split("|", 1)]
-        ag_2p = PlanetTransformerAgent(p2_path, use_d4_tta=True, force_all_in=True)
+        p2_raw, p4_path = [p.strip() for p in spec.split(":", 1)[1].split("|", 1)]
+        p2_paths = [p.strip() for p in p2_raw.split(",") if p.strip()]
+        ag_2p: Any = (
+            EnsemblePlanetTransformerAgent(p2_paths, weights=[0.55, 0.45] if len(p2_paths) == 2 else None, use_d4_tta=True, force_all_in=True)
+            if len(p2_paths) > 1
+            else PlanetTransformerAgent(p2_paths[0], use_d4_tta=True, force_all_in=True)
+        )
         ag_4p = PlanetTransformerAgent(p4_path, use_d4_tta=True, force_all_in=False)
 
         def _specialist_agent(obs, config=None):

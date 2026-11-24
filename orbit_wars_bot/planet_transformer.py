@@ -19,7 +19,7 @@ test-time augmentation), leaving wide headroom under Kaggle's 500 ms turn cap.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -77,6 +77,8 @@ class EncodedPlanetState:
     current_step: int
     angular_velocity: float
     player: int
+    arrivals: Dict[int, List[Any]] = field(default_factory=dict)
+    futures: List[Tuple[Tuple[int, int], ...]] = field(default_factory=list)
 
 
 def _enemy_slot_map(
@@ -348,6 +350,8 @@ def extract_planet_features(
         current_step=step,
         angular_velocity=ang_vel,
         player=player,
+        arrivals=arrivals,
+        futures=futures,
     )
 
 
@@ -651,6 +655,9 @@ class PlanetTransformerAgent:
         use_rot_tta: bool = True,
         use_d4_tta: bool = False,
         force_all_in: bool = False,
+        reinforce_threshold: Optional[float] = None,
+        surgical_neutral_cap: bool = False,
+        anti_bounce_guard: bool = False,
         device: str = "cpu",
     ) -> None:
         torch.set_num_threads(1)
@@ -659,6 +666,9 @@ class PlanetTransformerAgent:
         self.use_rot_tta = bool(use_rot_tta)
         self.use_d4_tta = bool(use_d4_tta)
         self.force_all_in = bool(force_all_in)
+        self.reinforce_threshold = None if reinforce_threshold is None else float(reinforce_threshold)
+        self.surgical_neutral_cap = bool(surgical_neutral_cap)
+        self.anti_bounce_guard = bool(anti_bounce_guard)
 
         ckpt = torch.load(str(checkpoint_path), map_location=self.device, weights_only=False)
         cfg = ckpt.get("model_config", {})
@@ -696,6 +706,9 @@ class PlanetTransformerAgent:
             launch_threshold=self.launch_threshold,
             force_all_in=self.force_all_in,
             max_speed=max_speed,
+            reinforce_threshold=self.reinforce_threshold,
+            surgical_neutral_cap=self.surgical_neutral_cap,
+            anti_bounce_guard=self.anti_bounce_guard,
         )
 
     @torch.no_grad()
@@ -752,17 +765,28 @@ class PlanetTransformerAgent:
         max_speed: float,
         overrides: Optional[Dict[int, int]] = None,
         top_k_fallback: int = 3,
+        reinforce_threshold: Optional[float] = None,
+        surgical_neutral_cap: bool = False,
+        anti_bounce_guard: bool = False,
     ) -> List[List[float]]:
         """Convert per-planet probabilities (+ optional per-planet overrides) into Kaggle moves.
 
         ``overrides`` maps ``planet_idx -> action_class`` where ``0`` = HOLD and ``1 + j`` = target ``j``.
-        When the #1 predicted target is blocked by an intermediate planet (``solve_intercept`` returns
-        ``None``), tries up to ``top_k_fallback`` legal candidates in descending probability order
-        before falling back to HOLD.
+        Optional Gen 9 midgame guards (all off by default for 100% backward compatibility):
+          - ``reinforce_threshold``: raises the launch bar for peaceful friendly-to-friendly
+            shuffling while preserving normal thresholds for threatened rescues.
+          - ``surgical_neutral_cap``: caps uncontested neutral captures to ``needed + margin``
+            when doing so preserves ETA within <= +2 ticks, curbing neutral ship overkill.
+          - ``anti_bounce_guard``: holds low-confidence solo enemy attacks that cannot flip
+            the target even after pooling all same-tick friendly launches + in-flight fleets.
         """
         n = len(enc.planet_ids)
         expiring_set = set(enc.expiring_comet_indices)
-        moves: List[List[float]] = []
+        has_futures = len(enc.futures) == n
+
+        # Pass 1: collect candidate launches per owned planet
+        proposals: List[Tuple[int, int, int, float, int, bool, float]] = []
+        # Tuple: (src_idx, dst_idx, send_ships, angle, eta, forced, p_target)
 
         for i in range(n):
             if not enc.owned_mask[i]:
@@ -770,6 +794,7 @@ class PlanetTransformerAgent:
             if not np.any(enc.legal_edges[i]):
                 continue
             forced = i in expiring_set
+            p_launch = 1.0 - float(probs[i, 0])
 
             if overrides is not None and i in overrides and not forced:
                 cls = int(overrides[i])
@@ -777,7 +802,6 @@ class PlanetTransformerAgent:
                     continue
                 cand_targets = [cls - 1]
             else:
-                p_launch = 1.0 - float(probs[i, 0])
                 if (p_launch < launch_threshold) and (not forced):
                     continue
                 order = np.argsort(-probs[i, 1:])
@@ -801,6 +825,25 @@ class PlanetTransformerAgent:
                 if best_j < 0 or best_j >= n or not enc.legal_edges[i, best_j]:
                     continue
                 dst_row = enc.planet_rows[best_j]
+                dst_pid = int(dst_row[0])
+                dst_owner = int(dst_row[1])
+                p_tgt = float(probs[i, 1 + best_j])
+
+                # Guard 1 (Hold Calibration): curb premature peaceful friendly shuffles
+                if (
+                    reinforce_threshold is not None
+                    and (not forced)
+                    and overrides is None
+                    and dst_owner == enc.player
+                    and p_launch < reinforce_threshold
+                ):
+                    # Always allow urgent defensive rescue if friendly target is projected to fall
+                    threatened = False
+                    if has_futures:
+                        threatened = any(ow != enc.player for ow, _ in enc.futures[best_j])
+                    if not threatened:
+                        break
+
                 if force_all_in or forced:
                     send_ships = avail
                 else:
@@ -820,10 +863,67 @@ class PlanetTransformerAgent:
                     max_eta=MAX_ROUTE_ETA + 4,
                     max_speed=max_speed,
                 )
-                if sol is not None:
-                    moves.append([int(src_row[0]), float(sol.angle), int(send_ships)])
-                    break
+                if sol is None:
+                    continue
 
+                # Guard 2 (Surgical Neutral Cap): reclaim excess overkill on uncontested neutrals
+                if (
+                    surgical_neutral_cap
+                    and (not forced)
+                    and dst_owner == -1
+                    and send_ships >= 12
+                ):
+                    dst_arrs = enc.arrivals.get(dst_pid, ())
+                    enemy_inbound = any(a.owner != enc.player for a in dst_arrs)
+                    if not enemy_inbound:
+                        if has_futures:
+                            t_idx = min(sol.eta, len(enc.futures[best_j]) - 1)
+                            fut_own, fut_sh = enc.futures[best_j][t_idx]
+                        else:
+                            fut_own, fut_sh = -1, int(dst_row[5])
+                        if fut_own == -1:
+                            margin = 5 if int(dst_row[6]) >= 4 else 3
+                            capped = max(1, int(fut_sh) + 1 + margin)
+                            if capped + 8 <= send_ships:
+                                sol_cap = solve_intercept(
+                                    src_row,
+                                    dst_row,
+                                    capped,
+                                    enc.planet_rows,
+                                    enc.current_step,
+                                    enc.angular_velocity,
+                                    enc.initial_by_id,
+                                    comet_lookup=enc.comet_lookup,
+                                    tracks=enc.tracks,
+                                    max_eta=MAX_ROUTE_ETA + 4,
+                                    max_speed=max_speed,
+                                )
+                                if sol_cap is not None and sol_cap.eta <= sol.eta + 2:
+                                    send_ships = capped
+                                    sol = sol_cap
+
+                proposals.append((i, best_j, int(send_ships), float(sol.angle), int(sol.eta), forced, p_tgt))
+                break
+
+        # Pass 2 (Anti-Bounce Guard): filter solo enemy attacks guaranteed to bounce
+        if not anti_bounce_guard or not proposals:
+            return [[int(enc.planet_rows[i][0]), ang, sh] for i, _, sh, ang, _, _, _ in proposals]
+
+        planned_to_dst: Dict[int, int] = {}
+        for _, dst_j, sh, _, _, _, _ in proposals:
+            planned_to_dst[dst_j] = planned_to_dst.get(dst_j, 0) + sh
+
+        moves: List[List[float]] = []
+        for i, dst_j, sh, ang, eta, forced, p_tgt in proposals:
+            dst_row = enc.planet_rows[dst_j]
+            dst_owner = int(dst_row[1])
+            if (not forced) and dst_owner >= 0 and dst_owner != enc.player and p_tgt < 0.78 and has_futures:
+                t_idx = min(eta, len(enc.futures[dst_j]) - 1)
+                fut_own, fut_sh = enc.futures[dst_j][t_idx]
+                if fut_own != enc.player and planned_to_dst.get(dst_j, sh) <= fut_sh:
+                    # Guaranteed to bounce even pooling all same-tick friendly waves -> hold & accumulate
+                    continue
+            moves.append([int(enc.planet_rows[i][0]), ang, sh])
         return moves
 
 
@@ -1113,6 +1213,9 @@ def create_planet_transformer_agent(
     use_rot_tta: bool = True,
     use_d4_tta: bool = False,
     force_all_in: bool = False,
+    reinforce_threshold: Optional[float] = None,
+    surgical_neutral_cap: bool = False,
+    anti_bounce_guard: bool = False,
 ):
     """Factory returning a Kaggle ``agent(obs, config)`` callable."""
     agent_obj = PlanetTransformerAgent(
@@ -1121,6 +1224,9 @@ def create_planet_transformer_agent(
         use_rot_tta=use_rot_tta,
         use_d4_tta=use_d4_tta,
         force_all_in=force_all_in,
+        reinforce_threshold=reinforce_threshold,
+        surgical_neutral_cap=surgical_neutral_cap,
+        anti_bounce_guard=anti_bounce_guard,
     )
 
     def _kaggle_agent(obs: Any, config: Any = None) -> List[List[float]]:

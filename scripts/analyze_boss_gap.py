@@ -465,19 +465,34 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seeds", type=int, nargs="+", default=[200, 201, 202, 203, 204, 205])
     parser.add_argument("--ckpt", type=str, default="checkpoints/planet_transformer_gen8_2p_softkd.pt")
+    parser.add_argument("--weights", type=float, nargs="*", default=None)
     parser.add_argument("--no-counterfactual", action="store_true")
     parser.add_argument("--out-json", type=str, default="scratch/boss_forensics.json")
     args = parser.parse_args()
 
+    from orbit_wars_bot.planet_transformer import EnsemblePlanetTransformerAgent
+
     t_start = time.perf_counter()
     teacher = None if args.no_counterfactual else HoberSoftTeacher(rotation_tta=True, opponent_tta=False)
-    our_agent = PlanetTransformerAgent(args.ckpt, use_d4_tta=True, force_all_in=True)
+    ckpt_list = [p.strip() for p in args.ckpt.split(",") if p.strip()]
+    if len(ckpt_list) > 1:
+        our_agent: Any = EnsemblePlanetTransformerAgent(
+            ckpt_list, weights=args.weights, use_d4_tta=True, force_all_in=True
+        )
+    else:
+        our_agent = PlanetTransformerAgent(ckpt_list[0], use_d4_tta=True, force_all_in=True)
 
     episodes = []
     for seed in args.seeds:
         t0 = time.perf_counter()
         hober_ag = resolve_agent("hober_malloc")
-        pt_ag = resolve_agent(f"pt_d4_allin:{args.ckpt}")
+        if len(ckpt_list) > 1:
+            ep_ag = EnsemblePlanetTransformerAgent(
+                ckpt_list, weights=args.weights, use_d4_tta=True, force_all_in=True
+            )
+            pt_ag = lambda obs, cfg, _ag=ep_ag: _ag.act(obs, cfg)
+        else:
+            pt_ag = resolve_agent(f"pt_d4_allin:{ckpt_list[0]}")
         env = make(
             "orbit_wars",
             configuration={"episodeSteps": 500, "seed": seed, "actTimeout": 5.0},

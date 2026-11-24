@@ -176,3 +176,24 @@ This log tracks calibrated **Kaggle-equivalent Elo** estimates (anchored against
 - **Estimated Kaggle Skill Rating (`1.89M PT-Gen8` 2P Specialist + `Gen 7` 4P Specialist):**
   - **Pure (`53.8 ms/turn`):** **~1,720–1,760** (firmly inside Kaggle Top-10 between `#7 Audun = 1717.3` and `#5 TonyK = 1754.6`, +190 Elo over Gen 7 in 2P!). Crossing the final ~50–80 Elo to consistently beat `#2 Hober Malloc (1800.1, 4.3M ModernBERT, 10B RL steps)` now genuinely hits the GPU self-play RL compute wall.
 
+### Generation 9 — `1.89M PT-Gen9` (Midgame + Comet-Weighted Soft-KD Ensemble + 5-Fix Forensics Ablation)
+- **Date:** 2026-11-23
+- **Forensics-Driven Upgrades ([`scripts/distill_soft_kd.py`](../scripts/distill_soft_kd.py), [`orbit_wars_bot/planet_transformer.py`](../orbit_wars_bot/planet_transformer.py), [`scripts/rl_finetune_transformer.py`](../scripts/rl_finetune_transformer.py)):**
+  - **Dense Midgame & Comet-Window DAgger Collection:** Collected **961 fresh dense boards** (`stride=1` during `t = 22..78` and active comet windows) across 10 `PT-Gen8` vs. `#2 Hober Malloc` sparring games → **`3,383` total Full-TTA `1800.1` 2P Soft-KD + `t+10` boards** (`+40%` data).
+  - **Midgame (`2.5×`) & Comet (`2.0×`) Weighted Soft-KD Convergence:**
+    - `PT-Gen9 (Hold-Boost: hold_b=1.25, launch_b=1.0)`: `val_kl = 0.247` (**`-33%`** vs. Gen 8's `0.369`), `val_all = 85.6%`, `val_tgt = 77.3%` (`+3.7%`), `aux_own (t+10) = 94.9%`.
+    - `PT-Gen9 (Balanced: hold_b=1.0, launch_b=1.18)`: `val_kl = 0.247` (**`-33%`**), `val_all = 85.1%`, `val_tgt = 77.3%` (peak `77.7%`), `aux_own (t+10) = 94.8%`.
+  - **Complementary Dual-Head Ensemble (`PT-Gen9 Ens-2x`, `0.55 Balanced + 0.45 Hold-Boost`, `8× D4 All-In`, `~98 ms/turn`):** Combines `Hold-Boost`'s midgame patience (`-34%` premature shuffles, `-62%` impulsive bounces) with `Balanced`'s offensive tempo (`76` vs `70` midgame enemy strikes) at <10% of Kaggle's 1,000 ms budget!
+  - **Controlled Negative Ablations (Documented in [`docs/boss_midgame_forensics.md`](boss_midgame_forensics.md)):**
+    - Peaceful Hold Calibration (`reinforce_threshold=0.60`): **`4–2` (`+120 Elo`)** on `PT-Gen8` (`0.65` too strict at `1–5`).
+    - Decoder `surgical_neutral_cap`: **`2–4`** (smaller neutral sends travel slower due to nonlinear ship-count speed scaling).
+    - Decoder `anti_bounce_guard`: **`1–5`** (hard-blocking solo pokes hurts attrition waves).
+    - Post-KD 2P Midgame CPU PPO (`--force-all-in --two-player-only --midgame-adv-weight 1.8`): `75%` (`6–2`) on 8 eval seeds at iter 1 (`kl=0.05`), but **`1–7`** on unseen seeds `990–997` (reconfirming CPU-scale RL overfits relative to `val_kl = 0.247` Soft-KD).
+- **Official Kaggle 2P Benchmarks (`PT-Gen9 Ens-2x`, `~98 ms/turn` — Auto-routed 2P Specialist paired with `Gen 7` 4P Specialist):**
+  - **`PT-Gen9 (Ens-2x, 8× D4 All-In)` vs. `PT-Gen8` (official 2P, seeds `990–997`):** **`5–3–0` (`62.5%`, ~+90 Elo, `227.6t`, fastest blitz KO `63` ticks on seed `992`!)**
+  - **Single-net Ablations vs. `PT-Gen8` (official 2P, 8g each):** `PT-Gen9 (Hold-Boost)` = `4–4–0` (`50.0%`), `PT-Gen9 (Balanced)` = `4–4–0` (`50.0%`, fastest win `89t`), `PT-Gen9 (Balanced + Hold-Cal 0.60)` = `4–4–0` (`50.0%`, fastest win `77t`).
+  - **2P Boss Gauntlet vs. `#2 Hober Malloc (1800.1)` (seeds `200–205`, pure neural — zero search!):**
+    - `PT-Gen9 (Ens-2x)`: `0–6` (**`115.2t` avg**, **new pure-policy record `140t` on seed `201`** with `19 vs 11` sync arrivals and `605 vs 1,289` bounced ships — matching Gen 8 *with Search* using pure neural inference!).
+    - Ship tipping point delayed **`t = 16.3 → t = 27.8`** (`+11.5` ticks; seed `200` held even until **`t = 59`**), `t = 50` ship deficit narrowed `-131.8 → -112.5`, premature reinforces cut **`-21%`** (`94 → 74`; `-34%` on Hold-Boost), impulsive solo bounces cut **`-55%`** (`29 → 13`), and total bounced ships dropped below `#2` (`2,785 vs 3,100`)!
+- **Estimated Kaggle Skill Rating (`1.89M PT-Gen9` 2P Specialist + `Gen 7` 4P Specialist):**
+  - **Pure (`~98 ms/turn`):** **~1,750–1,790** (`5–3` / `+90 Elo` over `PT-Gen8`, solidly past `#5 TonyK = 1754.6` into **Kaggle Top-5** territory, with zero copied weights and <10% of the turn budget!).
