@@ -282,3 +282,137 @@ def test_aux_future_head_and_soft_kd_loss():
     assert 0.0 <= metrics["aux_acc"] <= 1.0
 
 
+def test_gen9_decoder_guards_and_midgame_soft_kd(tmp_path):
+    import sys
+
+    scripts_dir = str(Path(__file__).resolve().parent.parent / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from distill_soft_kd import compute_soft_kd_loss
+
+    # Build a synthetic board with 1 big owned planet, 1 weak neutral, 1 safe friendly, 1 huge enemy
+    obs = {
+        "step": 40,
+        "player": 0,
+        "angular_velocity": 0.0,
+        "planets": [
+            [0, 0, 10.0, 10.0, 2.5, 50, 3],   # src owned (50 ships)
+            [1, -1, 25.0, 10.0, 2.0, 6, 3],   # uncontested weak neutral (6 ships)
+            [2, 0, 10.0, 25.0, 2.0, 20, 3],   # safe friendly planet
+            [3, 1, 25.0, 25.0, 2.5, 200, 4],  # fortified enemy (200 ships -> 50 will bounce)
+        ],
+        "initial_planets": [
+            [0, 0, 10.0, 10.0, 2.5, 50, 3],
+            [1, -1, 25.0, 10.0, 2.0, 6, 3],
+            [2, 0, 10.0, 25.0, 2.0, 20, 3],
+            [3, 1, 25.0, 25.0, 2.5, 200, 4],
+        ],
+        "fleets": [],
+        "comets": [],
+        "comet_planet_ids": [],
+    }
+    enc = extract_planet_features(obs, player=0)
+    n = len(enc.planet_ids)
+
+    model = PlanetTimelineTransformer(d_model=32, n_heads=2, n_layers=1, dim_ff=64, use_aux_future=True)
+    ckpt_path = tmp_path / "tiny_gen9.pt"
+    torch.save({"model_config": model.config, "model_state_dict": model.state_dict()}, ckpt_path)
+    agent = PlanetTransformerAgent(ckpt_path, use_rot_tta=False)
+    fracs = np.ones((n, n), dtype=np.float32)
+
+    # 1. Surgical neutral cap should cap 50 ships down to ~10 ships for 6-ship neutral
+    probs_neu = np.zeros((n, n + 1), dtype=np.float32)
+    probs_neu[:, 0] = 1.0
+    probs_neu[0, 0] = 0.15
+    probs_neu[0, 2] = 0.85  # target idx 1 (neutral)
+    m_full = agent._decode_plan(enc, probs_neu, fracs, launch_threshold=0.50, force_all_in=True, max_speed=6.0)
+    m_cap = agent._decode_plan(
+        enc, probs_neu, fracs, launch_threshold=0.50, force_all_in=True, max_speed=6.0, surgical_neutral_cap=True
+    )
+    assert len(m_full) == 1 and int(m_full[0][2]) == 50
+    assert len(m_cap) == 1 and int(m_cap[0][2]) < 20
+
+    # 2. Hold calibration should block peaceful friendly reinforce when p_launch=0.55 < reinforce_threshold=0.62
+    probs_reinf = np.zeros((n, n + 1), dtype=np.float32)
+    probs_reinf[:, 0] = 1.0
+    probs_reinf[0, 0] = 0.45
+    probs_reinf[0, 3] = 0.55  # target idx 2 (safe friendly)
+    m_r_off = agent._decode_plan(enc, probs_reinf, fracs, launch_threshold=0.50, force_all_in=True, max_speed=6.0)
+    m_r_on = agent._decode_plan(
+        enc, probs_reinf, fracs, launch_threshold=0.50, force_all_in=True, max_speed=6.0, reinforce_threshold=0.62
+    )
+    assert len(m_r_off) == 1
+    assert len(m_r_on) == 0
+
+    # 3. Anti-bounce guard should block 50-ship solo poke into 200-ship enemy at p_tgt=0.60
+    probs_en = np.zeros((n, n + 1), dtype=np.float32)
+    probs_en[:, 0] = 1.0
+    probs_en[0, 0] = 0.40
+    probs_en[0, 4] = 0.60  # target idx 3 (200-ship enemy)
+    m_e_off = agent._decode_plan(enc, probs_en, fracs, launch_threshold=0.50, force_all_in=True, max_speed=6.0)
+    m_e_on = agent._decode_plan(
+        enc, probs_en, fracs, launch_threshold=0.50, force_all_in=True, max_speed=6.0, anti_bounce_guard=True
+    )
+    assert len(m_e_off) == 1
+    assert len(m_e_on) == 0
+
+    # 4. Midgame / comet / hold weighted Soft-KD loss computes finite gradients cleanly
+    pad = pad_encoded_state(enc)
+    pf = torch.from_numpy(pad["planet_feats"][None])
+    tf = torch.from_numpy(pad["timeline_feats"][None])
+    ef = torch.from_numpy(pad["edge_feats"][None])
+    le = torch.from_numpy(pad["legal_edges"][None])
+    om = torch.from_numpy(pad["owned_mask"][None])
+    pm = torch.from_numpy(pad["pad_mask"][None])
+    soft_q = torch.zeros((1, MAX_PLANETS, MAX_PLANETS + 1), dtype=torch.float32)
+    soft_q[..., 0] = 0.8
+    soft_q[..., 1] = 0.2
+    loss, metrics = compute_soft_kd_loss(
+        model, pf, tf, ef, le, om, pm, soft_q,
+        torch.tensor([1.0]), torch.zeros((1, MAX_PLANETS), dtype=torch.long),
+        torch.full((1, MAX_PLANETS), 0.5), pm.clone(),
+        midgame_weight=2.5, comet_weight=2.0, hold_boost=1.25, launch_boost=1.0,
+    )
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert metrics["kl"] >= 0.0
+
+
+def test_gen9_midgame_ppo_step_weighting():
+    import copy
+    import sys
+
+    scripts_dir = str(Path(__file__).resolve().parent.parent / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from rl_finetune_transformer import collect_episode, ppo_update
+
+    policy = PlanetTimelineTransformer(d_model=32, n_heads=2, n_layers=1, dim_ff=64, use_aux_future=True)
+    anchor = copy.deepcopy(policy)
+    anchor.eval()
+
+    batch, stats = collect_episode(
+        policy,
+        anchor,
+        num_players=2,
+        opponent_kind="heuristic",
+        seed=42,
+        max_steps=40,
+        force_all_in=True,
+    )
+    assert "step_ticks" in batch
+    assert len(batch["step_ticks"]) == len(batch["returns"])
+    assert stats["num_players"] == 2.0
+
+    opt = torch.optim.AdamW(policy.parameters(), lr=1e-4)
+    upd = ppo_update(
+        policy,
+        anchor,
+        opt,
+        batch,
+        ppo_epochs=1,
+        batch_size=16,
+        midgame_adv_weight=1.8,
+    )
+    assert np.isfinite(upd["loss"])
+    assert upd["kl"] >= 0.0

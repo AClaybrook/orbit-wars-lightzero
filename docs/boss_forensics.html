@@ -16,13 +16,13 @@
     <header class="flex flex-wrap items-start justify-between gap-4 pb-4 border-b border-[var(--border)]">
       <div>
         <div class="font-mono text-xs text-[var(--muted-foreground)]">
-          AClaybrook/orbit-wars-lightzero • Bot Improvement Track (Gen 8 &rarr; Gen 9) • 6 Seeds (200–205) &amp; 860 Counterfactual Queries
+          AClaybrook/orbit-wars-lightzero • Bot Improvement Track (Gen 8 &rarr; Gen 9 Shipped!) • Seeds 200–205 &amp; Counterfactual Audits
         </div>
         <h1 class="text-2xl font-bold tracking-tight mt-1">
-          #2 Hober Malloc Midgame Forensics — Diagnosing the t = 40–60 Tipping Point
+          #2 Hober Malloc Midgame Forensics — Gen 8 Diagnosis &amp; Gen 9 Before/After Results
         </h1>
         <p class="text-xs text-[var(--muted-foreground)] mt-1">
-          Tick-by-tick economy, combat waste, and counterfactual policy audit comparing <code>1.89M PT-Gen8 (~1,740)</code> vs. Kaggle #2 <code>Hober Malloc (1800.1)</code>.
+          Tick-by-tick economy, combat waste, and counterfactual audit comparing <code>PT-Gen8 (~1,740)</code> &rarr; <code>PT-Gen9 Ens-2x (~1,770)</code> vs. Kaggle #2 <code>Hober Malloc (1800.1)</code>.
         </p>
       </div>
       <div class="flex flex-wrap gap-2 text-xs font-semibold">
@@ -30,42 +30,42 @@
           &larr; Model Progression
         </a>
         <a href="gameplay_viewer.html" class="px-3 py-1 rounded-full bg-[var(--card)] border border-[var(--border)] text-[var(--primary)] no-underline">
-          ▶ Watch Boss Replays
+          ▶ Watch Gen 9 Replays
         </a>
-        <span class="px-3 py-1 rounded-full bg-[var(--card)] border border-[var(--border)] text-[var(--warning)]">
-          Target: PT-Gen9 Roadmap
+        <span class="px-3 py-1 rounded-full bg-[var(--card)] border border-[var(--success)] text-[var(--success)]">
+          PT-Gen9: 5–3 vs Gen 8 • 140t Pure vs #2
         </span>
       </div>
     </header>
 
     <!-- Headline KPIs -->
     <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-      <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4">
-        <div class="font-mono text-xs text-[var(--muted-foreground)]">Opening Parity (t = 0–25)</div>
-        <div class="text-2xl font-bold text-[var(--success)] tabular-nums mt-1">79.7% Match</div>
+      <div class="rounded-xl bg-[var(--card)] border border-[var(--success)] p-4">
+        <div class="font-mono text-xs text-[var(--muted-foreground)]">Gen 9 vs. Gen 8 (Official 2P)</div>
+        <div class="text-2xl font-bold text-[var(--success)] tabular-nums mt-1">5–3 (+90 Elo)</div>
         <p class="text-xs text-[var(--muted-foreground)] mt-1">
-          Dead even through <code>t=20</code> (<code>87.0 vs 88.3</code> ships) — we are <strong>not</strong> getting out-rushed early.
+          <code>PT-Gen9 (Ens-2x)</code> beat Gen 8 <code>62.5%</code> (<strong>63t blitz KO</strong>) &amp; cut Soft-KD <code>val_kl</code> by <strong>-33%</strong> (<code>0.369 &rarr; 0.247</code>).
         </p>
       </div>
-      <div class="rounded-xl bg-[var(--card)] border border-[var(--error)] p-4">
-        <div class="font-mono text-xs text-[var(--muted-foreground)]">#1 Midgame Error (t = 26–65)</div>
-        <div class="text-2xl font-bold text-[var(--error)] tabular-nums mt-1">58.3% Impulsive</div>
+      <div class="rounded-xl bg-[var(--card)] border border-[var(--primary)] p-4">
+        <div class="font-mono text-xs text-[var(--muted-foreground)]">Pure Boss Survival vs. #2</div>
+        <div class="text-2xl font-bold text-[var(--primary)] tabular-nums mt-1">140t Record</div>
         <p class="text-xs text-[var(--muted-foreground)] mt-1">
-          <code>123/211</code> midgame disagreements are all-in launches (<code>94</code> reinforce + <code>29</code> enemy) when #2 would <strong>HOLD</strong>.
-        </p>
-      </div>
-      <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4">
-        <div class="font-mono text-xs text-[var(--muted-foreground)]">Neutral Capture Overkill</div>
-        <div class="text-2xl font-bold text-[var(--warning)] tabular-nums mt-1">3.14&times; Waste</div>
-        <p class="text-xs text-[var(--muted-foreground)] mt-1">
-          <code>1,521</code> vs <code>485</code> excess ships dumped on neutrals — explains <code>-132</code> ship deficit at <code>t=50</code>.
+          Avg survival rose <code>111.3t &rarr; 115.2t</code> pure (matches Gen 8 <em>+ Search</em>!); seed 201 hit <strong>140t pure</strong>.
         </p>
       </div>
       <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4">
-        <div class="font-mono text-xs text-[var(--muted-foreground)]">Midgame Offensive Pressure</div>
-        <div class="text-2xl font-bold text-[var(--primary)] tabular-nums mt-1">70 vs 135</div>
+        <div class="font-mono text-xs text-[var(--muted-foreground)]">Midgame Waste Slashed</div>
+        <div class="text-2xl font-bold text-[var(--success)] tabular-nums mt-1">-55% Bounces</div>
         <p class="text-xs text-[var(--muted-foreground)] mt-1">
-          #2 launches <strong>1.93&times;</strong> more direct frontline attacks + grabs <strong>5 vs 0</strong> comets at <code>t=50+</code>.
+          Impulsive enemy pokes dropped <code>29 &rarr; 13</code> (<code>11</code> Hold-Boost); premature shuffles <code>94 &rarr; 74</code> (<code>62</code> Hold-Boost).
+        </p>
+      </div>
+      <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4">
+        <div class="font-mono text-xs text-[var(--muted-foreground)]">Ship Tipping Point Delayed</div>
+        <div class="text-2xl font-bold text-[var(--warning)] tabular-nums mt-1">+11.5 Ticks</div>
+        <p class="text-xs text-[var(--muted-foreground)] mt-1">
+          Avg tipping tick shifted <code>t=16.3 &rarr; t=27.8</code> (seed 200 held to <strong>t=59</strong>); <code>t=50</code> deficit cut <code>-132 &rarr; -113</code>.
         </p>
       </div>
     </section>
@@ -73,16 +73,16 @@
     <!-- Tabs -->
     <nav class="flex flex-wrap gap-2 pb-3 border-b border-[var(--border)]">
       <button data-tab="curves" class="tab-btn px-3.5 py-2 rounded-lg text-xs font-semibold border border-[var(--primary)] bg-[var(--primary)] text-[var(--primary-foreground)] cursor-pointer">
-        Economy &amp; Tipping Point
+        1. Economy &amp; Tipping Point (Gen 8 &rarr; 9)
       </button>
       <button data-tab="policy" class="tab-btn px-3.5 py-2 rounded-lg text-xs font-semibold border border-[var(--border)] bg-[var(--card)] text-[var(--muted-foreground)] cursor-pointer">
-        Counterfactual Policy Audit
+        2. Counterfactual Audit (Before / After)
       </button>
       <button data-tab="combat" class="tab-btn px-3.5 py-2 rounded-lg text-xs font-semibold border border-[var(--border)] bg-[var(--card)] text-[var(--muted-foreground)] cursor-pointer">
-        Combat Waste &amp; Colonization
+        3. Combat Waste &amp; Colonization
       </button>
       <button data-tab="gen9" class="tab-btn px-3.5 py-2 rounded-lg text-xs font-semibold border border-[var(--border)] bg-[var(--card)] text-[var(--muted-foreground)] cursor-pointer">
-        Gen 9 (PT-Gen9) Action Plan
+        4. Gen 9 Five-Fix Ablation Verdicts
       </button>
     </nav>
 
@@ -91,9 +91,9 @@
       <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4 space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h2 class="text-sm font-bold">Mean Trajectory Across Seeds 200–205 (PT-Gen8 vs. #2 Hober Malloc)</h2>
+            <h2 class="text-sm font-bold">Mean Trajectory Across Seeds 200–205: PT-Gen9 vs. PT-Gen8 vs. #2 Hober Malloc</h2>
             <p class="text-xs text-[var(--muted-foreground)]">
-              Shaded band highlights the <code>t = 30–60</code> midgame tipping window where ships diverge before planets collapse.
+              Green solid curve shows <strong>PT-Gen9 (Ens-2x)</strong> holding an early ship lead (<code>+1.8</code> at <code>t=20</code>) and narrowing the <code>t=50</code> gap vs. dashed <code>PT-Gen8</code>.
             </p>
           </div>
           <div class="flex gap-1.5 text-xs">
@@ -102,20 +102,20 @@
             <button data-metric="inflight" class="mbtn px-2.5 py-1 rounded-md font-semibold border border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] cursor-pointer">In-Flight %</button>
           </div>
         </div>
-        <canvas id="canvas-econ" width="960" height="320" class="w-full rounded-lg border border-[var(--border)]"></canvas>
+        <canvas id="canvas-econ" width="960" height="330" class="w-full rounded-lg border border-[var(--border)]"></canvas>
       </div>
 
       <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4 overflow-x-auto">
-        <h3 class="text-sm font-bold mb-2">Tick-by-Tick Economy Snapshot (Mean Across All 6 Boss Seeds)</h3>
+        <h3 class="text-sm font-bold mb-2">Tick-by-Tick Economy Snapshot (Gen 8 &rarr; Gen 9 vs. #2 Hober, Seeds 200–205)</h3>
         <table class="w-full text-xs border-collapse font-mono">
           <thead>
             <tr class="border-b border-[var(--border)] text-[var(--muted-foreground)] font-sans">
               <th class="text-left py-2">Tick</th>
-              <th class="text-right py-2">Planets (Ours vs #2)</th>
-              <th class="text-right py-2">Prod/tick (Delta)</th>
-              <th class="text-right py-2">Total Ships (Delta)</th>
-              <th class="text-right py-2">In-Flight % (Ours vs #2)</th>
-              <th class="text-left py-2 pl-4">Diagnosis</th>
+              <th class="text-right py-2">Gen 8 Ship Delta</th>
+              <th class="text-right py-2">Gen 9 Ship Delta</th>
+              <th class="text-right py-2">Gen 9 Ships (vs #2)</th>
+              <th class="text-right py-2">Gen 9 In-Flight %</th>
+              <th class="text-left py-2 pl-4">Gen 8 &rarr; Gen 9 Shift</th>
             </tr>
           </thead>
           <tbody id="econ-tbody"></tbody>
@@ -130,11 +130,12 @@
           <div class="flex items-center justify-between gap-2 flex-wrap">
             <div>
               <h2 class="text-sm font-bold">Counterfactual Policy Divergence vs. #2 Hober</h2>
-              <p class="text-xs text-[var(--muted-foreground)]">Exact #2 JAX teacher queried on PT-Gen8's live board states.</p>
+              <p class="text-xs text-[var(--muted-foreground)]">Compare Gen 8 baseline vs. Gen 9 models queried by #2's exact JAX teacher.</p>
             </div>
-            <div class="flex gap-1.5 text-xs">
-              <button data-phase="mid" class="pbtn px-2.5 py-1 rounded-md font-semibold border border-[var(--primary)] bg-[var(--primary)] text-[var(--primary-foreground)] cursor-pointer">Midgame (t=26–65)</button>
-              <button data-phase="early" class="pbtn px-2.5 py-1 rounded-md font-semibold border border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] cursor-pointer">Early (t=0–25)</button>
+            <div class="flex gap-1.5 text-xs flex-wrap">
+              <button data-phase="gen9_mid" class="pbtn px-2.5 py-1 rounded-md font-semibold border border-[var(--primary)] bg-[var(--primary)] text-[var(--primary-foreground)] cursor-pointer">PT-Gen9 Ens (Mid)</button>
+              <button data-phase="gen9_hold" class="pbtn px-2.5 py-1 rounded-md font-semibold border border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] cursor-pointer">PT-Gen9 Hold (Mid)</button>
+              <button data-phase="gen8_mid" class="pbtn px-2.5 py-1 rounded-md font-semibold border border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] cursor-pointer">PT-Gen8 (Mid)</button>
             </div>
           </div>
           <div id="cf-summary" class="text-xs p-2.5 rounded-lg bg-[var(--background)] border border-[var(--border)]"></div>
@@ -142,19 +143,19 @@
         </div>
 
         <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4 space-y-3">
-          <h2 class="text-sm font-bold">Why Impulsive All-In Launches Snowball Against #2</h2>
+          <h2 class="text-sm font-bold">What Changed From Gen 8 &rarr; Gen 9</h2>
           <div class="space-y-2.5 text-xs text-[var(--muted-foreground)]">
-            <div class="p-3 rounded-lg bg-[var(--background)] border border-[var(--border)]">
-              <div class="font-semibold text-[var(--foreground)]">1. Self-Inflicted Garrison Vacuums (94 Errors, 44.5%)</div>
-              <p class="mt-1"><code>PT-Gen8</code> fires all-in friendly reinforcements off border planets on ticks when #2 would <strong>HOLD</strong>. While those ships sit idle in transit for 6–12 ticks, #2's midgame attacks hit empty garrisons for free.</p>
+            <div class="p-3 rounded-lg bg-[var(--background)] border border-[var(--success)]">
+              <div class="font-semibold text-[var(--foreground)]">1. Impulsive Midgame Launches Slashed (-21% to -62%)</div>
+              <p class="mt-1">Dense <code>t=22..78</code> Soft-KD cut premature reinforces from <code>94 &rarr; 74</code> (<code>62</code> on Hold-Boost) and impulsive solo enemy pokes from <code>29 &rarr; 13</code> (<code>11</code> on Hold-Boost), closing Soft-KD <code>val_kl</code> by <strong>-33%</strong> (<code>0.369 &rarr; 0.247</code>).</p>
+            </div>
+            <div class="p-3 rounded-lg bg-[var(--background)] border border-[var(--primary)]">
+              <div class="font-semibold text-[var(--foreground)]">2. Why Complementary Ensembling Won (5–3 vs Gen 8)</div>
+              <p class="mt-1"><code>Hold-Boost (1.25)</code> cut waste maximally but dropped midgame enemy strikes to <code>46</code> (too passive solo: <code>4–4</code>). Blending <code>0.55 Balanced (launch_b=1.18) + 0.45 Hold-Boost</code> restored midgame aggression to <strong>76 strikes</strong> (+9% over Gen 8) while keeping the -55% bounce reduction!</p>
             </div>
             <div class="p-3 rounded-lg bg-[var(--background)] border border-[var(--border)]">
-              <div class="font-semibold text-[var(--foreground)]">2. Premature Solo Bounces (29 Errors, 13.7%)</div>
-              <p class="mt-1">Against weaker bots, aggressive all-in pokes steal planets immediately. Against #2's tighter defense, solo pokes bounce cleanly — feeding ship efficiency directly to #2 instead of accumulating for a multi-planet hammer blow.</p>
-            </div>
-            <div class="p-3 rounded-lg bg-[var(--background)] border border-[var(--border)]">
-              <div class="font-semibold text-[var(--foreground)]">3. Training Distribution Shift</div>
-              <p class="mt-1">Even with Soft-KD, our uniform-epoch sampling puts equal weight on trivial early/late states while the game is actually decided in the razor-thin <code>t = 25–65</code> HOLD-vs-LAUNCH boundary.</p>
+              <div class="font-semibold text-[var(--foreground)]">3. Remaining Gap to #2 (1800.1)</div>
+              <p class="mt-1">Even at <code>val_kl = 0.247</code>, #2 sustains <code>78–84%</code> late-game airborne fleet tempo and <code>116</code> midgame enemy strikes vs. our <code>76</code> — the final ~20–50 Elo requires GPU-scale on-policy PPO rollouts.</p>
             </div>
           </div>
         </div>
@@ -165,137 +166,134 @@
     <section id="panel-combat" class="tab-panel space-y-4">
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4 space-y-3">
-          <h2 class="text-sm font-bold">What Is Actually Causing the Ship Bleed (Totals Across 6 Seeds)</h2>
+          <h2 class="text-sm font-bold">Combat &amp; Tempo Before/After (Totals Across 6 Boss Seeds)</h2>
           <table class="w-full text-xs border-collapse font-mono">
             <thead>
               <tr class="border-b border-[var(--border)] text-[var(--muted-foreground)] font-sans">
                 <th class="text-left py-2">Metric</th>
                 <th class="text-right py-2">PT-Gen8</th>
+                <th class="text-right py-2">PT-Gen9 Hold</th>
+                <th class="text-right py-2">PT-Gen9 Ens-2x</th>
                 <th class="text-right py-2">#2 Hober</th>
-                <th class="text-right py-2">Ratio / Gap</th>
               </tr>
             </thead>
             <tbody>
               <tr class="border-b border-[var(--border)]">
-                <td class="py-2 font-sans font-semibold">Neutral Overkill Ships</td>
-                <td class="text-right text-[var(--error)] font-bold">1,521</td>
-                <td class="text-right text-[var(--success)]">485</td>
-                <td class="text-right text-[var(--error)]">3.14&times; more waste</td>
+                <td class="py-2 font-sans font-semibold">Pure Survival (Avg / Max)</td>
+                <td class="text-right">111.3t / 127t</td>
+                <td class="text-right">110.7t / 124t</td>
+                <td class="text-right text-[var(--success)] font-bold">115.2t / 140t</td>
+                <td class="text-right text-[var(--muted-foreground)]">Winner</td>
               </tr>
               <tr class="border-b border-[var(--border)]">
-                <td class="py-2 font-sans font-semibold">Bounced / Failed Attacks</td>
-                <td class="text-right text-[var(--error)] font-bold">235 (3,074 sh)</td>
-                <td class="text-right">152 (2,573 sh)</td>
-                <td class="text-right text-[var(--error)]">+55% bounces</td>
+                <td class="py-2 font-sans font-semibold">Bounced Attacks (Ships)</td>
+                <td class="text-right text-[var(--error)]">235 (3,074)</td>
+                <td class="text-right text-[var(--success)] font-bold">163 (2,146)</td>
+                <td class="text-right text-[var(--success)]">211 (2,785)</td>
+                <td class="text-right">177 (3,100)</td>
               </tr>
               <tr class="border-b border-[var(--border)]">
-                <td class="py-2 font-sans font-semibold">Enemy Planets Captured</td>
-                <td class="text-right">61</td>
-                <td class="text-right text-[var(--success)] font-bold">124</td>
-                <td class="text-right text-[var(--warning)]">0.49&times;</td>
+                <td class="py-2 font-sans font-semibold">Premature Reinforces (Mid)</td>
+                <td class="text-right text-[var(--error)]">94</td>
+                <td class="text-right text-[var(--success)] font-bold">62 (-34%)</td>
+                <td class="text-right text-[var(--success)]">74 (-21%)</td>
+                <td class="text-right text-[var(--muted-foreground)]">Oracle</td>
               </tr>
               <tr class="border-b border-[var(--border)]">
-                <td class="py-2 font-sans font-semibold">Midgame Enemy Attacks (t=26–65)</td>
+                <td class="py-2 font-sans font-semibold">Impulsive Enemy Bounces</td>
+                <td class="text-right text-[var(--error)]">29</td>
+                <td class="text-right text-[var(--success)] font-bold">11 (-62%)</td>
+                <td class="text-right text-[var(--success)]">13 (-55%)</td>
+                <td class="text-right text-[var(--muted-foreground)]">Oracle</td>
+              </tr>
+              <tr class="border-b border-[var(--border)]">
+                <td class="py-2 font-sans font-semibold">Midgame Enemy Strikes</td>
                 <td class="text-right">70</td>
-                <td class="text-right text-[var(--success)] font-bold">135</td>
-                <td class="text-right text-[var(--warning)]">1.93&times; pressure</td>
+                <td class="text-right text-[var(--warning)]">46</td>
+                <td class="text-right text-[var(--success)] font-bold">76 (+9%)</td>
+                <td class="text-right">116</td>
               </tr>
               <tr class="border-b border-[var(--border)]">
-                <td class="py-2 font-sans font-semibold">Comet Captures (t=50+)</td>
-                <td class="text-right text-[var(--error)] font-bold">0</td>
-                <td class="text-right text-[var(--success)] font-bold">5</td>
-                <td class="text-right text-[var(--error)]">-5 comets</td>
+                <td class="py-2 font-sans font-semibold">Neutral Overkill Ships</td>
+                <td class="text-right">1,521</td>
+                <td class="text-right text-[var(--success)] font-bold">1,167 (-23%)</td>
+                <td class="text-right">1,890</td>
+                <td class="text-right">968</td>
+              </tr>
+              <tr class="border-b border-[var(--border)]">
+                <td class="py-2 font-sans font-semibold">Comet Captures (Ours v #2)</td>
+                <td class="text-right text-[var(--error)]">0 v 5</td>
+                <td class="text-right text-[var(--success)] font-bold">1 v 0</td>
+                <td class="text-right">0 v 3</td>
+                <td class="text-right">3–5</td>
               </tr>
               <tr>
-                <td class="py-2 font-sans font-semibold">Fleets / Active Turn (Tempo)</td>
-                <td class="text-right">3.12</td>
-                <td class="text-right text-[var(--primary)] font-bold">9.46</td>
-                <td class="text-right">3.03&times; late APM</td>
+                <td class="py-2 font-sans font-semibold">Sync Multi-Fleet Arrivals</td>
+                <td class="text-right">65</td>
+                <td class="text-right">51</td>
+                <td class="text-right text-[var(--primary)] font-bold">74 (87% of #2)</td>
+                <td class="text-right">85</td>
               </tr>
             </tbody>
           </table>
         </div>
 
         <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4 space-y-3">
-          <h2 class="text-sm font-bold">Hypothesis Ruled Out: Small-Planet Colonization Bias</h2>
+          <h2 class="text-sm font-bold">Key Orbit Wars Physics Lesson Discovered in Gen 9</h2>
           <p class="text-xs text-[var(--muted-foreground)]">
-            We explicitly checked whether <code>PT-Gen8</code> wastes early ships chasing low-production neutral planets faster than #2. The data cleanly rules this out:
+            Why did hard-coded neutral capping lose <code>2–4</code> against <code>PT-Gen8</code> while <code>#2 Hober Malloc</code> sends <code>100%</code> All-In yet has lower overkill?
           </p>
-          <table class="w-full text-xs border-collapse font-mono mt-2">
-            <thead>
-              <tr class="border-b border-[var(--border)] text-[var(--muted-foreground)] font-sans">
-                <th class="text-left py-2">Neutral Expansion Metric</th>
-                <th class="text-right py-2">PT-Gen8</th>
-                <th class="text-right py-2">#2 Hober</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr class="border-b border-[var(--border)]">
-                <td class="py-2 font-sans">Avg Neutrals Captured / Game</td>
-                <td class="text-right">9.67</td>
-                <td class="text-right">10.00</td>
-              </tr>
-              <tr class="border-b border-[var(--border)]">
-                <td class="py-2 font-sans">Avg Neutral Production</td>
-                <td class="text-right text-[var(--success)] font-bold">3.28</td>
-                <td class="text-right">3.10</td>
-              </tr>
-              <tr class="border-b border-[var(--border)]">
-                <td class="py-2 font-sans">Low Prod (&le;2) Captures (6g total)</td>
-                <td class="text-right">18</td>
-                <td class="text-right">21</td>
-              </tr>
-              <tr class="border-b border-[var(--border)]">
-                <td class="py-2 font-sans">Mid Prod (=3) Captures (6g total)</td>
-                <td class="text-right">11</td>
-                <td class="text-right">11</td>
-              </tr>
-              <tr>
-                <td class="py-2 font-sans">High Prod (&ge;4) Captures (6g total)</td>
-                <td class="text-right text-[var(--success)] font-bold">29</td>
-                <td class="text-right">28</td>
-              </tr>
-            </tbody>
-          </table>
-          <p class="text-xs text-[var(--muted-foreground)] pt-2">
-            <strong>Verdict:</strong> Target selection on neutrals is already Grandmaster-caliber. The gap is <em>how</em> we execute (overkill + premature shuffles + bounced solo attacks + missed comets).
-          </p>
+          <div class="p-3 rounded-lg bg-[var(--background)] border border-[var(--warning)] text-xs space-y-1.5">
+            <div class="font-semibold text-[var(--foreground)]">Fleet Speed Scales Nonlinearly With Ship Count</div>
+            <p class="text-[var(--muted-foreground)]">
+              In Orbit Wars, <code>speed = 1 + 5 &middot; (ln(ships) / ln(1000))<sup>1.5</sup></code>. Capping a 50-ship planet down to 12 ships slows the fleet dramatically, losing race-to-neutral timing and delaying planet production ticks.
+            </p>
+            <p class="text-[var(--muted-foreground)]">
+              <strong>True Mechanism:</strong> <code>#2 Hober Malloc</code> achieves low neutral overkill by <em>launching earlier</em> when a planet naturally holds just enough ships — which is why neural timing (Soft-KD) beat decoder caps cleanly.
+            </p>
+          </div>
+          <div class="p-3 rounded-lg bg-[var(--background)] border border-[var(--border)] text-xs space-y-1">
+            <div class="font-semibold text-[var(--foreground)]">Small-Planet Bias Remains Ruled Out</div>
+            <p class="text-[var(--muted-foreground)]">
+              Both <code>PT-Gen8</code> (<code>3.28</code>) and <code>PT-Gen9</code> (<code>3.29</code>) target slightly <em>higher</em> average neutral production than <code>#2 Hober Malloc</code> (<code>3.19</code>), with 27 high-prod (&ge;4) neutral captures across 6 seeds.
+            </p>
+          </div>
         </div>
       </div>
     </section>
 
-    <!-- TAB 4: GEN 9 ACTION PLAN -->
+    <!-- TAB 4: GEN 9 ABLATION VERDICTS -->
     <section id="panel-gen9" class="tab-panel space-y-4">
       <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4 space-y-3">
         <div>
-          <h2 class="text-sm font-bold">Gen 9 (PT-Gen9) Engineering Roadmap — Closing the Midgame Gap</h2>
-          <p class="text-xs text-[var(--muted-foreground)]">Five targeted interventions mapped 1-to-1 to the five forensic root causes above.</p>
+          <h2 class="text-sm font-bold">Gen 9 (PT-Gen9) Five-Fix Ablation Verdicts — What Worked &amp; What Failed</h2>
+          <p class="text-xs text-[var(--muted-foreground)]">All 5 hypothesized interventions were coded, unit-tested, and ablated cleanly against <code>PT-Gen8</code>.</p>
         </div>
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
-          <div class="p-3.5 rounded-lg bg-[var(--background)] border border-[var(--primary)] space-y-1">
-            <div class="font-mono text-[var(--primary)] font-bold">FIX 1 • HIGHEST ROI</div>
-            <div class="font-bold text-sm">Midgame Hold-Calibration</div>
-            <p class="text-[var(--muted-foreground)]">Upweight <code>t = 25..75</code> Soft-KD loss by <code>2.5&times;</code> and ablate action-specific launch thresholds (higher bar for <code>REINFORCE</code> shuffling vs. <code>ENEMY</code> strikes) to cut the 94 premature reinforce errors.</p>
+          <div class="p-3.5 rounded-lg bg-[var(--background)] border border-[var(--success)] space-y-1">
+            <div class="font-mono text-[var(--success)] font-bold">FIX 1 • KEPT &amp; SHIPPED</div>
+            <div class="font-bold text-sm">Midgame-Weighted Soft-KD + Ens-2x</div>
+            <p class="text-[var(--muted-foreground)]"><code>+961</code> dense <code>t=22..78</code> boards (<code>3,383</code> total) + <code>2.5&times;</code> midgame weight cut <code>val_kl</code> <strong>-33%</strong> (<code>0.369 &rarr; 0.247</code>). Blending Balanced + Hold-Boost beat Gen 8 <strong>5–3 (62.5%, 63t KO)</strong>. Peaceful Hold-Cal (<code>0.60</code>) also won <strong>4–2</strong> on Gen 8.</p>
           </div>
-          <div class="p-3.5 rounded-lg bg-[var(--background)] border border-[var(--primary)] space-y-1">
-            <div class="font-mono text-[var(--primary)] font-bold">FIX 2 • ZERO TRAINING COST</div>
-            <div class="font-bold text-sm">Surgical Neutral Send Cap</div>
-            <p class="text-[var(--muted-foreground)]">Keep All-In for enemy assaults, but cap neutral expansion sends at <code>ships_needed_to_capture + margin</code> — directly reclaiming ~150+ wasted overkill ships per game by <code>t=50</code>.</p>
+          <div class="p-3.5 rounded-lg bg-[var(--background)] border border-[var(--error)] space-y-1">
+            <div class="font-mono text-[var(--error)] font-bold">FIX 2 • REJECTED (2–4)</div>
+            <div class="font-bold text-sm">Decoder Surgical Neutral Cap</div>
+            <p class="text-[var(--muted-foreground)]">Lost <code>2–4</code> vs. Gen 8 because smaller partial fleets travel slower in Orbit Wars physics. Low overkill must come from earlier launch timing in neural weights.</p>
           </div>
-          <div class="p-3.5 rounded-lg bg-[var(--background)] border border-[var(--border)] space-y-1">
-            <div class="font-mono text-[var(--warning)] font-bold">FIX 3 • DECODER GUARD</div>
-            <div class="font-bold text-sm">Anti-Bounce Accumulation Filter</div>
-            <p class="text-[var(--muted-foreground)]">Hold solo attacks mathematically guaranteed to bounce off an enemy garrison unless another friendly fleet is already arriving within &plusmn;3 ticks.</p>
+          <div class="p-3.5 rounded-lg bg-[var(--background)] border border-[var(--error)] space-y-1">
+            <div class="font-mono text-[var(--error)] font-bold">FIX 3 • REJECTED (1–5)</div>
+            <div class="font-bold text-sm">Decoder Anti-Bounce Guard</div>
+            <p class="text-[var(--muted-foreground)]">Lost <code>1–5</code> vs. Gen 8 because hard-blocking solo pokes suppresses attrition/softening waves. Neural Soft-KD cut impulsive bounces by <strong>-55% to -62%</strong> organically.</p>
           </div>
-          <div class="p-3.5 rounded-lg bg-[var(--background)] border border-[var(--border)] space-y-1">
-            <div class="font-mono text-[var(--warning)] font-bold">FIX 4 • DATA SAMPLING</div>
-            <div class="font-bold text-sm">Comet-Window Oversampling</div>
-            <p class="text-[var(--muted-foreground)]">Oversample <code>t &ge; 48</code> comet-spawn windows in Soft-KD DAgger collection so <code>PT-Gen9</code> actively intercepts comets (<code>0 &rarr; 3+</code> captures / 6g).</p>
+          <div class="p-3.5 rounded-lg bg-[var(--background)] border border-[var(--success)] space-y-1">
+            <div class="font-mono text-[var(--success)] font-bold">FIX 4 • KEPT &amp; SHIPPED</div>
+            <div class="font-bold text-sm">Comet-Window Oversampling (2.0&times;)</div>
+            <p class="text-[var(--muted-foreground)]">Dense sampling during active comet windows flipped comets from <code>0 v 5 &rarr; 1 v 0</code> (Hold-Boost) and cut #2's free comets from <code>5 &rarr; 3</code> (Ens-2x).</p>
           </div>
-          <div class="p-3.5 rounded-lg bg-[var(--background)] border border-[var(--border)] space-y-1">
-            <div class="font-mono text-[var(--success)] font-bold">FIX 5 • POST-KD RL</div>
-            <div class="font-bold text-sm">KL-Anchored Midgame PPO</div>
-            <p class="text-[var(--muted-foreground)]">Fine-tune with PPO anchored to <code>q_hober</code> against <code>PT-Gen8</code>, <code>Gen 7</code>, and <code>#2 Hober</code> to raise midgame offensive pressure from <code>70 &rarr; 120+</code> strikes without reverting to passive play.</p>
+          <div class="p-3.5 rounded-lg bg-[var(--background)] border border-[var(--warning)] space-y-1">
+            <div class="font-mono text-[var(--warning)] font-bold">FIX 5 • GPU-GATED (1–7 CPU)</div>
+            <div class="font-bold text-sm">Post-KD 2P Midgame PPO</div>
+            <p class="text-[var(--muted-foreground)]">Built <code>--force-all-in --two-player-only --midgame-adv-weight 1.8</code>. Iter 1 hit <code>75%</code> (<code>6–2</code>) on 8 eval seeds (<code>kl=0.05</code>) but overfit (<code>1–7</code> unseen). Ready for GPU-scale rollouts (10M+ states).</p>
           </div>
         </div>
       </div>
@@ -304,20 +302,41 @@
 
   <script>
     const ECON = [
-      { t: 0,  oPl: 1.0, hPl: 1.0,  oProd: 3.0,  hProd: 3.0,  oShips: 10.0,  hShips: 10.0,   oInf: 0.0,  hInf: 0.0,  note: "Symmetric start" },
-      { t: 10, oPl: 1.5, hPl: 1.7,  oProd: 4.3,  hProd: 5.2,  oShips: 37.7,  hShips: 37.2,   oInf: 56.9, hInf: 57.4, note: "Dead even (+0.5 ships)" },
-      { t: 20, oPl: 3.0, hPl: 3.5,  oProd: 10.5, hProd: 12.7, oShips: 87.0,  hShips: 88.3,   oInf: 58.4, hInf: 50.4, note: "79.7% exact policy match" },
-      { t: 30, oPl: 4.8, hPl: 6.3,  oProd: 17.3, hProd: 21.3, oShips: 190.5, hShips: 202.2,  oInf: 44.4, hInf: 42.6, note: "Early midgame drift begins" },
-      { t: 40, oPl: 7.0, hPl: 8.7,  oProd: 24.5, hProd: 29.0, oShips: 313.8, hShips: 367.2,  oInf: 53.4, hInf: 59.0, note: "Overkill & bounces widen ship gap" },
-      { t: 50, oPl: 8.7, hPl: 9.7,  oProd: 29.7, hProd: 32.5, oShips: 414.0, hShips: 545.8,  oInf: 59.3, hInf: 62.6, note: "TIPPING POINT: prod close, -132 ships!" },
-      { t: 60, oPl: 8.2, hPl: 12.3, oProd: 27.2, hProd: 39.7, oShips: 373.7, hShips: 582.0,  oInf: 68.2, hInf: 68.6, note: "Frontline breaks (-4.1 planets)" },
-      { t: 75, oPl: 5.7, hPl: 15.2, oProd: 18.2, hProd: 49.3, oShips: 389.7, hShips: 865.7,  oInf: 59.8, hInf: 78.5, note: "Snowball blowout (-476 ships)" },
-      { t: 90, oPl: 2.7, hPl: 17.5, oProd: 6.8,  hProd: 60.0, oShips: 294.8, hShips: 1398.8, oInf: 43.8, hInf: 80.6, note: "Endgame cleanup" }
+      { t: 0,  g8Diff: 0.0,    g9Diff: 0.0,    o8Ships: 10.0,  o9Ships: 10.0,  hShips: 10.0,   o8Prod: 3.0,  o9Prod: 3.0,  hProd: 3.0,  o8Inf: 0.0,  o9Inf: 0.0,  hInf: 0.0,  note: "Symmetric start" },
+      { t: 10, g8Diff: +0.5,   g9Diff: +1.7,   o8Ships: 37.7,  o9Ships: 38.8,  hShips: 37.2,   o8Prod: 4.3,  o9Prod: 4.2,  hProd: 5.2,  o8Inf: 56.9, o9Inf: 52.2, hInf: 57.4, note: "Gen 9 opens +1.7 ship lead" },
+      { t: 20, g8Diff: -1.3,   g9Diff: +1.8,   o8Ships: 87.0,  o9Ships: 90.2,  hShips: 88.3,   o8Prod: 10.5, o9Prod: 11.2, hProd: 12.7, o8Inf: 58.4, o9Inf: 46.8, hInf: 44.6, note: "Flipped negative → +1.8 lead!" },
+      { t: 30, g8Diff: -11.7,  g9Diff: -16.8,  o8Ships: 190.5, o9Ships: 185.3, hShips: 202.2,  o8Prod: 17.3, o9Prod: 18.3, hProd: 21.3, o8Inf: 44.4, o9Inf: 61.7, hInf: 35.4, note: "Gen 9 +1.0 prod/t over Gen 8" },
+      { t: 40, g8Diff: -53.3,  g9Diff: -54.5,  o8Ships: 313.8, o9Ships: 304.5, hShips: 359.0,  o8Prod: 24.5, o9Prod: 24.5, hProd: 29.2, o8Inf: 53.4, o9Inf: 25.8, hInf: 46.6, note: "Calmer midgame hold discipline" },
+      { t: 50, g8Diff: -131.8, g9Diff: -112.5, o8Ships: 414.0, o9Ships: 398.3, hShips: 510.8,  o8Prod: 29.7, o9Prod: 25.5, hProd: 33.5, o8Inf: 59.3, o9Inf: 41.9, hInf: 67.2, note: "TIPPING POINT: +19.3 ships better!" },
+      { t: 60, g8Diff: -208.3, g9Diff: -220.5, o8Ships: 373.7, o9Ships: 449.0, hShips: 669.5,  o8Prod: 27.2, o9Prod: 26.0, hProd: 37.7, o8Inf: 68.2, o9Inf: 50.4, hInf: 73.8, note: "Gen 9 holds +75 more ships on board" },
+      { t: 75, g8Diff: -476.0, g9Diff: -481.2, o8Ships: 389.7, o9Ships: 432.0, hShips: 913.2,  o8Prod: 18.2, o9Prod: 18.8, hProd: 45.5, o8Inf: 59.8, o9Inf: 39.7, hInf: 84.0, note: "Seed 201 fights to 140t pure!" },
+      { t: 90, g8Diff: -1104.0, g9Diff: -1016.2, o8Ships: 294.8, o9Ships: 335.0, hShips: 1351.2, o8Prod: 6.8,  o9Prod: 8.3,  hProd: 56.7, o8Inf: 43.8, o9Inf: 37.3, hInf: 80.9, note: "+88 ships narrower endgame gap" }
     ];
 
     const CF_DATA = {
-      mid: {
-        summary: "<strong>Midgame (t = 26–65):</strong> <code>416 / 627</code> exact matches (<strong>66.3%</strong>). Out of <strong>211</strong> errors, <strong>58.3%</strong> are impulsive all-in launches when #2 would HOLD.",
+      gen9_mid: {
+        summary: "<strong>PT-Gen9 Ens-2x Midgame (t = 26–65):</strong> <code>405 / 611</code> exact matches (<strong>66.3%</strong>). Premature reinforces dropped <code>94 &rarr; 74 (-21%)</code> and impulsive enemy pokes dropped <code>29 &rarr; 13 (-55%)</code> while lifting midgame attacks to <strong>76</strong>.",
+        rows: [
+          { label: "PT-Gen9 REINFORCE when #2 would HOLD (down from 94!)", count: 74, pct: 35.9, tone: "warning" },
+          { label: "PT-Gen9 HOLD when #2 would REINFORCE", count: 66, pct: 32.0, tone: "primary" },
+          { label: "PT-Gen9 HOLD when #2 would EXPAND Neutral", count: 14, pct: 6.8, tone: "primary" },
+          { label: "PT-Gen9 HOLD when #2 would ATTACK Enemy", count: 14, pct: 6.8, tone: "primary" },
+          { label: "PT-Gen9 ENEMY when #2 would HOLD (down from 29!)", count: 13, pct: 6.3, tone: "success" },
+          { label: "PT-Gen9 NEUTRAL when #2 would HOLD", count: 9, pct: 4.4, tone: "muted" }
+        ]
+      },
+      gen9_hold: {
+        summary: "<strong>PT-Gen9 Hold-Boost Midgame (t = 26–65):</strong> Maximum midgame discipline — premature reinforces cut <strong>-34%</strong> (<code>94 &rarr; 62</code>), impulsive enemy pokes cut <strong>-62%</strong> (<code>29 &rarr; 11</code>), and late-game exact match jumped <code>57.3% &rarr; 67.0%</code>.",
+        rows: [
+          { label: "PT-Gen9 Hold REINFORCE when #2 would HOLD (-34%)", count: 62, pct: 32.1, tone: "success" },
+          { label: "PT-Gen9 Hold HOLD when #2 would REINFORCE (calmer)", count: 71, pct: 36.8, tone: "primary" },
+          { label: "PT-Gen9 Hold HOLD when #2 would EXPAND Neutral", count: 18, pct: 9.3, tone: "primary" },
+          { label: "PT-Gen9 Hold HOLD when #2 would ATTACK Enemy", count: 16, pct: 8.3, tone: "warning" },
+          { label: "PT-Gen9 Hold ENEMY when #2 would HOLD (-62%!)", count: 11, pct: 5.7, tone: "success" }
+        ]
+      },
+      gen8_mid: {
+        summary: "<strong>PT-Gen8 Baseline Midgame (t = 26–65):</strong> <code>416 / 627</code> exact matches (<strong>66.3%</strong>). Out of <strong>211</strong> errors, <strong>58.3%</strong> were impulsive all-in launches (<code>94</code> reinforce + <code>29</code> enemy) when #2 would HOLD.",
         rows: [
           { label: "PT-Gen8 REINFORCE when #2 would HOLD (Premature Shuffle)", count: 94, pct: 44.5, tone: "error" },
           { label: "PT-Gen8 HOLD when #2 would REINFORCE (Mistimed Defense)", count: 41, pct: 19.4, tone: "warning" },
@@ -326,20 +345,10 @@
           { label: "PT-Gen8 HOLD when #2 would ATTACK Enemy", count: 10, pct: 4.7, tone: "primary" },
           { label: "PT-Gen8 NEUTRAL when #2 would HOLD", count: 10, pct: 4.7, tone: "muted" }
         ]
-      },
-      early: {
-        summary: "<strong>Early Game (t = 0–25):</strong> <code>98 / 123</code> exact matches (<strong>79.7%</strong>). Only <strong>25</strong> total disagreements across 6 games — evenly split with no systemic bias.",
-        rows: [
-          { label: "PT-Gen8 NEUTRAL when #2 would HOLD", count: 7, pct: 28.0, tone: "primary" },
-          { label: "PT-Gen8 HOLD when #2 would REINFORCE", count: 7, pct: 28.0, tone: "warning" },
-          { label: "PT-Gen8 HOLD when #2 would EXPAND Neutral", count: 6, pct: 24.0, tone: "primary" },
-          { label: "PT-Gen8 REINFORCE when #2 would HOLD", count: 2, pct: 8.0, tone: "muted" },
-          { label: "Different neutral target chosen", count: 2, pct: 8.0, tone: "muted" }
-        ]
       }
     };
 
-    let curMetric = "ships", curPhase = "mid";
+    let curMetric = "ships", curPhase = "gen9_mid";
     const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || "#888";
 
     function drawEcon() {
@@ -347,21 +356,20 @@
       if (!cv) return;
       const ctx = cv.getContext("2d"), W = cv.width, H = cv.height;
       const muted = cssVar("--muted-foreground"), bg = cssVar("--background"), border = cssVar("--border");
-      const pri = cssVar("--primary"), err = cssVar("--error"), warn = cssVar("--warning");
+      const pri = cssVar("--primary"), ok = cssVar("--success"), err = cssVar("--error"), warn = cssVar("--warning");
       ctx.clearRect(0, 0, W, H); ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
 
-      const padL = 58, padR = 24, padT = 30, padB = 38;
+      const padL = 58, padR = 24, padT = 32, padB = 38;
       const gw = W - padL - padR, gh = H - padT - padB;
       const cfg = curMetric === "ships"
-        ? { oKey: "oShips", hKey: "hShips", maxY: 1450, ticks: [0, 350, 700, 1050, 1400], unit: "" }
+        ? { g8Key: "o8Ships", g9Key: "o9Ships", hKey: "hShips", maxY: 1450, ticks: [0, 350, 700, 1050, 1400], unit: "" }
         : curMetric === "prod"
-          ? { oKey: "oProd", hKey: "hProd", maxY: 65, ticks: [0, 15, 30, 45, 60], unit: "/t" }
-          : { oKey: "oInf", hKey: "hInf", maxY: 100, ticks: [0, 25, 50, 75, 100], unit: "%" };
+          ? { g8Key: "o8Prod", g9Key: "o9Prod", hKey: "hProd", maxY: 65, ticks: [0, 15, 30, 45, 60], unit: "/t" }
+          : { g8Key: "o8Inf", g9Key: "o9Inf", hKey: "hInf", maxY: 100, ticks: [0, 25, 50, 75, 100], unit: "%" };
       const tx = t => padL + (t / 90) * gw;
       const ty = v => padT + gh - (v / cfg.maxY) * gh;
 
-      // Tipping window shading
-      ctx.fillStyle = warn; ctx.globalAlpha = 0.11;
+      ctx.fillStyle = warn; ctx.globalAlpha = 0.10;
       ctx.fillRect(tx(30), padT, tx(60) - tx(30), gh);
       ctx.globalAlpha = 1.0;
 
@@ -376,31 +384,37 @@
         ctx.fillText("t=" + pt.t, tx(pt.t), H - 12);
       });
 
-      const plot = (key, color) => {
-        ctx.strokeStyle = color; ctx.lineWidth = 2.8; ctx.beginPath();
+      const plot = (key, color, dashed) => {
+        ctx.save();
+        if (dashed) ctx.setLineDash([6, 4]);
+        ctx.strokeStyle = color; ctx.lineWidth = dashed ? 2.0 : 2.8; ctx.beginPath();
         ECON.forEach((pt, idx) => { const x = tx(pt.t), y = ty(pt[key]); idx === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); });
         ctx.stroke();
-        ECON.forEach(pt => { ctx.beginPath(); ctx.arc(tx(pt.t), ty(pt[key]), 4, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill(); });
+        ctx.restore();
+        ECON.forEach(pt => { ctx.beginPath(); ctx.arc(tx(pt.t), ty(pt[key]), dashed ? 3 : 4, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill(); });
       };
-      plot(cfg.hKey, err);
-      plot(cfg.oKey, pri);
+      plot(cfg.hKey, err, false);
+      plot(cfg.g8Key, pri, true);
+      plot(cfg.g9Key, ok, false);
 
       ctx.font = "bold 12px sans-serif"; ctx.textAlign = "left";
-      ctx.fillStyle = err; ctx.fillText("● #2 Hober Malloc (1800.1)", padL + 10, padT + 16);
-      ctx.fillStyle = pri; ctx.fillText("● PT-Gen8 (~1,740)", padL + 215, padT + 16);
+      ctx.fillStyle = err; ctx.fillText("● #2 Hober Malloc (1800.1)", padL + 10, padT + 14);
+      ctx.fillStyle = ok; ctx.fillText("● PT-Gen9 Ens-2x (~1,770)", padL + 210, padT + 14);
+      ctx.fillStyle = pri; ctx.fillText("--- PT-Gen8 (~1,740)", padL + 405, padT + 14);
       ctx.fillStyle = warn; ctx.fillText("Midgame Tipping Window (t=30–60)", tx(31), padT + 34);
     }
 
     function renderEconTable() {
       document.getElementById("econ-tbody").innerHTML = ECON.map(r => {
-        const dp = (r.oProd - r.hProd).toFixed(1), ds = (r.oShips - r.hShips).toFixed(1);
-        const hi = r.t === 50 ? "bg-[var(--background)] font-bold" : "";
+        const hi = r.t === 50 || r.t === 20 ? "bg-[var(--background)] font-bold" : "";
+        const fmt = v => (v >= 0 ? "+" : "") + v.toFixed(1);
+        const better = r.g9Diff > r.g8Diff;
         return `<tr class="border-b border-[var(--border)] ${hi}">
           <td class="py-1.5">t=${r.t}</td>
-          <td class="text-right">${r.oPl.toFixed(1)} vs ${r.hPl.toFixed(1)}</td>
-          <td class="text-right">${r.oProd.toFixed(1)} vs ${r.hProd.toFixed(1)} (<span class="${r.oProd >= r.hProd ? 'text-[var(--success)]' : 'text-[var(--error)]'}">${dp >= 0 ? '+' : ''}${dp}</span>)</td>
-          <td class="text-right">${r.oShips.toFixed(1)} vs ${r.hShips.toFixed(1)} (<span class="${r.oShips >= r.hShips ? 'text-[var(--success)]' : 'text-[var(--error)]'}">${ds >= 0 ? '+' : ''}${ds}</span>)</td>
-          <td class="text-right">${r.oInf.toFixed(1)}% vs ${r.hInf.toFixed(1)}%</td>
+          <td class="text-right text-[var(--muted-foreground)]">${fmt(r.g8Diff)}</td>
+          <td class="text-right ${better ? 'text-[var(--success)] font-bold' : 'text-[var(--warning)]'}">${fmt(r.g9Diff)}</td>
+          <td class="text-right">${r.o9Ships.toFixed(1)} vs ${r.hShips.toFixed(1)}</td>
+          <td class="text-right">${r.o9Inf.toFixed(1)}% vs ${r.hInf.toFixed(1)}%</td>
           <td class="pl-4 font-sans text-[var(--muted-foreground)]">${r.note}</td>
         </tr>`;
       }).join("");
@@ -408,7 +422,7 @@
 
     function renderCF() {
       const d = CF_DATA[curPhase];
-      const toneMap = { error: "var(--error)", warning: "var(--warning)", primary: "var(--primary)", muted: "var(--muted-foreground)" };
+      const toneMap = { error: "var(--error)", warning: "var(--warning)", primary: "var(--primary)", success: "var(--success)", muted: "var(--muted-foreground)" };
       document.getElementById("cf-summary").innerHTML = d.summary;
       document.getElementById("cf-bars").innerHTML = d.rows.map(r => `
         <div class="space-y-1">

@@ -286,8 +286,12 @@ def _collect_soft_kd_worker(task: Tuple[int, bool, Optional[str], int, int, int]
         val_target = 1.0 if r_self > r_opp else (-1.0 if r_self < r_opp else 0.0)
         stride = 1 if (is_dagger and val_target < 0) else sample_stride
 
-        for t in range(0, n_ticks, stride):
+        for t in range(0, n_ticks):
             obs_t = steps[t][slot]["observation"]
+            has_comets = bool(obs_t.get("comets"))
+            in_midgame = 22 <= t <= 78
+            if not (in_midgame or has_comets or (t % stride == 0)):
+                continue
             obs_t_copy = dict(obs_t)
             obs_t_copy["player"] = slot
             enc = extract_planet_features(obs_t_copy, player=slot)
@@ -405,8 +409,18 @@ def compute_soft_kd_loss(
     aux_weight: float = 0.20,
     value_weight: float = 0.25,
     launch_boost: float = 1.25,
+    midgame_weight: float = 1.0,
+    comet_weight: float = 1.0,
+    hold_boost: float = 1.0,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """Compute Soft-KL policy distillation + Auxiliary t+10 world-model + Value loss."""
+    """Compute Soft-KL policy distillation + Auxiliary t+10 world-model + Value loss.
+
+    Gen 9 extensions (default 1.0 for backward compatibility):
+      - ``midgame_weight``: multiplies per-board KL weight during ``t in [25, 75]``.
+      - ``comet_weight``: multiplies per-board KL weight whenever comets are active.
+      - ``hold_boost``: boosts KL weight on midgame decisions where teacher prefers HOLD
+        (``q_hold >= 0.65``), curbing impulsive all-in garrison shuffles.
+    """
     out = model(pf, tf, ef, pm, return_aux=True)
     if len(out) == 4:
         logits, fracs, val, aux_pred = out
@@ -422,14 +436,31 @@ def compute_soft_kd_loss(
 
     valid_dec = om & le.any(dim=-1)
     if valid_dec.any():
+        # Per-board phase & comet emphasis derived losslessly from planet_feats
+        # col 16 = step / 500.0, col 6 = is_comet
+        steps = pf[:, 0, 16] * 500.0  # (B,)
+        is_mid = (steps >= 24.5) & (steps <= 75.5)
+        has_comet = ((pf[:, :, 6] > 0.5) & pm).any(dim=-1)
+        board_w = torch.ones((B,), dtype=torch.float32, device=logits.device)
+        if midgame_weight != 1.0:
+            board_w = torch.where(is_mid, board_w * float(midgame_weight), board_w)
+        if comet_weight != 1.0:
+            board_w = torch.where(has_comet, board_w * float(comet_weight), board_w)
+        node_board_w = board_w.unsqueeze(1).expand(B, N)[valid_dec]
+        node_is_mid = is_mid.unsqueeze(1).expand(B, N)[valid_dec]
+
         flat_log_p = log_p[valid_dec]  # (M, N+1)
         flat_q = soft_probs[valid_dec].float()  # (M, N+1)
         flat_q = flat_q / flat_q.sum(dim=-1, keepdim=True).clamp_min(1e-6)
         # Exact KL(q || p) = sum q * (log q - log p)
         kl_per = (flat_q * (torch.log(flat_q.clamp_min(1e-6)) - flat_log_p)).sum(dim=-1)
-        # Mild boost on decisions where teacher has higher launch probability
-        q_launch = 1.0 - flat_q[:, 0]
-        w = 1.0 + (launch_boost - 1.0) * q_launch
+        # Per-decision weighting: launch boost, midgame hold calibration, phase & comet weights
+        q_hold = flat_q[:, 0]
+        q_launch = 1.0 - q_hold
+        w = (1.0 + (launch_boost - 1.0) * q_launch) * node_board_w
+        if hold_boost != 1.0:
+            mid_hold = node_is_mid & (q_hold >= 0.65)
+            w = torch.where(mid_hold, w * float(hold_boost), w)
         kd_loss = (kl_per * w).sum() / w.sum().clamp_min(1.0)
 
         pred_cls = flat_log_p.argmax(dim=-1)
@@ -495,6 +526,9 @@ def train_soft_kd(
     lr: float = 3.5e-4,
     aux_weight: float = 0.20,
     launch_boost: float = 1.25,
+    midgame_weight: float = 1.0,
+    comet_weight: float = 1.0,
+    hold_boost: float = 1.0,
     seed: int = 42,
 ) -> Path:
     torch.manual_seed(seed)
@@ -533,7 +567,8 @@ def train_soft_kd(
     print(
         f"[SoftKD Train] Resumed {resume_from} -> {n_params/1e3:.1f}K params "
         f"(new aux keys={len(missing)}, unexpected={len(unexpected)}) | "
-        f"train={len(tr_idx)} val={len(val_idx)} | epochs={epochs} batch={batch_size} lr={lr}",
+        f"train={len(tr_idx)} val={len(val_idx)} | epochs={epochs} batch={batch_size} lr={lr} | "
+        f"mid_w={midgame_weight} comet_w={comet_weight} hold_b={hold_boost} launch_b={launch_boost}",
         flush=True,
     )
 
@@ -552,7 +587,11 @@ def train_soft_kd(
             opt.zero_grad(set_to_none=True)
             loss, m = compute_soft_kd_loss(
                 model, pf_a, tf, ef, le, om, pm, sp, vt, ao, ash, av,
-                aux_weight=aux_weight, launch_boost=launch_boost,
+                aux_weight=aux_weight,
+                launch_boost=launch_boost,
+                midgame_weight=midgame_weight,
+                comet_weight=comet_weight,
+                hold_boost=hold_boost,
             )
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -566,7 +605,11 @@ def train_soft_kd(
             for pf, tf, ef, le, om, pm, sp, vt, ao, ash, av in val_loader:
                 _, m = compute_soft_kd_loss(
                     model, pf, tf, ef, le, om, pm, sp, vt, ao, ash, av,
-                    aux_weight=aux_weight, launch_boost=launch_boost,
+                    aux_weight=aux_weight,
+                    launch_boost=launch_boost,
+                    midgame_weight=midgame_weight,
+                    comet_weight=comet_weight,
+                    hold_boost=hold_boost,
                 )
                 val_m.append(m)
 
@@ -602,23 +645,26 @@ def train_soft_kd(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Gen 8 Soft-Logit KD + Aux Future World Model + 2P Specialist.")
+    parser = argparse.ArgumentParser(description="Gen 8/9 Soft-Logit KD + Aux Future World Model + Midgame Calibration.")
     parser.add_argument("--dataset-cache", required=True, help="Path to .npz soft-KD dataset cache.")
     parser.add_argument("--hober-games", type=int, default=16)
     parser.add_argument("--dagger-games", type=int, default=20)
-    parser.add_argument("--student-checkpoint", default="checkpoints/planet_transformer_v5_boss.pt")
+    parser.add_argument("--student-checkpoint", default="checkpoints/planet_transformer_gen8_2p_softkd.pt")
     parser.add_argument("--sample-stride", type=int, default=3)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--append", action="store_true", help="Collect new games and append onto existing dataset-cache.")
     parser.add_argument("--collect-only", action="store_true")
-    parser.add_argument("--resume", default="checkpoints/planet_transformer_v5_boss.pt")
-    parser.add_argument("--epochs", type=int, default=6)
+    parser.add_argument("--resume", default="checkpoints/planet_transformer_gen8_2p_softkd.pt")
+    parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=3.5e-4)
+    parser.add_argument("--lr", type=float, default=2.5e-4)
     parser.add_argument("--aux-weight", type=float, default=0.20)
-    parser.add_argument("--launch-boost", type=float, default=1.25)
-    parser.add_argument("--seed", type=int, default=12000)
-    parser.add_argument("--out", default="checkpoints/planet_transformer_gen8_2p_softkd.pt")
+    parser.add_argument("--launch-boost", type=float, default=1.0)
+    parser.add_argument("--midgame-weight", type=float, default=2.5)
+    parser.add_argument("--comet-weight", type=float, default=2.0)
+    parser.add_argument("--hold-boost", type=float, default=1.25)
+    parser.add_argument("--seed", type=int, default=15000)
+    parser.add_argument("--out", default="checkpoints/planet_transformer_gen9_softkd.pt")
     args = parser.parse_args(argv)
 
     cache = Path(args.dataset_cache)
@@ -660,6 +706,9 @@ def main(argv: list[str] | None = None) -> int:
         lr=args.lr,
         aux_weight=args.aux_weight,
         launch_boost=args.launch_boost,
+        midgame_weight=args.midgame_weight,
+        comet_weight=args.comet_weight,
+        hold_boost=args.hold_boost,
         seed=args.seed,
     )
     return 0
