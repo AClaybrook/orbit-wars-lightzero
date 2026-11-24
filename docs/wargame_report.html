@@ -3,241 +3,303 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Orbit Wars — 3v1 Coalition Wargaming &amp; Power-Dynamics Explorer</title>
+  <title>Orbit Wars — 3v1 Coalition Wargaming Explorer</title>
   <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
   <style>
     .tab-panel { display: none; }
     .tab-panel.active { display: block; }
     canvas { touch-action: none; }
+    /* Crisp hover/focus '?' info bubble */
+    .tip { position: relative; display: inline-flex; align-items: center; }
+    .tip-btn {
+      width: 16px; height: 16px; border-radius: 999px; font-size: 10px; font-weight: 700;
+      display: inline-flex; align-items: center; justify-content: center; cursor: help;
+      border: 1px solid var(--border); background: var(--background); color: var(--muted-foreground);
+      margin-left: 5px; line-height: 1; flex-shrink: 0;
+    }
+    .tip-btn:hover, .tip-btn:focus { border-color: var(--primary); color: var(--primary); outline: none; }
+    .tip-box {
+      display: none; position: absolute; z-index: 40; left: 50%; bottom: calc(100% + 8px);
+      transform: translateX(-50%); width: 250px; padding: 9px 11px; border-radius: 8px;
+      background: var(--card); border: 1px solid var(--primary); color: var(--foreground);
+      font-size: 11.5px; font-weight: 400; line-height: 1.4; text-align: left;
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35); pointer-events: none;
+    }
+    .tip:hover .tip-box, .tip:focus-within .tip-box { display: block; }
+    .tip-left .tip-box { left: auto; right: 0; transform: none; }
+    .tip-right .tip-box { left: 0; transform: none; }
   </style>
 </head>
 <body class="bg-[var(--background)] text-[var(--foreground)] antialiased m-0 p-0">
   <div class="max-w-6xl mx-auto px-5 py-6 space-y-5">
     <!-- Header -->
-    <header class="flex flex-wrap items-start justify-between gap-4 pb-4 border-b border-[var(--border)]">
+    <header class="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-[var(--border)]">
       <div>
-        <div class="font-mono text-xs text-[var(--muted-foreground)]">
-          AClaybrook/orbit-wars-lightzero • 3v1 Coalition Wargaming Study • 200 Sweep Matches (Weighted MAE 6.2%)
+        <div class="font-mono text-xs text-[var(--muted-foreground)] flex items-center flex-wrap gap-1.5">
+          <span>Orbit Wars • 3v1 Wargaming Study</span>
+          <span>•</span>
+          <span>200 Matches</span>
+          <span>•</span>
+          <span class="tip">
+            <span>Model Fit: &plusmn;6.2%</span>
+            <button type="button" class="tip-btn" aria-label="About model fit">?</button>
+            <span class="tip-box">
+              <strong>Weighted Mean Absolute Error (6.2%):</strong> On average, the smooth 3D surface predicts each tested grid cell's empirical coalition win rate within &plusmn;6.2 percentage points.
+            </span>
+          </span>
         </div>
         <h1 class="text-2xl font-bold tracking-tight mt-1">
-          3v1 Coalition Wargaming — Intelligence, Coordination &amp; Resources
+          3v1 Coalition Wargaming Explorer
         </h1>
-        <p class="text-xs text-[var(--muted-foreground)] mt-1">
-          When can three independent actors team up to defeat a stronger Boss? Explore the fitted 3D tradeoff surface, empirical phase maps, and Kaggle gauntlets.
-        </p>
       </div>
       <div class="flex flex-wrap gap-2 text-xs font-semibold">
-        <a href="gameplay_viewer.html" class="px-3 py-1 rounded-full bg-[var(--card)] border border-[var(--border)] text-[var(--primary)] no-underline">
+        <a href="gameplay_viewer.html" class="px-3 py-1.5 rounded-full bg-[var(--card)] border border-[var(--border)] text-[var(--primary)] no-underline">
           ▶ Watch 3v1 Replays
         </a>
-        <a href="status_report.html" class="px-3 py-1 rounded-full bg-[var(--card)] border border-[var(--border)] text-[var(--muted-foreground)] no-underline">
+        <a href="status_report.html" class="px-3 py-1.5 rounded-full bg-[var(--card)] border border-[var(--border)] text-[var(--muted-foreground)] no-underline">
           Model Progression
         </a>
       </div>
     </header>
 
-    <!-- Headline KPIs (Clear, Reference-Anchored, Non-Overlapping) -->
+    <!-- Scannable KPI Strip with '?' Info Bubbles -->
     <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-      <div class="rounded-xl bg-[var(--card)] border border-[var(--primary)] p-4">
-        <div class="font-mono text-xs text-[var(--muted-foreground)]">Full Coordination (0% &rarr; 100%)</div>
+      <div class="rounded-xl bg-[var(--card)] border border-[var(--primary)] p-3.5">
+        <div class="font-mono text-xs text-[var(--muted-foreground)] flex items-center">
+          Full Coordination (0&rarr;100%)
+          <span class="tip tip-right">
+            <button type="button" class="tip-btn">?</button>
+            <span class="tip-box">At standard 3:1 starting ships, going from Uncoordinated FFA (0%) to Zero-Latency Focus-Fire (100%) lifts the 50/50 break-even gap from <strong>+282 Elo</strong> to <strong>+496 Elo</strong>.</span>
+          </span>
+        </div>
         <div class="text-2xl font-bold text-[var(--success)] tabular-nums mt-1">+213.5 Elo</div>
-        <p class="text-xs text-[var(--muted-foreground)] mt-1">
-          At standard 3:1 starting ships, lifts the 50/50 break-even gap from <strong>+282</strong> (FFA) to <strong>+496 Elo</strong> (Zero-Lat Focus-Fire).
-        </p>
+        <div class="text-xs text-[var(--muted-foreground)] mt-0.5">Break-even: +282 &rarr; +496 Elo</div>
       </div>
-      <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4">
-        <div class="font-mono text-xs text-[var(--muted-foreground)]">Doubling Starting Ships (2&times;)</div>
+
+      <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-3.5">
+        <div class="font-mono text-xs text-[var(--muted-foreground)] flex items-center">
+          2&times; Starting Ships
+          <span class="tip">
+            <button type="button" class="tip-btn">?</button>
+            <span class="tip-box">Doubling the coalition's combined starting ships adds <strong>+43.7 Elo</strong> of effective strength — roughly 5&times; smaller than the gain from full coordination.</span>
+          </span>
+        </div>
         <div class="text-2xl font-bold text-[var(--primary)] tabular-nums mt-1">+43.7 Elo</div>
-        <p class="text-xs text-[var(--muted-foreground)] mt-1">
-          Each 2&times; boost in coalition starting ships buys +43.7 Elo — far smaller than the +213.5 Elo gained from tight coordination.
-        </p>
+        <div class="text-xs text-[var(--muted-foreground)] mt-0.5">Per doubling of coalition ships</div>
       </div>
-      <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4">
-        <div class="font-mono text-xs text-[var(--muted-foreground)]">Observed Intelligence Wall</div>
+
+      <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-3.5">
+        <div class="font-mono text-xs text-[var(--muted-foreground)] flex items-center">
+          Intelligence Wall
+          <span class="tip">
+            <button type="button" class="tip-btn">?</button>
+            <span class="tip-box"><em>Reference: Boss = 1,740 Elo, &le;6&times; starting ships, 100% coord.</em> Beyond +600 Elo (<code>wd_heuristic</code> &amp; <code>starter</code>), coalitions went <strong>0/80 (0%)</strong>.</span>
+          </span>
+        </div>
         <div class="text-2xl font-bold text-[var(--error)] tabular-nums mt-1">&Delta;Elo &ge; +600</div>
-        <p class="text-xs text-[var(--muted-foreground)] mt-1">
-          <em>Ref: Boss = 1,740 Elo, &le; 6&times; ships, 100% coord.</em> Beyond +600 Elo, coalitions went <strong>0/80 (0%)</strong>.
-        </p>
+        <div class="text-xs text-[var(--muted-foreground)] mt-0.5">0/80 wins (at &le;6&times; ships, 100% sync)</div>
       </div>
-      <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4">
-        <div class="font-mono text-xs text-[var(--muted-foreground)]">Out-of-Sample vs #2 Boss (&Delta;Elo +576)</div>
+
+      <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-3.5">
+        <div class="font-mono text-xs text-[var(--muted-foreground)] flex items-center">
+          Test vs #2 Boss (+576 Elo)
+          <span class="tip tip-left">
+            <button type="button" class="tip-btn">?</button>
+            <span class="tip-box">Out-of-sample Kaggle 3v1 test: <code>3&times; subham_v14</code> (~1,224 Elo) using Zero-Lat Focus-Fire eliminated Kaggle #2 <code>Hober Malloc (1800.1)</code> on seed 501 (Rank #4, t=482, 504 volleys).</span>
+          </span>
+        </div>
         <div class="text-2xl font-bold text-[var(--success)] tabular-nums mt-1">33% (1/3)</div>
-        <p class="text-xs text-[var(--muted-foreground)] mt-1">
-          <code>3&times; subham_v14</code> (~1,224) eliminated Kaggle #2 (<code>1800.1</code>) on seed 501 (t=482, 504 volleys).
-        </p>
+        <div class="text-xs text-[var(--muted-foreground)] mt-0.5">3&times; subham_v14 vs #2 Hober (1800.1)</div>
       </div>
     </section>
 
-    <!-- Tabs: 3D Explorer FIRST! -->
+    <!-- Tabs -->
     <nav class="flex flex-wrap gap-2 pb-3 border-b border-[var(--border)]" id="tab-bar">
       <button data-tab="surface3d" class="tab-btn px-3.5 py-2 rounded-lg text-xs font-semibold border border-[var(--primary)] bg-[var(--primary)] text-[var(--primary-foreground)] cursor-pointer">
-        1. Interactive 3D Surface &amp; Calculator
+        1. 3D Surface &amp; Calculator
       </button>
       <button data-tab="heatmaps" class="tab-btn px-3.5 py-2 rounded-lg text-xs font-semibold border border-[var(--border)] bg-[var(--card)] text-[var(--muted-foreground)] cursor-pointer">
-        2. 2D Empirical Phase Maps
+        2. 2D Empirical Grids
       </button>
       <button data-tab="tables" class="tab-btn px-3.5 py-2 rounded-lg text-xs font-semibold border border-[var(--border)] bg-[var(--card)] text-[var(--muted-foreground)] cursor-pointer">
-        3. Official 4P &amp; 3v1 Gauntlets
+        3. Official Kaggle Gauntlets
       </button>
     </nav>
 
-    <!-- TAB 1 (DEFAULT): ORTHOGRAPHIC 3D SURFACE & SCENARIO CALCULATOR -->
+    <!-- TAB 1 (DEFAULT): 3D SURFACE (COORD x SHIPS FIRST!) & CALCULATOR -->
     <section id="panel-surface3d" class="tab-panel active space-y-4">
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div class="lg:col-span-2 rounded-xl bg-[var(--card)] border border-[var(--border)] p-4 space-y-3">
           <div class="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <h2 class="text-sm font-bold">3D Phase-Transition Surface (Orthogonal 3-Axis Cube)</h2>
-              <p class="text-xs text-[var(--muted-foreground)]">
-                Drag to rotate. Three perpendicular axes: horizontal <strong>X</strong> &amp; <strong>Y</strong> inputs, vertical <strong>Z</strong> = Coalition Win %.
-              </p>
+            <div class="flex items-center">
+              <h2 class="text-sm font-bold">Interactive 3D Surface</h2>
+              <span class="tip">
+                <button type="button" class="tip-btn">?</button>
+                <span class="tip-box">Orthogonal 3-axis cube. Drag anywhere to orbit, or hover over the surface to inspect exact Win % and X/Y values. The bright white band marks the 50/50 break-even boundary.</span>
+              </span>
             </div>
             <div class="flex flex-wrap gap-1.5 text-xs">
-              <button data-slice="elo_coord" class="slice-btn px-2.5 py-1 rounded-md font-semibold border border-[var(--primary)] bg-[var(--primary)] text-[var(--primary-foreground)] cursor-pointer">
+              <button data-slice="coord_res" class="slice-btn px-2.5 py-1 rounded-md font-semibold border border-[var(--primary)] bg-[var(--primary)] text-[var(--primary-foreground)] cursor-pointer">
+                Coord &times; Ships
+              </button>
+              <button data-slice="elo_coord" class="slice-btn px-2.5 py-1 rounded-md font-semibold border border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] cursor-pointer">
                 &Delta;Elo &times; Coord
               </button>
               <button data-slice="elo_res" class="slice-btn px-2.5 py-1 rounded-md font-semibold border border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] cursor-pointer">
                 &Delta;Elo &times; Ships
               </button>
-              <button data-slice="coord_res" class="slice-btn px-2.5 py-1 rounded-md font-semibold border border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] cursor-pointer">
-                Coord &times; Ships
-              </button>
             </div>
           </div>
 
-          <!-- Clear Visual Legend -->
-          <div class="flex flex-wrap items-center gap-4 text-xs px-3 py-2 rounded-lg bg-[var(--background)] border border-[var(--border)]">
-            <div class="flex items-center gap-1.5">
-              <span class="inline-block w-3 h-3 rounded-sm" style="background:rgb(220,58,68)"></span>
-              <span class="text-[var(--muted-foreground)]">0% Boss Wins</span>
-            </div>
-            <div class="flex items-center gap-1.5">
-              <span class="inline-block w-3 h-3 rounded-sm" style="background:rgb(245,158,11)"></span>
-              <span class="text-[var(--muted-foreground)]">50% Toss-up</span>
-            </div>
-            <div class="flex items-center gap-1.5">
-              <span class="inline-block w-3 h-3 rounded-sm" style="background:rgb(16,185,129)"></span>
-              <span class="text-[var(--muted-foreground)]">100% Coalition Wins</span>
-            </div>
-            <div class="flex items-center gap-1.5">
-              <span class="inline-block w-5 border-t-2 border-dashed border-white"></span>
-              <span class="font-semibold">White Band = 50% Break-Even</span>
-            </div>
-            <div class="flex items-center gap-1.5">
-              <span class="inline-block w-2.5 h-2.5 rounded-full bg-white border border-slate-900"></span>
-              <span class="font-semibold">Pin = Your Sliders</span>
-            </div>
+          <!-- Compact Legend Bar -->
+          <div class="flex flex-wrap items-center gap-4 text-xs px-3 py-1.5 rounded-lg bg-[var(--background)] border border-[var(--border)]">
+            <span class="flex items-center gap-1.5 text-[var(--muted-foreground)]">
+              <span class="w-2.5 h-2.5 rounded-sm" style="background:rgb(220,58,68)"></span>0% Boss
+            </span>
+            <span class="flex items-center gap-1.5 text-[var(--muted-foreground)]">
+              <span class="w-2.5 h-2.5 rounded-sm" style="background:rgb(245,158,11)"></span>50% Even
+            </span>
+            <span class="flex items-center gap-1.5 text-[var(--muted-foreground)]">
+              <span class="w-2.5 h-2.5 rounded-sm" style="background:rgb(16,185,129)"></span>100% Coalition
+            </span>
+            <span class="flex items-center gap-1.5 font-semibold">
+              <span class="w-4 border-t-2 border-dashed border-white"></span>50% Break-Even
+            </span>
+            <span class="flex items-center gap-1.5 font-semibold">
+              <span class="w-2.5 h-2.5 rounded-full bg-white border border-slate-900"></span>Your Pin
+            </span>
           </div>
 
-          <canvas id="canvas-3d" width="680" height="410" class="w-full rounded-lg border border-[var(--border)] cursor-grab active:cursor-grabbing"></canvas>
+          <canvas id="canvas-3d" width="680" height="415" class="w-full rounded-lg border border-[var(--border)] cursor-grab active:cursor-grabbing"></canvas>
         </div>
 
-        <!-- Live Tradeoff Calculator -->
-        <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4 space-y-4">
-          <div>
-            <h2 class="text-sm font-bold">Wargame Scenario Calculator</h2>
-            <p class="text-xs text-[var(--muted-foreground)]">Move the sliders to see where your matchup lands on the 3D surface.</p>
+        <!-- Clean Scenario Calculator -->
+        <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4 flex flex-col justify-between space-y-4">
+          <div class="space-y-3.5">
+            <div class="flex items-center justify-between">
+              <h2 class="text-sm font-bold">Scenario Calculator</h2>
+              <span class="font-mono text-xs text-[var(--muted-foreground)]">3v1</span>
+            </div>
+
+            <div class="space-y-3 text-xs">
+              <label class="block space-y-1">
+                <div class="flex justify-between">
+                  <span class="text-[var(--muted-foreground)]">Boss Elo</span>
+                  <span id="val-boss-elo" class="font-mono font-bold">1740</span>
+                </div>
+                <input id="sl-boss-elo" type="range" min="1200" max="2000" step="10" value="1740" class="w-full accent-[var(--primary)]" />
+              </label>
+
+              <label class="block space-y-1">
+                <div class="flex justify-between">
+                  <span class="text-[var(--muted-foreground)]">Ally Elo (each of 3)</span>
+                  <span id="val-ally-elo" class="font-mono font-bold">1224</span>
+                </div>
+                <input id="sl-ally-elo" type="range" min="900" max="1800" step="10" value="1224" class="w-full accent-[var(--primary)]" />
+              </label>
+
+              <label class="block space-y-1">
+                <div class="flex justify-between items-center">
+                  <span class="text-[var(--muted-foreground)] flex items-center">
+                    Coordination
+                    <span class="tip">
+                      <button type="button" class="tip-btn">?</button>
+                      <span class="tip-box">
+                        <strong>5 Tested Rungs:</strong><br/>
+                        • <code>0%</code>: Free-for-all (no team)<br/>
+                        • <code>25%</code>: Truce only (no friendly fire)<br/>
+                        • <code>50%</code>: Focus-fire w/ 10-tick lag, 50% compliance, 30% noise<br/>
+                        • <code>75%</code>: Focus-fire w/ 5-tick lag<br/>
+                        • <code>100%</code>: Zero-latency sync focus-fire
+                      </span>
+                    </span>
+                  </span>
+                  <span id="val-coord" class="font-mono font-bold">100% (Sync)</span>
+                </div>
+                <input id="sl-coord" type="range" min="0" max="100" step="5" value="100" class="w-full accent-[var(--primary)]" />
+              </label>
+
+              <label class="block space-y-1">
+                <div class="flex justify-between items-center">
+                  <span class="text-[var(--muted-foreground)] flex items-center">
+                    Starting Ships (Coal / Boss)
+                    <span class="tip">
+                      <button type="button" class="tip-btn">?</button>
+                      <span class="tip-box">Total starting ships across all 3 allies divided by Boss starting ships. Standard 4P = <strong>3.00&times;</strong> (30 vs 10); <strong>1.00&times;</strong> = equal total ships (30 vs 30).</span>
+                    </span>
+                  </span>
+                  <span id="val-res" class="font-mono font-bold">3.00&times;</span>
+                </div>
+                <input id="sl-res" type="range" min="0.5" max="8.0" step="0.25" value="3.0" class="w-full accent-[var(--primary)]" />
+              </label>
+            </div>
           </div>
 
-          <div class="space-y-3 text-xs">
-            <label class="block space-y-1">
-              <div class="flex justify-between">
-                <span class="text-[var(--muted-foreground)]">Boss Intelligence (Elo)</span>
-                <span id="val-boss-elo" class="font-mono font-bold">1740</span>
-              </div>
-              <input id="sl-boss-elo" type="range" min="1200" max="2000" step="10" value="1740" class="w-full accent-[var(--primary)]" />
-            </label>
-
-            <label class="block space-y-1">
-              <div class="flex justify-between">
-                <span class="text-[var(--muted-foreground)]">Ally Intelligence (Each of 3, Elo)</span>
-                <span id="val-ally-elo" class="font-mono font-bold">1224</span>
-              </div>
-              <input id="sl-ally-elo" type="range" min="900" max="1800" step="10" value="1224" class="w-full accent-[var(--primary)]" />
-            </label>
-
-            <label class="block space-y-1">
-              <div class="flex justify-between">
-                <span class="text-[var(--muted-foreground)]">Coordination (0% FFA &rarr; 100% Sync)</span>
-                <span id="val-coord" class="font-mono font-bold">100% (Zero-Lat Sync)</span>
-              </div>
-              <input id="sl-coord" type="range" min="0" max="100" step="5" value="100" class="w-full accent-[var(--primary)]" />
-            </label>
-
-            <label class="block space-y-1">
-              <div class="flex justify-between">
-                <span class="text-[var(--muted-foreground)]">Coalition / Boss Starting Ships</span>
-                <span id="val-res" class="font-mono font-bold">3.00&times; (Std 4P)</span>
-              </div>
-              <input id="sl-res" type="range" min="0.5" max="8.0" step="0.25" value="3.0" class="w-full accent-[var(--primary)]" />
-            </label>
-          </div>
-
+          <!-- Compact Readout Box -->
           <div class="p-3.5 rounded-lg bg-[var(--background)] border border-[var(--border)] space-y-2">
             <div class="flex items-center justify-between text-xs">
-              <span class="text-[var(--muted-foreground)]">Intelligence Gap (Boss &minus; Ally)</span>
+              <span class="text-[var(--muted-foreground)]">Intelligence Gap</span>
               <span id="out-delo" class="font-mono font-bold">+516 Elo</span>
             </div>
-            <div class="flex items-center justify-between text-xs">
-              <span class="text-[var(--muted-foreground)]">Predicted Coalition Takedown</span>
-              <span id="out-prob" class="font-mono font-bold text-lg text-[var(--warning)]">41.8%</span>
+            <div class="flex items-baseline justify-between text-xs">
+              <span class="text-[var(--muted-foreground)]">Coalition Win Prob</span>
+              <span id="out-prob" class="font-mono font-bold text-xl text-[var(--warning)]">41.8%</span>
             </div>
             <div class="h-2.5 rounded-full bg-[var(--card)] border border-[var(--border)] overflow-hidden">
               <div id="out-bar" class="h-full transition-all duration-150" style="width:42%; background: var(--warning);"></div>
             </div>
-            <div id="out-regime" class="text-xs font-semibold pt-1"></div>
+            <div id="out-regime" class="text-xs font-semibold pt-0.5"></div>
             <div id="out-hint" class="text-xs text-[var(--muted-foreground)]"></div>
           </div>
+        </div>
+      </div>
 
-          <div class="text-xs text-[var(--muted-foreground)] space-y-1 pt-1 border-t border-[var(--border)]">
-            <div class="font-semibold text-[var(--foreground)]">Coordination Scale Guide</div>
-            <div><code>0%</code> = Free-for-all • <code>25%</code> = Truce only • <code>50%</code> = 10-tick lag &amp; 50% compliance • <code>75%</code> = 5-tick lag • <code>100%</code> = Zero-latency sync focus-fire.</div>
+      <!-- Collapsible Math Details (Out of the way until clicked!) -->
+      <details class="rounded-xl bg-[var(--card)] border border-[var(--border)] px-4 py-3 text-xs">
+        <summary class="cursor-pointer font-semibold text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
+          Show fitted logistic equation &amp; break-even table (N = 200 matches)
+        </summary>
+        <div class="mt-3 space-y-2.5">
+          <div class="font-mono p-2.5 rounded-lg bg-[var(--background)] border border-[var(--border)] overflow-x-auto">
+            logit(P_coalition) = 3.523 &minus; 1.653 &middot; (&Delta;Elo / 100) + 3.529 &middot; (Coord% / 100) + 0.723 &middot; log<sub>2</sub>(ShipRatio)
+          </div>
+          <div class="grid grid-cols-2 sm:grid-cols-5 gap-2 font-mono">
+            <div class="p-2 rounded bg-[var(--background)] border border-[var(--border)]">0% FFA: <strong>+282</strong></div>
+            <div class="p-2 rounded bg-[var(--background)] border border-[var(--border)]">25% Truce: <strong>+336</strong></div>
+            <div class="p-2 rounded bg-[var(--background)] border border-[var(--border)]">50% Lag10: <strong>+389</strong></div>
+            <div class="p-2 rounded bg-[var(--background)] border border-[var(--border)]">75% Lag5: <strong>+443</strong></div>
+            <div class="p-2 rounded bg-[var(--background)] border border-[var(--success)] text-[var(--success)]">100% Sync: <strong>+496</strong></div>
           </div>
         </div>
-      </div>
-
-      <!-- Compact Equation Footer -->
-      <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4 space-y-2">
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <h3 class="text-sm font-bold">Fitted Logistic Model (N = 200 Matches, Weighted MAE = 6.2%)</h3>
-          <span class="font-mono text-xs text-[var(--muted-foreground)]">3:1 Standard Ship Break-Even &Delta;Elo: +282 (0%) &rarr; +496 (100%)</span>
-        </div>
-        <div class="font-mono text-xs p-2.5 rounded-lg bg-[var(--background)] border border-[var(--border)] overflow-x-auto">
-          logit(P_coalition) = 3.523 &minus; 1.653 &middot; (&Delta;Elo / 100) + 3.529 &middot; (Coord% / 100) + 0.723 &middot; log<sub>2</sub>(ShipRatio)
-        </div>
-      </div>
+      </details>
     </section>
 
-    <!-- TAB 2: 2D EMPIRICAL PHASE MAPS -->
+    <!-- TAB 2: 2D EMPIRICAL GRIDS -->
     <section id="panel-heatmaps" class="tab-panel space-y-4">
-      <div class="rounded-lg bg-[var(--card)] border border-[var(--border)] px-4 py-2.5 text-xs text-[var(--muted-foreground)]">
-        <strong>How to read these maps:</strong> Each square shows the exact observed coalition win rate across 4 seeds vs. Boss <code>PT-Gen8 (1,740 Elo)</code>. Moving <strong>up</strong> = stronger allies (smaller &Delta;Elo); moving <strong>right</strong> on Map A = tighter coordination; moving <strong>left</strong> on Map B = more coalition starting ships. The <strong>dashed white line</strong> is the fitted 50% break-even boundary.
-      </div>
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4 space-y-3">
-          <div>
-            <h2 class="text-sm font-bold">Map A: Intelligence Gap (&Delta;Elo) &times; Coordination (0% &rarr; 100%)</h2>
-            <p class="text-xs text-[var(--muted-foreground)]">
-              Fixed at standard 4P starting ships (3:1 combined). Dashed white line = 50% break-even.
-            </p>
+          <div class="flex items-center">
+            <h2 class="text-sm font-bold">Map A: &Delta;Elo &times; Coordination (3:1 Ships)</h2>
+            <span class="tip">
+              <button type="button" class="tip-btn">?</button>
+              <span class="tip-box">Exact observed win rate across 4 seeds vs. Boss <code>PT-Gen8 (1,740)</code>. Hover any cell to compare observed wins vs. the fitted model. Dashed white line = 50/50 break-even.</span>
+            </span>
           </div>
           <canvas id="canvas-coord-map" width="520" height="330" class="w-full rounded-lg border border-[var(--border)]"></canvas>
-          <p class="text-xs text-[var(--muted-foreground)]">
-            At <code>+310 Elo</code> (Gen 3), even noisy <code>50%</code> coordination jumps wins from <strong>25% &rarr; 100%</strong>. At <code>+516 Elo</code> (<code>subham_v14</code>), full coordination sits right on the <strong>50% break-even</strong>. Beyond <code>+600 Elo</code>, allies hit the wall.
-          </p>
         </div>
 
         <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4 space-y-3">
           <div class="flex items-center justify-between gap-2 flex-wrap">
-            <div>
-              <h2 class="text-sm font-bold">Map B: Intelligence Gap (&Delta;Elo) &times; Starting Ship Ratio</h2>
-              <p class="text-xs text-[var(--muted-foreground)]">
-                Compare 100% Zero-Lat Focus-Fire against 0% Uncoordinated FFA:
-              </p>
+            <div class="flex items-center">
+              <h2 class="text-sm font-bold">Map B: &Delta;Elo &times; Starting Ships</h2>
+              <span class="tip">
+                <button type="button" class="tip-btn">?</button>
+                <span class="tip-box">Toggle between 100% Zero-Latency Focus-Fire and 0% Uncoordinated FFA to see how coordination unlocks starting resources (0% &rarr; 75% at 6&times; ships).</span>
+              </span>
             </div>
             <div class="flex gap-1.5 text-xs">
               <button id="res-mode-ff" class="px-2.5 py-1 rounded-md font-semibold border border-[var(--primary)] bg-[var(--primary)] text-[var(--primary-foreground)] cursor-pointer">
-                100% Focus-Fire
+                100% Sync
               </button>
               <button id="res-mode-ffa" class="px-2.5 py-1 rounded-md font-semibold border border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] cursor-pointer">
                 0% FFA
@@ -245,26 +307,22 @@
             </div>
           </div>
           <canvas id="canvas-res-map" width="520" height="330" class="w-full rounded-lg border border-[var(--border)]"></canvas>
-          <p class="text-xs text-[var(--muted-foreground)]">
-            <strong>Coordination unlocks resources:</strong> Without coordination (<code>0% FFA</code>), even <strong>6.0&times;</strong> starting ships gives <code>0% (0/4)</code>. Turning on <code>100% Focus-Fire</code> lifts that exact cell to <strong>75% (3/4)</strong> — and even <strong>1.0&times;</strong> equal starting ships still scores <strong>25%</strong>.
-          </p>
         </div>
       </div>
     </section>
 
-    <!-- TAB 3: OFFICIAL 4P & 3v1 GAUNTLETS -->
+    <!-- TAB 3: OFFICIAL KAGGLE GAUNTLETS -->
     <section id="panel-tables" class="tab-panel space-y-4">
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4 space-y-2">
-          <h2 class="text-sm font-bold">Official Kaggle 3v1 Coalition Gauntlet (Seeds 500–503)</h2>
-          <p class="text-xs text-[var(--muted-foreground)]">3 independent <code>subham_v14</code> (~1,224 Elo) actors teaming up against neural bosses without merging resources.</p>
-          <table class="w-full text-xs border-collapse mt-2">
+          <h2 class="text-sm font-bold">3v1 Kaggle Gauntlet (3&times; subham_v14 vs. Bosses)</h2>
+          <table class="w-full text-xs border-collapse mt-1">
             <thead>
               <tr class="border-b border-[var(--border)] text-[var(--muted-foreground)]">
                 <th class="text-left py-2">Boss &amp; Coordination</th>
                 <th class="text-right py-2">Coalition WR</th>
-                <th class="text-right py-2">Boss Elim Tick</th>
-                <th class="text-right py-2">Avg Volleys</th>
+                <th class="text-right py-2">Boss Elim</th>
+                <th class="text-right py-2">Volleys</th>
               </tr>
             </thead>
             <tbody class="font-mono">
@@ -283,7 +341,7 @@
               <tr class="border-b border-[var(--border)]">
                 <td class="py-1.5 font-sans">PT-Gen8 — 75% Sync (Lat=5)</td>
                 <td class="text-right text-[var(--warning)]">25% (1/4)</td>
-                <td class="text-right">t=124 (Rank #4)</td>
+                <td class="text-right">t=124 (#4)</td>
                 <td class="text-right">77.0</td>
               </tr>
               <tr class="border-b border-[var(--border)]">
@@ -295,29 +353,28 @@
               <tr class="border-b border-[var(--border)]">
                 <td class="py-1.5 font-sans">Gen 7 (4P) — 100% / 75% Sync</td>
                 <td class="text-right text-[var(--warning)]">25% (1/4)</td>
-                <td class="text-right">t=100 / t=115</td>
+                <td class="text-right">t=100 / 115</td>
                 <td class="text-right">52.8 / 46.3</td>
               </tr>
               <tr>
                 <td class="py-1.5 font-sans font-semibold">#2 Hober Malloc (1800.1) — 100% Sync</td>
                 <td class="text-right text-[var(--success)] font-bold">33% (1/3)</td>
-                <td class="text-right">t=482 (Rank #4!)</td>
-                <td class="text-right">182.7 (504 max!)</td>
+                <td class="text-right">t=482 (#4!)</td>
+                <td class="text-right">182.7 (504 max)</td>
               </tr>
             </tbody>
           </table>
         </div>
 
         <div class="rounded-xl bg-[var(--card)] border border-[var(--border)] p-4 space-y-2">
-          <h2 class="text-sm font-bold">4P FFA Dynamics: 2P Specialist vs. 4P Specialist</h2>
-          <p class="text-xs text-[var(--muted-foreground)]">Balanced 4P FFA tables (seeds 600–605) plus 4P heuristic sweep (seeds 400–403).</p>
-          <table class="w-full text-xs border-collapse mt-2">
+          <h2 class="text-sm font-bold">4P FFA: Gen 8 (2P Spec) vs. Gen 7 (4P Spec)</h2>
+          <table class="w-full text-xs border-collapse mt-1">
             <thead>
               <tr class="border-b border-[var(--border)] text-[var(--muted-foreground)]">
                 <th class="text-left py-2">Matchup</th>
                 <th class="text-right py-2">Wins</th>
                 <th class="text-right py-2">Top-2 %</th>
-                <th class="text-right py-2">Takeaway</th>
+                <th class="text-right py-2">Notes</th>
               </tr>
             </thead>
             <tbody class="font-mono">
@@ -325,13 +382,13 @@
                 <td class="py-2 font-sans font-semibold">2&times; Gen 7 vs 2&times; PT-Gen8</td>
                 <td class="text-right text-[var(--success)]">Gen 7: 4–2</td>
                 <td class="text-right">58.3% vs 41.7%</td>
-                <td class="text-right font-sans text-[var(--muted-foreground)]">4P defense beats 2P All-In</td>
+                <td class="text-right font-sans text-[var(--muted-foreground)]">4P defense wins</td>
               </tr>
               <tr class="border-b border-[var(--border)]">
                 <td class="py-2 font-sans font-semibold">PT-Gen8 vs 3&times; subham_v14</td>
                 <td class="text-right text-[var(--success)]">4–0 (100%)</td>
                 <td class="text-right">100.0%</td>
-                <td class="text-right font-sans text-[var(--muted-foreground)]">114.8t avg (record 85t!)</td>
+                <td class="text-right font-sans text-[var(--muted-foreground)]">114.8t avg (85t min)</td>
               </tr>
               <tr>
                 <td class="py-2 font-sans font-semibold">Gen 7 vs 3&times; subham_v14</td>
@@ -341,9 +398,6 @@
               </tr>
             </tbody>
           </table>
-          <div class="pt-3 text-xs text-[var(--muted-foreground)]">
-            <strong>Multi-Front Resistance:</strong> Under 100% Zero-Latency Focus-Fire, <code>Gen 7</code> (4P-trained) held <code>3–1 (75%)</code> while <code>PT-Gen8</code> (2P All-In) dropped to <code>2–2 (50%)</code> — showing multi-front defensive training makes a Boss harder to gang up on.
-          </div>
         </div>
       </div>
     </section>
@@ -387,47 +441,62 @@
       [0, 0, 0, 0, 0]
     ];
 
-    function cssVar(name) {
-      return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#888";
-    }
+    const cssVar = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#888";
     function heatColor(p) {
       const c = Math.max(0, Math.min(1, p));
-      let r, g, b;
       if (c < 0.5) {
         const u = c * 2;
-        r = Math.round(220 + (245 - 220) * u);
-        g = Math.round(58 + (158 - 58) * u);
-        b = Math.round(68 + (11 - 68) * u);
-      } else {
-        const u = (c - 0.5) * 2;
-        r = Math.round(245 + (16 - 245) * u);
-        g = Math.round(158 + (185 - 158) * u);
-        b = Math.round(11 + (129 - 11) * u);
+        return `rgb(${Math.round(220 + 25 * u)},${Math.round(58 + 100 * u)},${Math.round(68 - 57 * u)})`;
       }
-      return `rgb(${r},${g},${b})`;
+      const u = (c - 0.5) * 2;
+      return `rgb(${Math.round(245 - 229 * u)},${Math.round(158 + 27 * u)},${Math.round(11 + 118 * u)})`;
     }
 
     let currentResMode = "ff";
-    let currentSlice = "elo_coord";
-    // Clean isometric default viewing angle
+    let currentSlice = "coord_res"; // Coord x Ships is now the default view!
     let yaw = -0.72, pitch = 0.52;
+    let dragging = false, lx = 0, ly = 0;
+    let last3DPts = [], hover3D = null;
+    let hoverCoordCell = null, hoverResCell = null;
 
-    // True ORTHOGRAPHIC 3D projection: parallel edges stay parallel & axes stay 90° orthogonal!
     function projectOrtho(x, y, z, W, H) {
-      // x, y in [-1, 1], z in [0, 1] -> centered z in [-0.5, 0.5]
       const cz = (z - 0.5) * 1.15;
       const cosY = Math.cos(yaw), sinY = Math.sin(yaw);
-      const x1 = x * cosY - y * sinY;
-      const y1 = x * sinY + y * cosY;
+      const x1 = x * cosY - y * sinY, y1 = x * sinY + y * cosY;
       const cosP = Math.cos(pitch), sinP = Math.sin(pitch);
-      const depth = y1 * cosP - cz * sinP;
-      const z2 = y1 * sinP + cz * cosP;
+      const depth = y1 * cosP - cz * sinP, z2 = y1 * sinP + cz * cosP;
       const scale = Math.min(W, H) * 0.34;
-      return {
-        sx: W * 0.51 + x1 * scale,
-        sy: H * 0.53 - z2 * scale,
-        depth
-      };
+      return { sx: W * 0.51 + x1 * scale, sy: H * 0.53 - z2 * scale, depth };
+    }
+
+    function drawCallout(ctx, ax, ay, title, subtitle, W, H, accent, preferBelow) {
+      ctx.save();
+      ctx.font = "bold 11.5px ui-monospace, monospace";
+      const w1 = ctx.measureText(title).width;
+      ctx.font = "10.5px ui-monospace, monospace";
+      const w2 = ctx.measureText(subtitle).width;
+      const boxW = Math.max(w1, w2) + 20, boxH = 38;
+      let bx = ax + 14, by = preferBelow ? ay + 14 : ay - boxH - 14;
+      if (bx + boxW > W - 8) bx = ax - boxW - 14;
+      if (bx < 8) bx = 8;
+      if (by < 8) by = ay + 14;
+      if (by + boxH > H - 8) by = ay - boxH - 14;
+      by = Math.max(8, Math.min(H - boxH - 8, by));
+
+      ctx.strokeStyle = accent; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx + (bx > ax ? 0 : boxW), by + boxH / 2); ctx.stroke();
+
+      ctx.shadowColor = "rgba(0,0,0,0.35)"; ctx.shadowBlur = 8;
+      ctx.fillStyle = cssVar("--card"); ctx.strokeStyle = accent; ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.roundRect(bx, by, boxW, boxH, 7); ctx.fill();
+      ctx.shadowBlur = 0; ctx.stroke();
+
+      ctx.textAlign = "left";
+      ctx.fillStyle = cssVar("--foreground"); ctx.font = "bold 11.5px ui-monospace, monospace";
+      ctx.fillText(title, bx + 10, by + 15);
+      ctx.fillStyle = cssVar("--muted-foreground"); ctx.font = "10.5px ui-monospace, monospace";
+      ctx.fillText(subtitle, bx + 10, by + 30);
+      ctx.restore();
     }
 
     function draw3DSurface() {
@@ -436,8 +505,7 @@
       const ctx = canvas.getContext("2d");
       const W = canvas.width, H = canvas.height;
       const fg = cssVar("--foreground"), muted = cssVar("--muted-foreground"), bg = cssVar("--background"), border = cssVar("--border");
-      ctx.clearRect(0, 0, W, H);
-      ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+      ctx.clearRect(0, 0, W, H); ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
 
       const bossElo = +document.getElementById("sl-boss-elo").value;
       const allyElo = +document.getElementById("sl-ally-elo").value;
@@ -452,12 +520,7 @@
         return predictProb(curDElo, u, 0.5 * Math.pow(16.0, v));
       };
 
-      // Draw true square orthographic floor + subtle back-wall grid + 3 bold orthogonal axes
-      const corners = [
-        projectOrtho(-1, -1, 0, W, H), projectOrtho(1, -1, 0, W, H),
-        projectOrtho(1, 1, 0, W, H),   projectOrtho(-1, 1, 0, W, H)
-      ];
-      // Floor gridlines (4x4 square subdivisions)
+      // Orthogonal square floor & back cube gridlines
       ctx.strokeStyle = border; ctx.lineWidth = 0.8;
       for (let g = 0; g <= 4; g++) {
         const t = -1 + g * 0.5;
@@ -466,20 +529,15 @@
         a = projectOrtho(-1, t, 0, W, H); b = projectOrtho(1, t, 0, W, H);
         ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.lineTo(b.sx, b.sy); ctx.stroke();
       }
-
-      // Draw 3 orthogonal reference edges of the 3D cube (Z vertical wall gridlines at 0%, 50%, 100%)
-      ctx.strokeStyle = border; ctx.lineWidth = 0.8;
       [0.5, 1.0].forEach(zv => {
         const p0 = projectOrtho(-1, 1, zv, W, H), p1 = projectOrtho(1, 1, zv, W, H), p2 = projectOrtho(-1, -1, zv, W, H);
         ctx.beginPath(); ctx.moveTo(p2.sx, p2.sy); ctx.lineTo(p0.sx, p0.sy); ctx.lineTo(p1.sx, p1.sy); ctx.stroke();
       });
-      // Vertical cube edges
       [[-1,-1], [-1,1], [1,1]].forEach(([cx, cy]) => {
         const bot = projectOrtho(cx, cy, 0, W, H), top = projectOrtho(cx, cy, 1, W, H);
         ctx.beginPath(); ctx.moveTo(bot.sx, bot.sy); ctx.lineTo(top.sx, top.sy); ctx.stroke();
       });
 
-      // Compute surface vertices
       const pts = [];
       for (let i = 0; i <= N; i++) {
         pts[i] = [];
@@ -489,7 +547,6 @@
         }
       }
 
-      // Painter's algorithm sort
       const quads = [];
       for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
         const a = pts[i][j], b = pts[i + 1][j], c = pts[i + 1][j + 1], d = pts[i][j + 1];
@@ -502,68 +559,44 @@
         ctx.fillStyle = heatColor(q.zAvg); ctx.globalAlpha = 0.88; ctx.fill(); ctx.globalAlpha = 1.0;
         const on50 = Math.abs(q.zAvg - 0.5) < 0.055;
         ctx.strokeStyle = on50 ? "rgba(255,255,255,0.95)" : "rgba(15,23,42,0.20)";
-        ctx.lineWidth = on50 ? 2.0 : 0.65;
-        ctx.stroke();
+        ctx.lineWidth = on50 ? 2.0 : 0.65; ctx.stroke();
       }
 
-      // Draw bold X, Y, Z axes & crisp numeric tick labels along cube edges
+      // Bold orthogonal X, Y, Z edges
       ctx.strokeStyle = fg; ctx.lineWidth = 1.4;
       const o0 = projectOrtho(-1, -1, 0, W, H), oX = projectOrtho(1, -1, 0, W, H), oY = projectOrtho(1, 1, 0, W, H), oZ = projectOrtho(-1, -1, 1, W, H);
       ctx.beginPath(); ctx.moveTo(o0.sx, o0.sy); ctx.lineTo(oX.sx, oX.sy); ctx.lineTo(oY.sx, oY.sy); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(o0.sx, o0.sy); ctx.lineTo(oZ.sx, oZ.sy); ctx.stroke();
 
-      // Z-axis ticks (0%, 50%, 100%)
       ctx.fillStyle = muted; ctx.font = "10.5px ui-monospace, monospace"; ctx.textAlign = "right";
-      [0, 0.5, 1.0].forEach(zv => {
-        const zp = projectOrtho(-1, -1, zv, W, H);
-        ctx.fillText(Math.round(zv * 100) + "%", zp.sx - 8, zp.sy + 4);
-      });
+      [0, 0.5, 1.0].forEach(zv => { const zp = projectOrtho(-1, -1, zv, W, H); ctx.fillText(Math.round(zv * 100) + "%", zp.sx - 8, zp.sy + 4); });
 
-      // X-axis ticks along (u, -1, 0)
       const xTicks = currentSlice === "coord_res"
         ? [{ u: 0, l: "0%" }, { u: 0.5, l: "50%" }, { u: 1, l: "100%" }]
         : [{ u: 0, l: "+150" }, { u: 0.5, l: "+475" }, { u: 1, l: "+800" }];
       ctx.textAlign = "center";
-      xTicks.forEach(tk => {
-        const tp = projectOrtho(tk.u * 2 - 1, -1.14, 0, W, H);
-        ctx.fillText(tk.l, tp.sx, tp.sy + 4);
-      });
+      xTicks.forEach(tk => { const tp = projectOrtho(tk.u * 2 - 1, -1.14, 0, W, H); ctx.fillText(tk.l, tp.sx, tp.sy + 4); });
 
-      // Y-axis ticks along (1, v, 0)
       const yTicks = currentSlice === "elo_coord"
         ? [{ v: 0, l: "0%" }, { v: 0.5, l: "50%" }, { v: 1, l: "100%" }]
         : [{ v: 0, l: "0.5x" }, { v: 0.5, l: "2.0x" }, { v: 1, l: "8.0x" }];
-      yTicks.forEach(tk => {
-        const tp = projectOrtho(1.16, tk.v * 2 - 1, 0, W, H);
-        ctx.fillText(tk.l, tp.sx, tp.sy + 4);
-      });
+      yTicks.forEach(tk => { const tp = projectOrtho(1.16, tk.v * 2 - 1, 0, W, H); ctx.fillText(tk.l, tp.sx, tp.sy + 4); });
 
-      // Save projected grid vertices for mouse-hover hit-testing
       last3DPts = [];
-      for (let i = 0; i <= N; i++) {
-        for (let j = 0; j <= N; j++) {
-          const u = i / N, v = j / N, p = pts[i][j];
-          last3DPts.push({ sx: p.sx, sy: p.sy, u, v, z: p.z, depth: p.depth });
-        }
+      for (let i = 0; i <= N; i++) for (let j = 0; j <= N; j++) {
+        const p = pts[i][j]; last3DPts.push({ sx: p.sx, sy: p.sy, u: i / N, v: j / N, z: p.z });
       }
 
-      // Live scenario beacon pin (clamped inside plotted cube if sliders exceed axis bounds)
       let bu, bv, xValStr, yValStr;
       if (currentSlice === "elo_coord") {
-        bu = Math.max(0, Math.min(1, (curDElo - 150) / 650));
-        bv = curCoord;
-        xValStr = `ΔElo ${curDElo >= 0 ? "+" : ""}${curDElo}`;
-        yValStr = `Coord ${Math.round(curCoord * 100)}%`;
+        bu = Math.max(0, Math.min(1, (curDElo - 150) / 650)); bv = curCoord;
+        xValStr = `ΔElo ${curDElo >= 0 ? "+" : ""}${curDElo}`; yValStr = `Coord ${Math.round(curCoord * 100)}%`;
       } else if (currentSlice === "elo_res") {
-        bu = Math.max(0, Math.min(1, (curDElo - 150) / 650));
-        bv = Math.max(0, Math.min(1, Math.log(curRes / 0.5) / Math.log(16.0)));
-        xValStr = `ΔElo ${curDElo >= 0 ? "+" : ""}${curDElo}`;
-        yValStr = `Ships ${curRes.toFixed(2)}×`;
+        bu = Math.max(0, Math.min(1, (curDElo - 150) / 650)); bv = Math.max(0, Math.min(1, Math.log(curRes / 0.5) / Math.log(16.0)));
+        xValStr = `ΔElo ${curDElo >= 0 ? "+" : ""}${curDElo}`; yValStr = `Ships ${curRes.toFixed(2)}×`;
       } else {
-        bu = curCoord;
-        bv = Math.max(0, Math.min(1, Math.log(curRes / 0.5) / Math.log(16.0)));
-        xValStr = `Coord ${Math.round(curCoord * 100)}%`;
-        yValStr = `Ships ${curRes.toFixed(2)}×`;
+        bu = curCoord; bv = Math.max(0, Math.min(1, Math.log(curRes / 0.5) / Math.log(16.0)));
+        xValStr = `Coord ${Math.round(curCoord * 100)}%`; yValStr = `Ships ${curRes.toFixed(2)}×`;
       }
       const bz = predictProb(curDElo, curCoord, curRes);
       const pinBase = projectOrtho(bu * 2 - 1, bv * 2 - 1, 0, W, H), pinTop = projectOrtho(bu * 2 - 1, bv * 2 - 1, bz, W, H);
@@ -572,114 +605,33 @@
       ctx.beginPath(); ctx.arc(pinTop.sx, pinTop.sy, 6.5, 0, Math.PI * 2);
       ctx.fillStyle = "#ffffff"; ctx.fill(); ctx.strokeStyle = "#0f172a"; ctx.lineWidth = 2; ctx.stroke();
 
-      // Axis titles
       const xTitle = currentSlice === "coord_res" ? "X: Coordination (0% → 100%)" : "X: Intelligence Gap ΔElo (+150 → +800)";
       const yTitle = currentSlice === "elo_coord" ? "Y: Coordination (0% → 100%)" : "Y: Ship Ratio (0.5× → 8.0×)";
       const pX = projectOrtho(0, -1.36, 0, W, H), pY = projectOrtho(1.38, 0, 0, W, H);
       ctx.fillStyle = fg; ctx.font = "bold 11.5px sans-serif"; ctx.textAlign = "center";
-      ctx.fillText(xTitle, pX.sx, pX.sy + 6);
-      ctx.fillText(yTitle, pY.sx, pY.sy + 6);
+      ctx.fillText(xTitle, pX.sx, pX.sy + 6); ctx.fillText(yTitle, pY.sx, pY.sy + 6);
       ctx.textAlign = "left"; ctx.fillStyle = muted; ctx.font = "11px ui-monospace, monospace";
-      ctx.fillText("Z: Coalition Win % • Hover surface or drag to rotate", 14, 22);
+      const sliceNote = currentSlice === "coord_res" ? `Slice fixed at ΔElo ${curDElo >= 0 ? "+" : ""}${curDElo}`
+        : currentSlice === "elo_coord" ? `Slice fixed at ${curRes.toFixed(2)}× ships`
+        : `Slice fixed at ${Math.round(curCoord * 100)}% coord`;
+      ctx.fillText(`Z: Win % • ${sliceNote} • Hover or drag`, 14, 22);
 
-      // Selected pin floating callout pill (always visible)
-      drawCallout(
-        ctx,
-        pinTop.sx,
-        pinTop.sy,
-        `Selected: ${(bz * 100).toFixed(1)}% Win`,
-        `${xValStr}  •  ${yValStr}`,
-        W,
-        H,
-        heatColor(bz),
-        false
-      );
+      drawCallout(ctx, pinTop.sx, pinTop.sy, `Selected: ${(bz * 100).toFixed(1)}% Win`, `${xValStr}  •  ${yValStr}`, W, H, heatColor(bz), false);
 
-      // Interactive hover point highlight & floating tooltip
       if (hover3D && !dragging) {
         const hpBase = projectOrtho(hover3D.u * 2 - 1, hover3D.v * 2 - 1, 0, W, H);
         const hpTop = projectOrtho(hover3D.u * 2 - 1, hover3D.v * 2 - 1, hover3D.z, W, H);
-        ctx.save();
-        ctx.strokeStyle = cssVar("--primary");
-        ctx.lineWidth = 1.6;
-        ctx.setLineDash([4, 3]);
-        ctx.beginPath(); ctx.moveTo(hpBase.sx, hpBase.sy); ctx.lineTo(hpTop.sx, hpTop.sy); ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.beginPath(); ctx.arc(hpTop.sx, hpTop.sy, 5.5, 0, Math.PI * 2);
-        ctx.fillStyle = cssVar("--primary"); ctx.fill();
-        ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1.8; ctx.stroke();
-        ctx.restore();
+        ctx.save(); ctx.strokeStyle = cssVar("--primary"); ctx.lineWidth = 1.6; ctx.setLineDash([4, 3]);
+        ctx.beginPath(); ctx.moveTo(hpBase.sx, hpBase.sy); ctx.lineTo(hpTop.sx, hpTop.sy); ctx.stroke(); ctx.setLineDash([]);
+        ctx.beginPath(); ctx.arc(hpTop.sx, hpTop.sy, 5.5, 0, Math.PI * 2); ctx.fillStyle = cssVar("--primary"); ctx.fill();
+        ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1.8; ctx.stroke(); ctx.restore();
 
         let hxStr, hyStr;
-        if (currentSlice === "elo_coord") {
-          hxStr = `ΔElo +${Math.round(150 + hover3D.u * 650)}`;
-          hyStr = `Coord ${Math.round(hover3D.v * 100)}%`;
-        } else if (currentSlice === "elo_res") {
-          hxStr = `ΔElo +${Math.round(150 + hover3D.u * 650)}`;
-          hyStr = `Ships ${(0.5 * Math.pow(16.0, hover3D.v)).toFixed(2)}×`;
-        } else {
-          hxStr = `Coord ${Math.round(hover3D.u * 100)}%`;
-          hyStr = `Ships ${(0.5 * Math.pow(16.0, hover3D.v)).toFixed(2)}×`;
-        }
-        drawCallout(
-          ctx,
-          hpTop.sx,
-          hpTop.sy,
-          `Hover: ${(hover3D.z * 100).toFixed(1)}% Win`,
-          `${hxStr}  •  ${hyStr}`,
-          W,
-          H,
-          cssVar("--primary"),
-          true
-        );
+        if (currentSlice === "elo_coord") { hxStr = `ΔElo +${Math.round(150 + hover3D.u * 650)}`; hyStr = `Coord ${Math.round(hover3D.v * 100)}%`; }
+        else if (currentSlice === "elo_res") { hxStr = `ΔElo +${Math.round(150 + hover3D.u * 650)}`; hyStr = `Ships ${(0.5 * Math.pow(16.0, hover3D.v)).toFixed(2)}×`; }
+        else { hxStr = `Coord ${Math.round(hover3D.u * 100)}%`; hyStr = `Ships ${(0.5 * Math.pow(16.0, hover3D.v)).toFixed(2)}×`; }
+        drawCallout(ctx, hpTop.sx, hpTop.sy, `Hover: ${(hover3D.z * 100).toFixed(1)}% Win`, `${hxStr}  •  ${hyStr}`, W, H, cssVar("--primary"), true);
       }
-    }
-
-    function drawCallout(ctx, ax, ay, title, subtitle, W, H, accent, preferBelow) {
-      ctx.save();
-      ctx.font = "bold 11.5px ui-monospace, monospace";
-      const w1 = ctx.measureText(title).width;
-      ctx.font = "10.5px ui-monospace, monospace";
-      const w2 = ctx.measureText(subtitle).width;
-      const boxW = Math.max(w1, w2) + 20;
-      const boxH = 38;
-      let bx = ax + 14;
-      let by = preferBelow ? ay + 14 : ay - boxH - 14;
-      if (bx + boxW > W - 8) bx = ax - boxW - 14;
-      if (bx < 8) bx = 8;
-      if (by < 8) by = ay + 14;
-      if (by + boxH > H - 8) by = ay - boxH - 14;
-      by = Math.max(8, Math.min(H - boxH - 8, by));
-
-      // Leader line
-      ctx.strokeStyle = accent;
-      ctx.lineWidth = 1.4;
-      ctx.beginPath();
-      ctx.moveTo(ax, ay);
-      ctx.lineTo(bx + (bx > ax ? 0 : boxW), by + boxH / 2);
-      ctx.stroke();
-
-      // Rounded pill card
-      ctx.shadowColor = "rgba(0,0,0,0.35)";
-      ctx.shadowBlur = 8;
-      ctx.fillStyle = cssVar("--card");
-      ctx.strokeStyle = accent;
-      ctx.lineWidth = 1.6;
-      ctx.beginPath();
-      ctx.roundRect(bx, by, boxW, boxH, 7);
-      ctx.fill();
-      ctx.shadowBlur = 0;
-      ctx.stroke();
-
-      // Text
-      ctx.textAlign = "left";
-      ctx.fillStyle = cssVar("--foreground");
-      ctx.font = "bold 11.5px ui-monospace, monospace";
-      ctx.fillText(title, bx + 10, by + 15);
-      ctx.fillStyle = cssVar("--muted-foreground");
-      ctx.font = "10.5px ui-monospace, monospace";
-      ctx.fillText(subtitle, bx + 10, by + 30);
-      ctx.restore();
     }
 
     function updateCalculator() {
@@ -692,7 +644,7 @@
 
       document.getElementById("val-boss-elo").textContent = boss;
       document.getElementById("val-ally-elo").textContent = ally;
-      const cName = coordPct <= 10 ? "FFA" : coordPct <= 35 ? "Truce" : coordPct <= 60 ? "Lag/Noisy" : coordPct <= 85 ? "5-Tick Lag" : "Zero-Lat Sync";
+      const cName = coordPct <= 10 ? "FFA" : coordPct <= 35 ? "Truce" : coordPct <= 60 ? "Lag/Noisy" : coordPct <= 85 ? "5-Tick Lag" : "Sync";
       document.getElementById("val-coord").textContent = `${coordPct}% (${cName})`;
       document.getElementById("val-res").textContent = `${res.toFixed(2)}×`;
       document.getElementById("out-delo").textContent = (dElo >= 0 ? "+" : "") + dElo + " Elo";
@@ -702,20 +654,20 @@
       const reg = document.getElementById("out-regime"), hint = document.getElementById("out-hint");
       if (dElo <= 0) {
         outP.style.color = "var(--success)"; bar.style.background = "var(--success)";
-        reg.textContent = "Regime: Allies Equal or Stronger"; reg.style.color = "var(--success)";
-        hint.textContent = `Each ally matches or outranks the Boss (${dElo} Elo gap) — the 3-player group overwhelms the Boss regardless of coordination.`;
+        reg.textContent = "Allies Equal or Stronger"; reg.style.color = "var(--success)";
+        hint.textContent = "Allies match or outrank the Boss individually.";
       } else if (p < 0.20) {
         outP.style.color = "var(--error)"; bar.style.background = "var(--error)";
-        reg.textContent = "Regime: Boss Intelligence Wall"; reg.style.color = "var(--error)";
-        hint.textContent = `Boss dominates despite the 3v1 (+${dElo} Elo gap). Allies need stronger base play or tighter focus-fire.`;
+        reg.textContent = "Boss Intelligence Wall"; reg.style.color = "var(--error)";
+        hint.textContent = "Boss dominates despite the 3v1.";
       } else if (p < 0.65) {
         outP.style.color = "var(--warning)"; bar.style.background = "var(--warning)";
-        reg.textContent = "Regime: Contested Phase Boundary"; reg.style.color = "var(--warning)";
-        hint.textContent = `Knife-edge near 50/50 break-even — small changes in comm latency or starting ships flip who wins.`;
+        reg.textContent = "Contested 50/50 Zone"; reg.style.color = "var(--warning)";
+        hint.textContent = "Small shifts in sync or ships flip the outcome.";
       } else {
         outP.style.color = "var(--success)"; bar.style.background = "var(--success)";
-        reg.textContent = "Regime: Coalition Dominance"; reg.style.color = "var(--success)";
-        hint.textContent = `Three weaker allies reliably overcome the +${dElo} Elo deficit through synchronized pressure.`;
+        reg.textContent = "Coalition Dominance"; reg.style.color = "var(--success)";
+        hint.textContent = `Synchronized pressure overcomes +${dElo} Elo.`;
       }
       draw3DSurface();
     }
@@ -728,23 +680,16 @@
       return dElo < allies[0].dElo ? padT + 8 : padT + (allies.length - 0.5) * ch;
     }
 
-    let hoverCoordCell = null;
-    let hoverResCell = null;
-    let last3DPts = [];
-    let hover3D = null;
-
     function drawCoordHeatmap() {
       const canvas = document.getElementById("canvas-coord-map");
       if (!canvas) return;
-      const ctx = canvas.getContext("2d");
-      const W = canvas.width, H = canvas.height;
+      const ctx = canvas.getContext("2d"), W = canvas.width, H = canvas.height;
       const fg = cssVar("--foreground"), muted = cssVar("--muted-foreground"), bg = cssVar("--background");
       ctx.clearRect(0, 0, W, H); ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
 
       const padL = 112, padR = 16, padT = 26, padB = 46;
       const gw = W - padL - padR, gh = H - padT - padB;
-      const rows = COORD_ALLIES.length, cols = COORD_COLS.length;
-      const cw = gw / cols, ch = gh / rows;
+      const rows = COORD_ALLIES.length, cols = COORD_COLS.length, cw = gw / cols, ch = gh / rows;
 
       for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
         const val = COORD_GRID[r][c], x = padL + c * cw, y = padT + r * ch;
@@ -763,8 +708,7 @@
       for (let i = 0; i <= 40; i++) {
         const cScore = i / 40;
         const dElo50 = -100 * (MODEL.b0 + MODEL.bCoord * cScore + MODEL.bRes * Math.log2(3.0)) / MODEL.bElo;
-        const y = mapDEloToY(dElo50, COORD_ALLIES, padT, ch);
-        const x = padL + (cScore * (cols - 1) + 0.5) * cw;
+        const y = mapDEloToY(dElo50, COORD_ALLIES, padT, ch), x = padL + (cScore * (cols - 1) + 0.5) * cw;
         i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
       }
       ctx.stroke(); ctx.setLineDash([]);
@@ -778,31 +722,19 @@
       ctx.textAlign = "center"; ctx.fillStyle = muted; ctx.font = "10.5px ui-monospace, monospace";
       for (let c = 0; c < cols; c++) ctx.fillText(COORD_COLS[c], padL + (c + 0.5) * cw, H - 16);
       ctx.fillStyle = fg; ctx.font = "bold 10.5px sans-serif";
-      ctx.fillText("Dashed white line = fitted 50/50 break-even boundary", padL + gw / 2, 16);
+      ctx.fillText("Dashed white line = 50% break-even", padL + gw / 2, 16);
 
       if (hoverCoordCell) {
-        const { r, c } = hoverCoordCell;
-        const obs = COORD_GRID[r][c];
+        const { r, c } = hoverCoordCell, obs = COORD_GRID[r][c];
         const mod = (predictProb(COORD_ALLIES[r].dElo, c / 4, 3.0) * 100).toFixed(1);
-        drawCallout(
-          ctx,
-          padL + (c + 0.5) * cw,
-          padT + (r + 0.5) * ch,
-          `Obs: ${obs}% (${Math.round(obs/25)}/4) • Fit: ${mod}%`,
-          `ΔElo +${COORD_ALLIES[r].dElo} • ${COORD_COLS[c]}`,
-          W,
-          H,
-          cssVar("--primary"),
-          false
-        );
+        drawCallout(ctx, padL + (c + 0.5) * cw, padT + (r + 0.5) * ch, `Obs: ${obs}% (${Math.round(obs/25)}/4) • Fit: ${mod}%`, `ΔElo +${COORD_ALLIES[r].dElo} • ${COORD_COLS[c]}`, W, H, cssVar("--primary"), false);
       }
     }
 
     function drawResHeatmap() {
       const canvas = document.getElementById("canvas-res-map");
       if (!canvas) return;
-      const ctx = canvas.getContext("2d");
-      const W = canvas.width, H = canvas.height;
+      const ctx = canvas.getContext("2d"), W = canvas.width, H = canvas.height;
       const fg = cssVar("--foreground"), muted = cssVar("--muted-foreground"), bg = cssVar("--background");
       ctx.clearRect(0, 0, W, H); ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
 
@@ -810,8 +742,7 @@
       const ratios = [6.0, 3.0, 1.5, 1.0, 0.6];
       const padL = 104, padR = 16, padT = 26, padB = 46;
       const gw = W - padL - padR, gh = H - padT - padB;
-      const rows = RES_ALLIES.length, cols = RES_COLS.length;
-      const cw = gw / cols, ch = gh / rows;
+      const rows = RES_ALLIES.length, cols = RES_COLS.length, cw = gw / cols, ch = gh / rows;
 
       for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
         const val = grid[r][c], x = padL + c * cw, y = padT + r * ch;
@@ -837,26 +768,12 @@
         ctx.fillText(RES_COLS[c].split(" ").slice(1).join(" "), padL + (c + 0.5) * cw, H - 9);
       }
       ctx.fillStyle = fg; ctx.font = "bold 10.5px sans-serif";
-      ctx.fillText(
-        currentResMode === "ff" ? "100% Zero-Lat Focus-Fire: Starting ships amplify coordination" : "0% Uncoordinated FFA: Even 6x starting ships = 0% wins",
-        padL + gw / 2, 16
-      );
+      ctx.fillText(currentResMode === "ff" ? "100% Zero-Lat Sync Focus-Fire" : "0% Uncoordinated FFA", padL + gw / 2, 16);
 
       if (hoverResCell) {
-        const { r, c } = hoverResCell;
-        const obs = grid[r][c];
+        const { r, c } = hoverResCell, obs = grid[r][c];
         const mod = (predictProb(RES_ALLIES[r].dElo, currentResMode === "ff" ? 1.0 : 0.0, ratios[c]) * 100).toFixed(1);
-        drawCallout(
-          ctx,
-          padL + (c + 0.5) * cw,
-          padT + (r + 0.5) * ch,
-          `Obs: ${obs}% (${Math.round(obs/25)}/4) • Fit: ${mod}%`,
-          `ΔElo +${RES_ALLIES[r].dElo} • Ships ${ratios[c].toFixed(1)}×`,
-          W,
-          H,
-          cssVar("--primary"),
-          false
-        );
+        drawCallout(ctx, padL + (c + 0.5) * cw, padT + (r + 0.5) * ch, `Obs: ${obs}% (${Math.round(obs/25)}/4) • Fit: ${mod}%`, `ΔElo +${RES_ALLIES[r].dElo} • Ships ${ratios[c].toFixed(1)}×`, W, H, cssVar("--primary"), false);
       }
     }
 
@@ -885,8 +802,7 @@
     document.getElementById("res-mode-ffa").addEventListener("click", () => setResBtn("ffa"));
 
     document.querySelectorAll(".slice-btn").forEach(btn => btn.addEventListener("click", () => {
-      currentSlice = btn.dataset.slice;
-      hover3D = null;
+      currentSlice = btn.dataset.slice; hover3D = null;
       document.querySelectorAll(".slice-btn").forEach(b => {
         b.className = b === btn
           ? "slice-btn px-2.5 py-1 rounded-md font-semibold border border-[var(--primary)] bg-[var(--primary)] text-[var(--primary-foreground)] cursor-pointer"
@@ -896,7 +812,6 @@
     }));
 
     const c3d = document.getElementById("canvas-3d");
-    let dragging = false, lx = 0, ly = 0;
     c3d.addEventListener("pointerdown", e => { dragging = true; hover3D = null; lx = e.clientX; ly = e.clientY; c3d.setPointerCapture(e.pointerId); draw3DSurface(); });
     c3d.addEventListener("pointerup", () => { dragging = false; });
     c3d.addEventListener("pointerleave", () => { if (!dragging && hover3D) { hover3D = null; draw3DSurface(); } });
@@ -919,7 +834,6 @@
       if (best !== hover3D) { hover3D = best; draw3DSurface(); }
     });
 
-    // 2D heatmap hover listeners
     const bindHeatmapHover = (canvasId, padL, padR, padT, padB, rows, cols, onChange) => {
       const cv = document.getElementById(canvasId);
       cv.addEventListener("pointerleave", () => onChange(null));
@@ -932,12 +846,8 @@
         onChange(r >= 0 && r < rows && c >= 0 && c < cols ? { r, c } : null);
       });
     };
-    bindHeatmapHover("canvas-coord-map", 112, 16, 26, 46, COORD_ALLIES.length, COORD_COLS.length, cell => {
-      hoverCoordCell = cell; drawCoordHeatmap();
-    });
-    bindHeatmapHover("canvas-res-map", 104, 16, 26, 46, RES_ALLIES.length, RES_COLS.length, cell => {
-      hoverResCell = cell; drawResHeatmap();
-    });
+    bindHeatmapHover("canvas-coord-map", 112, 16, 26, 46, COORD_ALLIES.length, COORD_COLS.length, cell => { hoverCoordCell = cell; drawCoordHeatmap(); });
+    bindHeatmapHover("canvas-res-map", 104, 16, 26, 46, RES_ALLIES.length, RES_COLS.length, cell => { hoverResCell = cell; drawResHeatmap(); });
 
     ["sl-boss-elo", "sl-ally-elo", "sl-coord", "sl-res"].forEach(id =>
       document.getElementById(id).addEventListener("input", updateCalculator)
