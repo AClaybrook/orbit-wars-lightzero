@@ -61,6 +61,116 @@ from galcon.transformer_bot import (
 MAX_REDIR_FLEETS = 8
 
 
+class DMLAdamW(torch.optim.Optimizer):
+    """DirectML-native decoupled AdamW avoiding ``aten::lerp_`` CPU fallback warnings."""
+
+    def __init__(
+        self,
+        params,
+        lr: float = 1e-3,
+        betas: Tuple[float, float] = (0.9, 0.999),
+        eps: float = 1e-8,
+        weight_decay: float = 1e-2,
+    ) -> None:
+        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        for group in self.param_groups:
+            lr = group["lr"]
+            b1, b2 = group["betas"]
+            eps = group["eps"]
+            wd = group["weight_decay"]
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                grad = p.grad
+                st = self.state[p]
+                if not st:
+                    st["step"] = 0
+                    st["m"] = torch.zeros_like(p)
+                    st["v"] = torch.zeros_like(p)
+                st["step"] += 1
+                m, v = st["m"], st["v"]
+                if wd != 0.0:
+                    p.mul_(1.0 - lr * wd)
+                m.mul_(b1).add_(grad, alpha=1.0 - b1)
+                v.mul_(b2).addcmul_(grad, grad, value=1.0 - b2)
+                bc1 = 1.0 - b1 ** st["step"]
+                bc2 = 1.0 - b2 ** st["step"]
+                denom = (v.sqrt() / math.sqrt(bc2)).add_(eps)
+                p.addcdiv_(m, denom, value=-lr / bc1)
+        return loss
+
+
+def resolve_train_device(device_arg: str = "cpu") -> Tuple[torch.device, bool]:
+    """Resolve training device (``cpu``, ``dml``, ``cuda``, or ``auto``) and return ``(device, is_dml)``."""
+    req = (device_arg or "cpu").strip().lower()
+    if req == "cpu":
+        return torch.device("cpu"), False
+    if req == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("Requested --device cuda, but CUDA is not available.")
+        return torch.device("cuda"), False
+    if req == "dml":
+        import torch_directml
+
+        if torch_directml.device_count() <= 0:
+            raise RuntimeError("Requested --device dml, but no DirectML GPU was detected.")
+        return torch_directml.device(), True
+    if req == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda"), False
+        try:
+            import torch_directml
+
+            if torch_directml.device_count() > 0:
+                return torch_directml.device(), True
+        except Exception:
+            pass
+        return torch.device("cpu"), False
+    raise ValueError(f"Unsupported device: {device_arg!r}")
+
+
+def _build_optimizer(params, *, lr: float = 1e-3, weight_decay: float = 1e-4, use_dml: bool = False):
+    if use_dml:
+        return DMLAdamW(params, lr=lr, weight_decay=weight_decay)
+    return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+
+
+def _cpu_state_dict(model: nn.Module) -> Dict[str, torch.Tensor]:
+    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+
+def _stable_bce_with_logits(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    pos_weight: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Numerically stable elementwise BCE-with-logits avoiding DirectML's unsupported ``aten::log_sigmoid_forward``."""
+    max_val = logits.clamp_min(0.0)
+    log_term = torch.log1p(torch.exp(-logits.abs()))
+    if pos_weight is None:
+        return max_val - logits * targets + log_term
+    # Equivalent to PyTorch's pos_weight BCE: (1 - y) * x + (1 + (pw - 1) * y) * (log(1 + exp(-|x|)) + max(-x, 0))
+    log_weight = (pos_weight - 1.0) * targets + 1.0
+    return (1.0 - targets) * logits + log_weight * (log_term + (-logits).clamp_min(0.0))
+
+
+def _bernoulli_log_prob_and_entropy(logits: torch.Tensor, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """DirectML-native Bernoulli ``(log_prob, entropy)`` without ``aten::log_sigmoid_forward`` CPU fallback."""
+    softplus = logits.clamp_min(0.0) + torch.log1p(torch.exp(-logits.abs()))
+    log_prob = logits * actions - softplus
+    probs = torch.sigmoid(logits)
+    entropy = softplus - logits * probs
+    return log_prob, entropy
+
+
 def _sample_map_config(rng: random.Random) -> Tuple[int, float, float]:
     """Mix compact tactical maps (8-12 planets) and classic 14-22 planet Galcon maps."""
     if rng.random() < 0.40:
@@ -2565,30 +2675,46 @@ def _gen4_multisend_loss(
     ms_logits, ms_frac_pred = model.predict_multi_send(h, ef)
 
     edge_valid = om.unsqueeze(-1) & le
-    if edge_valid.any():
-        fl = ms_logits[edge_valid]
-        ft = ms_tar[edge_valid]
-        pw = torch.tensor(pos_weight, device=fl.device, dtype=fl.dtype)
-        ms_bce = F.binary_cross_entropy_with_logits(fl, ft, pos_weight=pw)
-        preds = (torch.sigmoid(fl) >= 0.45).float()
-        pos_m = ft > 0.5
-        rec = float((preds[pos_m] == 1.0).float().mean().item()) if pos_m.any() else 0.0
-        prec = float((ft[preds > 0.5] > 0.5).float().mean().item()) if (preds > 0.5).any() else 0.0
+    ev_f = edge_valid.float()
+    ev_sum = ev_f.sum()
+    if float(ev_sum.item()) > 0.0:
+        pw = torch.tensor(pos_weight, device=ms_logits.device, dtype=ms_logits.dtype)
+        bce_all = _stable_bce_with_logits(ms_logits, ms_tar, pos_weight=pw)
+        ms_bce = (bce_all * ev_f).sum() / ev_sum.clamp_min(1.0)
+        with torch.no_grad():
+            preds = (torch.sigmoid(ms_logits) >= 0.45).float() * ev_f
+            pos_f = (ms_tar > 0.5).float() * ev_f
+            pos_tot = float(pos_f.sum().item())
+            pred_tot = float(preds.sum().item())
+            tp = float((preds * pos_f).sum().item())
+            rec = tp / pos_tot if pos_tot > 0.0 else 0.0
+            prec = tp / pred_tot if pred_tot > 0.0 else 0.0
     else:
         ms_bce = ms_logits.sum() * 0.0
         rec = prec = 0.0
 
-    pos_edges = edge_valid & (ms_tar > 0.5) & (ms_fr > 0.01)
-    if pos_edges.any():
-        frac_loss = F.smooth_l1_loss(ms_frac_pred[pos_edges], ms_fr[pos_edges])
+    pos_edges_f = (edge_valid & (ms_tar > 0.5) & (ms_fr > 0.01)).float()
+    pe_sum = pos_edges_f.sum()
+    if float(pe_sum.item()) > 0.0:
+        frac_loss = (F.smooth_l1_loss(ms_frac_pred, ms_fr, reduction="none") * pos_edges_f).sum() / pe_sum.clamp_min(1.0)
     else:
         frac_loss = ms_frac_pred.sum() * 0.0
 
     v_loss = F.mse_loss(val, vtar)
     vsign = float(((val >= 0) == (vtar >= 0)).float().mean().item())
-    if pm.any():
-        aux_loss = F.cross_entropy(aux_pred[pm, :3], aux_own[pm]) + 0.5 * F.smooth_l1_loss(aux_pred[pm, 3], aux_shp[pm])
-        aux_acc = float((aux_pred[pm, :3].argmax(dim=-1) == aux_own[pm]).float().mean().item())
+    pm_f = pm.float()
+    pm_sum = pm_f.sum()
+    if float(pm_sum.item()) > 0.0:
+        aux_ce = F.cross_entropy(
+            aux_pred[..., :3].reshape(-1, 3),
+            aux_own.reshape(-1),
+            reduction="none",
+        ).reshape_as(pm_f)
+        aux_own_loss = (aux_ce * pm_f).sum() / pm_sum.clamp_min(1.0)
+        aux_shp_loss = (F.smooth_l1_loss(aux_pred[..., 3], aux_shp, reduction="none") * pm_f).sum() / pm_sum.clamp_min(1.0)
+        aux_loss = aux_own_loss + 0.5 * aux_shp_loss
+        with torch.no_grad():
+            aux_acc = float(((aux_pred[..., :3].argmax(dim=-1) == aux_own).float() * pm_f).sum().item() / pm_sum.clamp_min(1.0).item())
     else:
         aux_loss = aux_pred.sum() * 0.0
         aux_acc = 0.0
@@ -2609,12 +2735,14 @@ def train_gen4_multisend_supervised(
     seed: int = 42,
     label: str = "Gen4-MultiSend-EI",
     train_threads: int = 2,
+    device: str = "cpu",
 ) -> Path:
     """Warm-start ``GalconGen4Transformer`` from Gen 3 weights and train the native multi-send head in Canonical D4."""
     torch.set_num_threads(max(1, int(train_threads)))
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
+    train_dev, use_dml = resolve_train_device(device)
 
     n = len(data["val_targets"])
     perm = np.random.permutation(n)
@@ -2663,14 +2791,18 @@ def train_gen4_multisend_supervised(
         feature_version=int(cfg.get("feature_version", 2)),
     )
     missing, _ = model.load_state_dict(ckpt["model_state_dict"], strict=False)
-    print(f"  [{label}] Warm-started from {resume_from.name} (new multi-send params: {len(missing)} tensors)", flush=True)
+    model = model.to(train_dev)
+    dev_tag = "dml" if use_dml else str(train_dev)
+    print(f"  [{label}] Warm-started from {resume_from.name} (new multi-send params: {len(missing)} tensors, device={dev_tag})", flush=True)
 
     # Give the newly initialized multi-send head 3x higher LR than the warm-started trunk
     ms_params = [p for k, p in model.named_parameters() if k.startswith("ms_")]
     base_params = [p for k, p in model.named_parameters() if not k.startswith("ms_")]
-    opt = torch.optim.AdamW(
+    opt = _build_optimizer(
         [{"params": base_params, "lr": lr * 0.45}, {"params": ms_params, "lr": lr * 2.5}],
+        lr=lr,
         weight_decay=1e-4,
+        use_dml=use_dml,
     )
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs), eta_min=lr * 0.08)
     best_bce = float("inf")
@@ -2680,7 +2812,8 @@ def train_gen4_multisend_supervised(
     for ep in range(1, epochs + 1):
         model.train()
         r_iter = iter(redir_loader) if redir_loader is not None else None
-        for b_idx, (pf, tf, ef, le, om, pm, mst, msf, vt, ao, ashp) in enumerate(tr_loader):
+        for b_idx, batch in enumerate(tr_loader):
+            pf, tf, ef, le, om, pm, mst, msf, vt, ao, ashp = (t.to(train_dev) for t in batch)
             opt.zero_grad(set_to_none=True)
             loss, _ = _gen4_multisend_loss(model, pf, tf, ef, le, om, pm, mst, msf, vt, ao, ashp)
             if r_iter is not None and (b_idx % 4 == 0):
@@ -2689,18 +2822,19 @@ def train_gen4_multisend_supervised(
                 except StopIteration:
                     r_iter = iter(redir_loader)
                     rb = next(r_iter)
-                rpf, rtf, ref, rpm, rcur, rfeat, rtar, rmsk = rb
+                rpf, rtf, ref, rpm, rcur, rfeat, rtar, rmsk = (t.to(train_dev) for t in rb)
                 rloss, _, _ = _redir_batch_loss(model, rpf, rtf, ref, rpm, rcur, rfeat, rtar, rmsk)
                 loss = loss + 0.30 * rloss
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0, foreach=not use_dml)
             opt.step()
         sched.step()
 
         model.eval()
         vm = []
         with torch.no_grad():
-            for pf, tf, ef, le, om, pm, mst, msf, vt, ao, ashp in val_loader:
+            for batch in val_loader:
+                pf, tf, ef, le, om, pm, mst, msf, vt, ao, ashp = (t.to(train_dev) for t in batch)
                 _, m = _gen4_multisend_loss(model, pf, tf, ef, le, om, pm, mst, msf, vt, ao, ashp)
                 vm.append(m)
         v_bce = float(np.mean([x["bce"] for x in vm]))
@@ -2709,7 +2843,7 @@ def train_gen4_multisend_supervised(
             torch.save(
                 {
                     "model_config": model.config,
-                    "model_state_dict": model.state_dict(),
+                    "model_state_dict": _cpu_state_dict(model),
                     "has_trained_redir": True,
                     "has_trained_multi_send": True,
                     "use_canonical_d4": True,
@@ -3051,7 +3185,7 @@ def _gen4_ppo_rollout_worker(args_tuple):
     buf: Dict[str, List] = {
         k: [] for k in ("pf", "tf", "ef", "le", "om", "pm", "acts", "f_acts", "old_lp", "adv", "ret", "aux_o", "aux_s")
     }
-    wins = sp_wins = sp_eps = bot_wins = bot_eps = boss_wins = boss_eps = split_pairs = total_eps = 0
+    wins = sp_wins = sp_eps = bot_wins = bot_eps = boss_wins = boss_eps = boss2_wins = boss2_eps = split_pairs = total_eps = 0
 
     try:
         if lua_opp_str:
@@ -3067,11 +3201,17 @@ def _gen4_ppo_rollout_worker(args_tuple):
             opp_snap = snap_map[opp_idx] if opp_kind == "snap" else None
             opp_bot = None
             is_boss = False
+            is_boss2 = False
             if opp_kind == "boss":
                 opp_bot = lua_opp
                 is_boss = True
             elif opp_kind == "boss2":
-                opp_bot = lua_opp2 if lua_opp2 is not None else _make_sparring_bot(w_rng, "tactical")
+                if lua_opp2 is not None:
+                    opp_bot = lua_opp2
+                    is_boss = True
+                    is_boss2 = True
+                else:
+                    opp_bot = _make_sparring_bot(w_rng, "tactical")
             elif opp_kind != "snap":
                 opp_bot = _make_sparring_bot(w_rng, opp_kind)
 
@@ -3090,7 +3230,10 @@ def _gen4_ppo_rollout_worker(args_tuple):
             total_eps += 2
             won_a, won_b = ep_a[5], ep_b[5]
             wins += won_a + won_b
-            if is_boss:
+            if is_boss2:
+                boss2_eps += 2
+                boss2_wins += won_a + won_b
+            elif is_boss:
                 boss_eps += 2
                 boss_wins += won_a + won_b
             elif opp_snap is not None:
@@ -3107,7 +3250,7 @@ def _gen4_ppo_rollout_worker(args_tuple):
             lua_opp2.close()
 
     arr_buf = {k: np.stack(v) for k, v in buf.items()} if buf["ret"] else {}
-    return arr_buf, wins, sp_wins, sp_eps, bot_wins, bot_eps, boss_wins, boss_eps, split_pairs, total_eps
+    return arr_buf, wins, sp_wins, sp_eps, bot_wins, bot_eps, boss_wins, boss_eps, boss2_wins, boss2_eps, split_pairs, total_eps
 
 
 def rl_mirror_league_ppo_gen4(
@@ -3133,8 +3276,9 @@ def rl_mirror_league_ppo_gen4(
     seed: int = 34000,
     train_threads: int = 2,
     workers: int = 1,
+    device: str = "cpu",
 ) -> Path:
-    """Gen 4 Native Multi-Send Paired-Seed Mirror League PPO in 1x Canonical D4 space.
+    """Gen 4/6 Native Multi-Send Paired-Seed Mirror League PPO in 1x Canonical D4 space.
 
     Samples independent Bernoulli multi-edge actions + continuous send fractions directly on
     canonicalized coordinates, optimizing joint Bernoulli+Normal PPO with Moving EMA Teacher KL,
@@ -3144,6 +3288,7 @@ def rl_mirror_league_ppo_gen4(
     torch.manual_seed(seed)
     np.random.seed(seed)
     rng = random.Random(seed)
+    train_dev, use_dml = resolve_train_device(device)
 
     lua_opp = None
     if lua_opp_path is not None and lua_opp_path.is_file():
@@ -3152,14 +3297,15 @@ def rl_mirror_league_ppo_gen4(
         lua_opp = GalconLuaBotBridge(lua_opp_path)
     has_lua2 = lua_opp2_path is not None and lua_opp2_path.is_file()
     lua_opp2 = None
-    if has_lua2 and workers <= 1:
+    if has_lua2:
         from galcon.lua_bridge import GalconLuaBotBridge
 
         lua_opp2 = GalconLuaBotBridge(lua_opp2_path)
 
-    policy = _load_gen4_policy_from_ckpt(ckpt_path)
+    cpu_policy = _load_gen4_policy_from_ckpt(ckpt_path)
+    policy = copy.deepcopy(cpu_policy).to(train_dev)
 
-    ema_teacher = copy.deepcopy(policy).eval()
+    ema_teacher = copy.deepcopy(cpu_policy).to(train_dev).eval()
     for p in ema_teacher.parameters():
         p.requires_grad_(False)
 
@@ -3169,11 +3315,11 @@ def rl_mirror_league_ppo_gen4(
         for p in a_m.parameters():
             p.requires_grad_(False)
         snapshot_pool.append(a_m)
-    snapshot_pool.append(copy.deepcopy(policy).eval())
+    snapshot_pool.append(copy.deepcopy(cpu_policy).eval())
     for p in snapshot_pool[-1].parameters():
         p.requires_grad_(False)
 
-    opt = torch.optim.AdamW(policy.parameters(), lr=lr, weight_decay=1e-4)
+    opt = _build_optimizer(policy.parameters(), lr=lr, weight_decay=1e-4, use_dml=use_dml)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, iters), eta_min=lr * 0.25)
 
     redir_loader = None
@@ -3191,10 +3337,10 @@ def rl_mirror_league_ppo_gen4(
         redir_loader = DataLoader(rds, batch_size=32, shuffle=True)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    best_state = copy.deepcopy(policy.state_dict())
+    best_state = _cpu_state_dict(policy)
     total_eps = 0
 
-    def quick_gen4_val(model_eval: GalconPlanetTransformer) -> float:
+    def quick_gen4_val(model_eval: GalconPlanetTransformer) -> Tuple[float, int]:
         model_eval.eval()
         anchor_ref = snapshot_pool[0]
         score_g = 0.0
@@ -3202,9 +3348,12 @@ def rl_mirror_league_ppo_gen4(
         std_opps = [
             ("tac", GalconTacticalBot(), 4),
             ("rush", GalconRusherBot(style="all_in"), 4),
+            ("macro", GalconMacroBot(), 4),
             ("anc", anchor_ref, 4),
             ("boss", lua_opp if lua_opp is not None else GalconTacticalBot(), 6),
         ]
+        if lua_opp2 is not None:
+            std_opps.append(("boss2", lua_opp2, 6))
         for oi, (tag, ob, ng) in enumerate(std_opps):
             for k in range(ng):
                 g_rng = random.Random(39000 + oi * 100 + k)
@@ -3240,7 +3389,7 @@ def rl_mirror_league_ppo_gen4(
                 tot_g += 1
                 w_id = s.winner()
                 score_g += 1.0 if w_id == a_p else (0.5 if w_id == 0 else 0.0)
-        return score_g / max(1, tot_g)
+        return score_g / max(1, tot_g), tot_g
 
     tmp_dir_ctx = None
     pool_exec: Optional[ProcessPoolExecutor] = None
@@ -3249,7 +3398,7 @@ def rl_mirror_league_ppo_gen4(
 
     try:
         torch.set_num_threads(1)
-        best_score = quick_gen4_val(policy)
+        best_score, val_games = quick_gen4_val(cpu_policy)
         use_parallel = workers > 1 and pairs_per_iter >= 2
         if use_parallel:
             tmp_dir_ctx = tempfile.TemporaryDirectory(prefix="galcon_gen4_ppo_")
@@ -3262,10 +3411,11 @@ def rl_mirror_league_ppo_gen4(
             n_w = min(int(workers), int(pairs_per_iter))
             pool_exec = ProcessPoolExecutor(max_workers=n_w, mp_context=mp.get_context("spawn"))
 
-        boss_tag = f"+LuaBoss({lua_opp_path.stem})" if lua_opp is not None else ""
+        boss_tag = f"+LuaBoss({lua_opp_path.stem}" + (f"+{lua_opp2_path.stem})" if has_lua2 else ")") if lua_opp is not None else ""
         par_tag = f" x{min(int(workers), int(pairs_per_iter))}w" if use_parallel else ""
+        dev_tag = " dml" if use_dml else (f" {train_dev}" if train_dev.type != "cpu" else "")
         print(
-            f"[Galcon Gen4 Multi-Send Mirror PPO{boss_tag}{par_tag}] Start 26g std+large val score = {100*best_score:.1f}% (pool={len(snapshot_pool)})",
+            f"[Galcon Gen4 Multi-Send Mirror PPO{boss_tag}{par_tag}{dev_tag}] Start {val_games}g std+large val score = {100*best_score:.1f}% (pool={len(snapshot_pool)})",
             flush=True,
         )
         t0 = time.time()
@@ -3275,24 +3425,39 @@ def rl_mirror_league_ppo_gen4(
 
         for it in range(1, iters + 1):
             torch.set_num_threads(1)
-            policy.eval()
+            cpu_policy.eval()
 
             pair_jobs = []
             for k in range(pairs_per_iter):
                 n_pl, w, h, sym = _sample_gen3_map_config(rng)
                 map_seed = seed + it * 500 + k
                 u = rng.random()
-                if lua_opp is not None:
+                if lua_opp is not None and has_lua2:
+                    # Wave 6 balanced dual-boss mix: 30% Sparky, 20% EsparanBot, 32% snapshots, 18% heuristics
+                    if u < 0.30:
+                        opp_kind, opp_idx = "boss", -1
+                    elif u < 0.50:
+                        opp_kind, opp_idx = "boss2", -1
+                    elif u < 0.82:
+                        opp_idx = 0 if rng.random() < 0.40 else rng.randrange(len(snapshot_pool))
+                        opp_kind = "snap"
+                    elif u < 0.88:
+                        opp_kind, opp_idx = "tactical", -1
+                    elif u < 0.93:
+                        opp_kind, opp_idx = "macro", -1
+                    elif u < 0.97:
+                        opp_kind, opp_idx = "rusher", -1
+                    else:
+                        opp_kind, opp_idx = "classic", -1
+                elif lua_opp is not None:
                     if u < 0.40:
                         opp_kind, opp_idx = "boss", -1
                     elif u < 0.72:
                         opp_idx = 0 if rng.random() < 0.40 else rng.randrange(len(snapshot_pool))
                         opp_kind = "snap"
                     elif u < 0.85:
-                        opp_kind, opp_idx = ("boss2" if has_lua2 else "tactical"), -1
-                    elif u < 0.92:
                         opp_kind, opp_idx = "tactical", -1
-                    elif u < 0.96:
+                    elif u < 0.92:
                         opp_kind, opp_idx = "rusher", -1
                     else:
                         opp_kind, opp_idx = ("classic" if rng.random() < 0.5 else "macro"), -1
@@ -3310,10 +3475,11 @@ def rl_mirror_league_ppo_gen4(
                         opp_kind, opp_idx = "macro", -1
                 pair_jobs.append((map_seed, n_pl, w, h, sym, opp_kind, opp_idx))
 
-            wins = sp_wins = sp_eps = bot_wins = bot_eps = boss_wins = boss_eps = split_pairs = 0
+            wins = sp_wins = sp_eps = bot_wins = bot_eps = boss_wins = boss_eps = boss2_wins = boss2_eps = split_pairs = 0
+            t_roll = time.time()
             if use_parallel and pool_exec is not None and tmp_dir_ctx is not None:
                 pol_p = Path(tmp_dir_ctx.name) / "policy_cur.pt"
-                torch.save({"model_config": policy.config, "model_state_dict": policy.state_dict()}, pol_p)
+                torch.save({"model_config": cpu_policy.config, "model_state_dict": cpu_policy.state_dict()}, pol_p)
                 n_w = min(int(workers), len(pair_jobs))
                 shards = [pair_jobs[w_i::n_w] for w_i in range(n_w)]
                 worker_args = [
@@ -3344,8 +3510,10 @@ def rl_mirror_league_ppo_gen4(
                     bot_eps += o[5]
                     boss_wins += o[6]
                     boss_eps += o[7]
-                    split_pairs += o[8]
-                    total_eps += o[9]
+                    boss2_wins += o[8]
+                    boss2_eps += o[9]
+                    split_pairs += o[10]
+                    total_eps += o[11]
                 adv_arr = merged["adv"].astype(np.float32)
                 adv_arr = (adv_arr - adv_arr.mean()) / (adv_arr.std() + 1e-6)
                 ds = TensorDataset(
@@ -3369,22 +3537,28 @@ def rl_mirror_league_ppo_gen4(
                     opp_snap = snapshot_pool[opp_idx] if opp_kind == "snap" else None
                     opp_bot = None
                     is_boss = False
+                    is_boss2 = False
                     if opp_kind == "boss":
                         opp_bot = lua_opp
                         is_boss = True
                     elif opp_kind == "boss2":
-                        opp_bot = lua_opp2 if lua_opp2 is not None else _make_sparring_bot(rng, "tactical")
+                        if lua_opp2 is not None:
+                            opp_bot = lua_opp2
+                            is_boss = True
+                            is_boss2 = True
+                        else:
+                            opp_bot = _make_sparring_bot(rng, "tactical")
                     elif opp_kind != "snap":
                         opp_bot = _make_sparring_bot(rng, opp_kind)
 
                     ep_a = _run_gen4_ppo_episode(
-                        policy, map_seed, n_pl, w, h, sym, 1, opp_snap, opp_bot,
+                        cpu_policy, map_seed, n_pl, w, h, sym, 1, opp_snap, opp_bot,
                         is_boss=is_boss, gamma=gamma, gae_lam=gae_lam, frac_std=frac_std,
                         draw_penalty=draw_penalty, boss_draw_penalty=boss_draw_penalty,
                         max_sends_per_planet=max_sends_per_planet,
                     )
                     ep_b = _run_gen4_ppo_episode(
-                        policy, map_seed, n_pl, w, h, sym, 2, opp_snap, opp_bot,
+                        cpu_policy, map_seed, n_pl, w, h, sym, 2, opp_snap, opp_bot,
                         is_boss=is_boss, gamma=gamma, gae_lam=gae_lam, frac_std=frac_std,
                         draw_penalty=draw_penalty, boss_draw_penalty=boss_draw_penalty,
                         max_sends_per_planet=max_sends_per_planet,
@@ -3392,7 +3566,10 @@ def rl_mirror_league_ppo_gen4(
                     total_eps += 2
                     won_a, won_b = ep_a[5], ep_b[5]
                     wins += won_a + won_b
-                    if is_boss:
+                    if is_boss2:
+                        boss2_eps += 2
+                        boss2_wins += won_a + won_b
+                    elif is_boss:
                         boss_eps += 2
                         boss_wins += won_a + won_b
                     elif opp_snap is not None:
@@ -3420,7 +3597,9 @@ def rl_mirror_league_ppo_gen4(
                     torch.from_numpy(np.stack(buf["aux_o"])),
                     torch.from_numpy(np.stack(buf["aux_s"])),
                 )
+            roll_sec = time.time() - t_roll
 
+            t_upd = time.time()
             policy.train()
             loader = DataLoader(ds, batch_size=64, shuffle=True)
             ent_coef = 0.004 * (1.0 - 0.45 * (it / max(1, iters)))
@@ -3428,27 +3607,31 @@ def rl_mirror_league_ppo_gen4(
 
             torch.set_num_threads(max(1, int(train_threads)))
             for _ in range(2):
-                for b_idx, (pf, tf, ef, le, om, pm, acts, f_acts, old_lp, adv, ret, aux_o, aux_s) in enumerate(loader):
+                for b_idx, batch in enumerate(loader):
+                    pf, tf, ef, le, om, pm, acts, f_acts, old_lp, adv, ret, aux_o, aux_s = (
+                        t.to(train_dev) for t in batch
+                    )
                     pf, tf, ef, le, om, pm, acts, f_acts, aux_o, aux_s = _trim_batch_n(
                         pf, tf, ef, le, om, pm, acts, f_acts, aux_o, aux_s
                     )
                     _, _, val, aux_pred, h_emb = policy(pf, tf, ef, pm, return_aux=True, return_hidden=True)
                     ms_l, ms_f = policy.predict_multi_send(h_emb, ef)
                     edge_m = om.unsqueeze(-1) & le
+                    edge_f = edge_m.float()
+                    edge_sum = edge_f.sum().clamp_min(1.0)
                     ms_l = ms_l.masked_fill(~edge_m, -1e9)
-                    b_dist = torch.distributions.Bernoulli(logits=ms_l)
-                    new_lp_bern = (b_dist.log_prob(acts) * edge_m.float()).sum(dim=(-1, -2))
+                    bern_lp, ent = _bernoulli_log_prob_and_entropy(ms_l, acts)
+                    new_lp_bern = (bern_lp * edge_f).sum(dim=(-1, -2))
 
                     f_mu = ms_f.clamp(0.06, 0.98)
                     f_dist = torch.distributions.Normal(f_mu, frac_std)
-                    new_lp_frac = (f_dist.log_prob(f_acts) * acts * edge_m.float()).sum(dim=(-1, -2))
+                    new_lp_frac = (f_dist.log_prob(f_acts) * acts * edge_f).sum(dim=(-1, -2))
                     new_lp = new_lp_bern + 0.20 * new_lp_frac
 
                     ratio = torch.exp((new_lp - old_lp).clamp(-8.0, 8.0))
                     surr = torch.min(ratio * adv, torch.clamp(ratio, 0.85, 1.15) * adv).mean()
 
-                    ent = b_dist.entropy()
-                    ent_mean = (ent * edge_m.float()).sum() / edge_m.float().sum().clamp_min(1.0)
+                    ent_mean = (ent * edge_f).sum() / edge_sum
 
                     with torch.no_grad():
                         _, _, _, e_h = ema_teacher(pf, tf, ef, pm, return_hidden=True)
@@ -3456,10 +3639,19 @@ def rl_mirror_league_ppo_gen4(
                         e_p = torch.sigmoid(e_ms_l.masked_fill(~edge_m, -1e9)).clamp(1e-5, 1.0 - 1e-5)
                     cur_p = torch.sigmoid(ms_l).clamp(1e-5, 1.0 - 1e-5)
                     kl = e_p * torch.log(e_p / cur_p) + (1.0 - e_p) * torch.log((1.0 - e_p) / (1.0 - cur_p))
-                    kl_mean = (kl * edge_m.float()).sum() / edge_m.float().sum().clamp_min(1.0)
+                    kl_mean = (kl * edge_f).sum() / edge_sum
 
                     v_loss = F.mse_loss(val, ret)
-                    aux_loss = F.cross_entropy(aux_pred[pm, :3], aux_o[pm]) + 0.5 * F.smooth_l1_loss(aux_pred[pm, 3], aux_s[pm])
+                    pm_f = pm.float()
+                    pm_sum = pm_f.sum().clamp_min(1.0)
+                    aux_ce = F.cross_entropy(
+                        aux_pred[..., :3].reshape(-1, 3),
+                        aux_o.reshape(-1),
+                        reduction="none",
+                    ).reshape_as(pm_f)
+                    aux_own_loss = (aux_ce * pm_f).sum() / pm_sum
+                    aux_shp_loss = (F.smooth_l1_loss(aux_pred[..., 3], aux_s, reduction="none") * pm_f).sum() / pm_sum
+                    aux_loss = aux_own_loss + 0.5 * aux_shp_loss
                     loss = -surr + 0.40 * v_loss + kl_coef * kl_mean - ent_coef * ent_mean + 0.14 * aux_loss
 
                     if r_iter is not None and (b_idx % 4 == 0):
@@ -3468,13 +3660,13 @@ def rl_mirror_league_ppo_gen4(
                         except StopIteration:
                             r_iter = iter(redir_loader)
                             rb = next(r_iter)
-                        rpf, rtf, ref, rpm, rcur, rfeat, rtar, rmsk = rb
+                        rpf, rtf, ref, rpm, rcur, rfeat, rtar, rmsk = (t.to(train_dev) for t in rb)
                         rloss, _, _ = _redir_batch_loss(policy, rpf, rtf, ref, rpm, rcur, rfeat, rtar, rmsk)
                         loss = loss + 0.25 * rloss
 
                     opt.zero_grad(set_to_none=True)
                     loss.backward()
-                    nn.utils.clip_grad_norm_(policy.parameters(), 0.8)
+                    nn.utils.clip_grad_norm_(policy.parameters(), 0.8, foreach=not use_dml)
                     opt.step()
 
             sched.step()
@@ -3484,8 +3676,12 @@ def rl_mirror_league_ppo_gen4(
                 for p_ema, p_cur in zip(ema_teacher.parameters(), policy.parameters()):
                     p_ema.data.mul_(1.0 - ema_tau).add_(p_cur.data, alpha=ema_tau)
 
+            cpu_sd = _cpu_state_dict(policy)
+            cpu_policy.load_state_dict(cpu_sd)
+            upd_sec = time.time() - t_upd
+
             if it % 3 == 0:
-                snap_copy = copy.deepcopy(policy).eval()
+                snap_copy = copy.deepcopy(cpu_policy).eval()
                 for p in snap_copy.parameters():
                     p.requires_grad_(False)
                 snapshot_pool.append(snap_copy)
@@ -3500,20 +3696,22 @@ def rl_mirror_league_ppo_gen4(
                         snap_ckpt_paths = [snap_ckpt_paths[0]] + snap_ckpt_paths[-9:]
 
             boss_str = f", boss={boss_wins}/{boss_eps}" if boss_eps > 0 else ""
+            boss2_str = f", boss2={boss2_wins}/{boss2_eps}" if boss2_eps > 0 else ""
             log_msg = (
-                f"[Galcon Gen4 Multi-Send PPO] iter {it:2d}/{iters} (eps={total_eps}, {time.time()-t0:5.1f}s) | "
-                f"wins={wins}/{2*pairs_per_iter} (sp={sp_wins}/{sp_eps}, bots={bot_wins}/{bot_eps}{boss_str}, splits={split_pairs}) | "
+                f"[Galcon Gen4 Multi-Send PPO] iter {it:2d}/{iters} (eps={total_eps}, {time.time()-t0:5.1f}s "
+                f"[roll={roll_sec:.1f}s upd={upd_sec:.1f}s]) | "
+                f"wins={wins}/{2*pairs_per_iter} (sp={sp_wins}/{sp_eps}, bots={bot_wins}/{bot_eps}{boss_str}{boss2_str}, splits={split_pairs}) | "
                 f"states={len(ds)} | pool={len(snapshot_pool)}"
             )
             if it % eval_every == 0 or it == iters:
-                g_sc = quick_gen4_val(policy)
-                log_msg += f" | val_26g={100*g_sc:.1f}%"
+                g_sc, vg = quick_gen4_val(cpu_policy)
+                log_msg += f" | val_{vg}g={100*g_sc:.1f}%"
                 if g_sc >= best_score:
                     best_score = g_sc
-                    best_state = copy.deepcopy(policy.state_dict())
+                    best_state = copy.deepcopy(cpu_sd)
                     torch.save(
                         {
-                            "model_config": policy.config,
+                            "model_config": cpu_policy.config,
                             "model_state_dict": best_state,
                             "has_trained_redir": True,
                             "has_trained_multi_send": True,
@@ -3529,8 +3727,8 @@ def rl_mirror_league_ppo_gen4(
         final_path = out_path.with_name(out_path.stem + "_final.pt")
         torch.save(
             {
-                "model_config": policy.config,
-                "model_state_dict": policy.state_dict(),
+                "model_config": cpu_policy.config,
+                "model_state_dict": _cpu_state_dict(policy),
                 "has_trained_redir": True,
                 "has_trained_multi_send": True,
                 "use_canonical_d4": True,
@@ -3540,7 +3738,7 @@ def rl_mirror_league_ppo_gen4(
         )
         torch.save(
             {
-                "model_config": policy.config,
+                "model_config": cpu_policy.config,
                 "model_state_dict": best_state,
                 "has_trained_redir": True,
                 "has_trained_multi_send": True,
@@ -3629,6 +3827,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--eval-games", type=int, default=20)
     parser.add_argument("--train-threads", type=int, default=2)
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--device", choices=["cpu", "dml", "cuda", "auto"], default="cpu")
     parser.add_argument("--out", default="checkpoints/galcon_transformer_best.pt")
     parser.add_argument("--v1-ckpt", default="checkpoints/galcon_v1_baseline.pt")
     args = parser.parse_args(argv)
@@ -3747,6 +3946,7 @@ def main(argv: list[str] | None = None) -> int:
             lr=args.lr if args.lr > 0 else 3.5e-4,
             seed=args.seed,
             train_threads=args.train_threads,
+            device=args.device,
         )
         return 0
 
@@ -3767,6 +3967,7 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             train_threads=args.train_threads,
             workers=args.workers,
+            device=args.device,
         )
         return 0
 

@@ -498,3 +498,51 @@ def test_galcon_wave5_adversarial_search_and_ensemble(tmp_path: Path):
     assert -1.0 <= e_sc <= 1.0
 
 
+def test_dml_adamw_matches_torch_adamw_and_device_resolver():
+    from galcon.train import DMLAdamW, resolve_train_device
+
+    dev, is_dml = resolve_train_device("cpu")
+    assert dev.type == "cpu" and not is_dml
+
+    torch.manual_seed(123)
+    m_ref = torch.nn.Sequential(torch.nn.Linear(8, 16), torch.nn.ReLU(), torch.nn.Linear(16, 4))
+    m_dml = torch.nn.Sequential(torch.nn.Linear(8, 16), torch.nn.ReLU(), torch.nn.Linear(16, 4))
+    m_dml.load_state_dict(m_ref.state_dict())
+
+    opt_ref = torch.optim.AdamW(m_ref.parameters(), lr=1e-3, weight_decay=1e-2)
+    opt_dml = DMLAdamW(m_dml.parameters(), lr=1e-3, weight_decay=1e-2)
+
+    for step in range(5):
+        torch.manual_seed(1000 + step)
+        x = torch.randn(6, 8)
+        y = torch.randn(6, 4)
+
+        opt_ref.zero_grad()
+        torch.nn.functional.mse_loss(m_ref(x), y).backward()
+        opt_ref.step()
+
+        opt_dml.zero_grad()
+        torch.nn.functional.mse_loss(m_dml(x), y).backward()
+        opt_dml.step()
+
+    for p_ref, p_dml in zip(m_ref.parameters(), m_dml.parameters()):
+        assert torch.allclose(p_ref, p_dml, atol=1e-6)
+
+    from galcon.train import _bernoulli_log_prob_and_entropy, _stable_bce_with_logits
+
+    torch.manual_seed(7)
+    logits = torch.randn(4, 10) * 5.0
+    acts = torch.randint(0, 2, (4, 10)).float()
+    pw = torch.tensor(4.5)
+    assert torch.allclose(
+        _stable_bce_with_logits(logits, acts, pos_weight=pw),
+        torch.nn.functional.binary_cross_entropy_with_logits(logits, acts, pos_weight=pw, reduction="none"),
+        atol=1e-5,
+    )
+    lp, ent = _bernoulli_log_prob_and_entropy(logits, acts)
+    dist = torch.distributions.Bernoulli(logits=logits)
+    assert torch.allclose(lp, dist.log_prob(acts), atol=1e-5)
+    assert torch.allclose(ent, dist.entropy(), atol=1e-5)
+
+
+
