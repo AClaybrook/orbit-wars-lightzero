@@ -45,6 +45,7 @@ from galcon.transformer_bot import (
     GALCON_MAX_PLANETS,
     GALCON_REDIR_DIM,
     GalconPlanetTransformer,
+    EnsembleGalconSearchAgent,
     GalconSearchTransformerAgent,
     GalconTransformerAgent,
     apply_galcon_d4,
@@ -1831,17 +1832,20 @@ def rl_league_ppo_gen2(
     return out_path
 
 
-def _sample_gen3_map_config(rng: random.Random) -> Tuple[int, float, float, bool]:
-    """Gen 3 multi-scale map distribution: compact + classic + large asymmetric gbots arenas."""
+def _sample_gen3_map_config(rng: random.Random, large_prob: float = 0.30) -> Tuple[int, float, float, bool]:
+    """Gen 3/8 multi-scale map distribution: compact + classic + large asymmetric gbots arenas."""
+    lp = max(0.0, min(0.80, float(large_prob)))
     u = rng.random()
-    if u < 0.25:
+    if u >= 1.0 - lp:
+        # Large gbots arena (22-28 planets, 520x320 to 600x360, 45% asymmetric!)
+        w = rng.choice([520.0, 560.0, 600.0])
+        h = round(w * 0.60, 1)
+        return rng.randint(22, 28), w, h, (rng.random() < 0.55)
+    # Split remaining (1 - lp) roughly 35% compact / 65% classic 14-22pl
+    rem_u = u / max(1e-6, 1.0 - lp)
+    if rem_u < 0.35:
         return rng.randint(8, 12), 240.0, 150.0, True
-    if u < 0.70:
-        return rng.randint(14, 22), 400.0, 240.0, (rng.random() < 0.80)
-    # Large gbots arena (22-28 planets, 520x320 to 600x360, 35% asymmetric!)
-    w = rng.choice([520.0, 560.0, 600.0])
-    h = round(w * 0.60, 1)
-    return rng.randint(22, 28), w, h, (rng.random() < 0.65)
+    return rng.randint(14, 22), 400.0, 240.0, (rng.random() < 0.80)
 
 
 def evaluate_large_arena_matchup(
@@ -2404,6 +2408,8 @@ def _gen4_ei_worker(
     lua_opp_str: str,
     filter_losing_policy: bool,
     lua_opp2_str: str = "",
+    ckpt_path2_str: str = "",
+    large_map_prob: float = 0.30,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     torch.set_num_threads(1)
     return collect_gen4_multisend_ei_dataset(
@@ -2413,6 +2419,8 @@ def _gen4_ei_worker(
         rollout_horizon=rollout_horizon,
         lua_opp_path=Path(lua_opp_str) if lua_opp_str else None,
         lua_opp2_path=Path(lua_opp2_str) if lua_opp2_str else None,
+        ckpt_path2=Path(ckpt_path2_str) if ckpt_path2_str else None,
+        large_map_prob=large_map_prob,
         filter_losing_policy=filter_losing_policy,
         workers=1,
     )
@@ -2426,13 +2434,15 @@ def collect_gen4_multisend_ei_dataset(
     rollout_horizon: int = 16,
     lua_opp_path: Optional[Path] = None,
     lua_opp2_path: Optional[Path] = None,
+    ckpt_path2: Optional[Path] = None,
+    large_map_prob: float = 0.30,
     filter_losing_policy: bool = True,
     workers: int = 1,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """Collect winning/drawing multi-send trajectories from our Opponent-Adaptive 2-Ply Reactive Search.
 
-    Distills ONLY our own search agent's plans (never imitating external opponents) into Gen 4/7's
-    native pairwise ``(ms_target, ms_frac)`` head + Canonical D4 coordinates + value + ``t+10`` + ``/REDIR``.
+    When ``ckpt_path2`` is supplied, uses ``EnsembleGalconSearchAgent([ckpt_path, ckpt_path2])`` as the
+    teacher to distill 2-model Ensemble Search strength directly into a single fast Pure student.
     """
     if workers > 1 and num_games >= 2:
         n_w = min(int(workers), int(num_games))
@@ -2442,6 +2452,7 @@ def collect_gen4_multisend_ei_dataset(
         t_par = time.time()
         lua_str = str(lua_opp_path.resolve()) if (lua_opp_path is not None and lua_opp_path.is_file()) else ""
         lua2_str = str(lua_opp2_path.resolve()) if (lua_opp2_path is not None and lua_opp2_path.is_file()) else ""
+        ckpt2_str = str(ckpt_path2.resolve()) if (ckpt_path2 is not None and ckpt_path2.is_file()) else ""
         ctx = mp.get_context("spawn")
         with ProcessPoolExecutor(max_workers=n_w, mp_context=ctx) as ex:
             futs = [
@@ -2454,14 +2465,17 @@ def collect_gen4_multisend_ei_dataset(
                     lua_str,
                     filter_losing_policy,
                     lua2_str,
+                    ckpt2_str,
+                    large_map_prob,
                 )
                 for idx, cnt in enumerate(shards)
             ]
             results = [f.result() for f in futs]
         merged_d = _merge_datasets([r[0] for r in results])
         merged_r = _merge_datasets([r[1] for r in results])
+        ens_tag = " [EnsembleTeacher]" if ckpt2_str else ""
         print(
-            f"[Galcon Gen4 Multi-Send EI x{n_w} workers] Merged {len(merged_d.get('val_targets', []))} states "
+            f"[Galcon Gen4 Multi-Send EI{ens_tag} x{n_w} workers] Merged {len(merged_d.get('val_targets', []))} states "
             f"+ {len(merged_r.get('planet_feats', []))} redir states across {num_games} games in {time.time()-t_par:.1f}s",
             flush=True,
         )
@@ -2479,17 +2493,31 @@ def collect_gen4_multisend_ei_dataset(
 
         lua_opp2 = GalconLuaBotBridge(lua_opp2_path)
 
-    search_ag = GalconSearchTransformerAgent(
-        ckpt_path,
-        use_d4_canonical=True,
-        rollout_horizon=rollout_horizon,
-        num_plies=2,
-        time_budget_sec=0.24,
-        neural_value_weight=0.70,
-        reactive_mid_ply=True,
-        opponent_adaptive=True,
-        prior_bonus=0.010,
-    )
+    if ckpt_path2 is not None and ckpt_path2.is_file():
+        search_ag = EnsembleGalconSearchAgent(
+            [ckpt_path, ckpt_path2],
+            use_d4_canonical=True,
+            use_d4_tta=False,
+            rollout_horizon=rollout_horizon,
+            num_plies=2,
+            time_budget_sec=0.28,
+            neural_value_weight=0.70,
+            reactive_mid_ply=True,
+            opponent_adaptive=True,
+            prior_bonus=0.010,
+        )
+    else:
+        search_ag = GalconSearchTransformerAgent(
+            ckpt_path,
+            use_d4_canonical=True,
+            rollout_horizon=rollout_horizon,
+            num_plies=2,
+            time_budget_sec=0.24,
+            neural_value_weight=0.70,
+            reactive_mid_ply=True,
+            opponent_adaptive=True,
+            prior_bonus=0.010,
+        )
 
     pf_l, tf_l, ef_l, le_l, om_l, pm_l = [], [], [], [], [], []
     ms_tar_l, ms_fr_l, vt_l, aux_o_l, aux_s_l = [], [], [], [], []
@@ -2507,7 +2535,7 @@ def collect_gen4_multisend_ei_dataset(
 
     try:
         for g in range(num_games):
-            n_pl, w, h, sym = _sample_gen3_map_config(rng)
+            n_pl, w, h, sym = _sample_gen3_map_config(rng, large_prob=large_map_prob)
             max_t = 220 if n_pl >= 22 else 200
             sim = GalconSim.create(seed=seed + g, num_planets=n_pl, width=w, height=h, max_ticks=max_t, symmetric=sym)
 
@@ -3415,6 +3443,7 @@ def rl_mirror_league_ppo_gen4(
     boss_draw_penalty: float = 0.10,
     sparky_share: float = 0.42,
     esparan_share: float = 0.17,
+    large_map_prob: float = 0.30,
     max_sends_per_planet: int = 6,
     eval_every: int = 4,
     seed: int = 34000,
@@ -3604,7 +3633,7 @@ def rl_mirror_league_ppo_gen4(
             )
             pair_jobs = []
             for k, (opp_kind, opp_idx) in enumerate(opp_sched):
-                n_pl, w, h, sym = _sample_gen3_map_config(rng)
+                n_pl, w, h, sym = _sample_gen3_map_config(rng, large_prob=large_map_prob)
                 map_seed = seed + it * 500 + k
                 pair_jobs.append((map_seed, n_pl, w, h, sym, opp_kind, opp_idx))
 
@@ -3945,12 +3974,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mode", choices=["gen2", "v1"], default="gen2")
     parser.add_argument("--stage", choices=["all", "ei", "ppo", "mirror_ppo", "gen4_ei", "gen4_ppo", "eval"], default="all")
     parser.add_argument("--resume", default="")
+    parser.add_argument("--resume2", default="")
     parser.add_argument("--gen2-anchor", default="checkpoints/galcon_gen2_champion.pt")
     parser.add_argument("--lua-opp", default="")
     parser.add_argument("--lua-opp2", default="")
     parser.add_argument("--boss-draw-penalty", type=float, default=0.10)
     parser.add_argument("--sparky-share", type=float, default=0.42)
     parser.add_argument("--esparan-share", type=float, default=0.17)
+    parser.add_argument("--large-map-prob", type=float, default=0.30)
+    parser.add_argument("--kl-coef", type=float, default=0.030)
     parser.add_argument("--eval-every", type=int, default=4)
     parser.add_argument("--redir-npz", default="checkpoints/galcon_gen2_redir.npz")
     parser.add_argument("--bc-games", type=int, default=80)
@@ -4065,6 +4097,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.stage == "gen4_ei":
         resume_p = Path(args.resume) if args.resume else Path("checkpoints/galcon_transformer_best.pt")
+        resume_p2 = Path(args.resume2) if args.resume2 else None
         lua_p = Path(args.lua_opp) if args.lua_opp else None
         lua_p2 = Path(args.lua_opp2) if args.lua_opp2 else None
         g4_data, g4_redir = collect_gen4_multisend_ei_dataset(
@@ -4073,6 +4106,8 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             lua_opp_path=lua_p,
             lua_opp2_path=lua_p2,
+            ckpt_path2=resume_p2,
+            large_map_prob=args.large_map_prob,
             workers=args.workers,
         )
         old_r = _load_redir_npz()
@@ -4104,9 +4139,11 @@ def main(argv: list[str] | None = None) -> int:
             iters=args.ppo_iters,
             pairs_per_iter=args.mirror_pairs,
             lr=args.lr if args.lr > 0 else 4.5e-5,
+            kl_coef=args.kl_coef,
             boss_draw_penalty=args.boss_draw_penalty,
             sparky_share=args.sparky_share,
             esparan_share=args.esparan_share,
+            large_map_prob=args.large_map_prob,
             eval_every=max(1, args.eval_every),
             seed=args.seed,
             train_threads=args.train_threads,
