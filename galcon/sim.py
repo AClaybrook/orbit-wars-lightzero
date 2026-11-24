@@ -431,6 +431,94 @@ def project_planet_future(
     return my_arr, en_arr, proj_owner, proj_ships
 
 
+def project_all_planet_futures(
+    sim: GalconSim,
+    planets: Sequence[Planet],
+    player: int,
+    horizon: int = 24,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Vectorized exact future ownership/ship trajectories for all planets in ``(N, horizon)`` arrays.
+
+    Fast-paths planets with zero incoming fleets in pure NumPy and runs exact 3-way combat only
+    on planets that actually have incoming fleets. Matches ``project_planet_future`` bit-for-bit.
+    """
+    n = len(planets)
+    my_arrs = np.zeros((n, horizon), dtype=np.float32)
+    en_arrs = np.zeros((n, horizon), dtype=np.float32)
+    if n == 0:
+        z = np.zeros((0, horizon), dtype=np.float32)
+        return my_arrs, en_arrs, z, z.copy()
+
+    id_to_idx = {p.id: i for i, p in enumerate(planets)}
+    has_inc = np.zeros(n, dtype=bool)
+    step_dist = max(1e-6, sim.fleet_speed * sim.tick_dt)
+    for fl in sim.fleets.values():
+        idx_p = id_to_idx.get(fl.target)
+        if idx_p is None:
+            continue
+        dst = planets[idx_p]
+        dist = max(0.0, math.hypot(dst.x - fl.x, dst.y - fl.y) - dst.radius)
+        eta = max(1, int(math.ceil(dist / step_dist)))
+        t_i = eta - 1
+        if 0 <= t_i < horizon:
+            has_inc[idx_p] = True
+            if fl.owner == player:
+                my_arrs[idx_p, t_i] += float(fl.ships)
+            else:
+                en_arrs[idx_p, t_i] += float(fl.ships)
+
+    owners_i = np.array(
+        [1.0 if p.owner == player else (0.0 if p.owner == 0 else -1.0) for p in planets],
+        dtype=np.float64,
+    )
+    ships_0 = np.array([float(p.ships) for p in planets], dtype=np.float64)
+    growth = np.array([(p.production / PRODUCTION_DIVISOR) * sim.tick_dt for p in planets], dtype=np.float64)
+    t_steps = np.arange(1, horizon + 1, dtype=np.float64)[None, :]  # (1, H)
+
+    # Exact fast-path for all planets (exact wherever has_inc is False)
+    proj_owner = np.broadcast_to(owners_i[:, None], (n, horizon)).astype(np.float32).copy()
+    proj_ships = (ships_0[:, None] + np.where(owners_i[:, None] != 0.0, growth[:, None] * t_steps, 0.0)).astype(
+        np.float32
+    )
+
+    # Exact tick-by-tick 3-way combat only for planets with incoming fleets
+    for i in np.flatnonzero(has_inc):
+        cur_owner = int(owners_i[i])
+        cur_ships = float(ships_0[i])
+        g_i = float(growth[i])
+        ma_row = my_arrs[i]
+        ea_row = en_arrs[i]
+        po_row = proj_owner[i]
+        ps_row = proj_ships[i]
+        for t in range(horizon):
+            if cur_owner != 0:
+                cur_ships += g_i
+            ma = float(ma_row[t])
+            ea = float(ea_row[t])
+            if ma > 0.0 or ea > 0.0:
+                f_my = ma + (cur_ships if cur_owner == 1 else 0.0)
+                f_en = ea + (cur_ships if cur_owner == -1 else 0.0)
+                f_nu = cur_ships if cur_owner == 0 else 0.0
+                if f_my >= f_en and f_my >= f_nu:
+                    top_v, top_o = f_my, 1
+                    sec_v = f_en if f_en >= f_nu else f_nu
+                elif f_en >= f_my and f_en >= f_nu:
+                    top_v, top_o = f_en, -1
+                    sec_v = f_my if f_my >= f_nu else f_nu
+                else:
+                    top_v, top_o = f_nu, 0
+                    sec_v = f_my if f_my >= f_en else f_en
+                if top_v == sec_v:
+                    cur_ships = 0.0
+                else:
+                    cur_owner = top_o
+                    cur_ships = top_v - sec_v
+            po_row[t] = float(cur_owner)
+            ps_row[t] = float(cur_ships)
+
+    return my_arrs, en_arrs, proj_owner, proj_ships
+
+
 def evaluate_galcon_state(sim: GalconSim, player: int) -> float:
     """Fast tactical value estimate in ``[-1, +1]`` for lookahead & RL shaping."""
     if sim.done:
@@ -444,14 +532,12 @@ def evaluate_galcon_state(sim: GalconSim, player: int) -> float:
     ship_adv = (my_ships - en_ships) / max(30.0, my_ships + en_ships)
     prod_adv = (my_prod - en_prod) / max(40.0, my_prod + en_prod)
     # Also value future projected ownership after current fleets land
-    fut_my_prod = 0.0
-    fut_en_prod = 0.0
-    for p in sim.planets.values():
-        _, _, po, _ = project_planet_future(sim, p.id, player, horizon=24)
-        if po[-1] > 0:
-            fut_my_prod += p.production
-        elif po[-1] < 0:
-            fut_en_prod += p.production
+    planets = list(sim.planets.values())
+    _, _, po_all, _ = project_all_planet_futures(sim, planets, player, horizon=24)
+    prods = np.array([p.production for p in planets], dtype=np.float64)
+    po_end = po_all[:, -1]
+    fut_my_prod = float(prods[po_end > 0].sum())
+    fut_en_prod = float(prods[po_end < 0].sum())
     fut_prod_adv = (fut_my_prod - fut_en_prod) / max(40.0, fut_my_prod + fut_en_prod)
     raw = 1.15 * ship_adv + 0.70 * prod_adv + 1.10 * fut_prod_adv
     return float(math.tanh(raw))

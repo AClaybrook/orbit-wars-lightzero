@@ -231,7 +231,12 @@ def _build_bot(
             GalconTransformerAgent,
         )
 
-        ckpt = checkpoint or "checkpoints/galcon_transformer_best.pt"
+        if checkpoint:
+            ckpt = checkpoint
+        elif bot_kind == "transformer" and Path("checkpoints/galcon_wave8_pure.pt").is_file():
+            ckpt = "checkpoints/galcon_wave8_pure.pt"
+        else:
+            ckpt = "checkpoints/galcon_transformer_best.pt"
         if not Path(ckpt).is_file():
             raise FileNotFoundError(f"Galcon checkpoint not found: {ckpt}")
         if bot_kind == "ensemble":
@@ -252,7 +257,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         choices=["tactical", "classic", "rusher", "macro", "transformer", "search", "ensemble"],
         default="transformer",
     )
-    parser.add_argument("--checkpoint", default="checkpoints/galcon_transformer_best.pt")
+    parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--checkpoint2", default="checkpoints/galcon_wave7_p1.pt")
     args = parser.parse_args(argv)
     act_fn = _build_bot(args.bot, args.checkpoint, args.checkpoint2)

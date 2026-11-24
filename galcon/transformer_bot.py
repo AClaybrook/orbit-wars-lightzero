@@ -35,6 +35,7 @@ from galcon.sim import (
     RedirOrder,
     SendOrder,
     evaluate_galcon_state,
+    project_all_planet_futures,
     project_planet_future,
 )
 from orbit_wars_bot.planet_transformer import PlanetTimelineTransformer
@@ -180,11 +181,16 @@ def extract_galcon_features(
         )
 
     # Scale-invariant centering works identically on 200x125, 400x240, or 600x400 gbots maps
-    xs = np.array([p.x for p in planets], dtype=np.float32)
-    ys = np.array([p.y for p in planets], dtype=np.float32)
-    cx = 0.5 * (float(xs.min()) + float(xs.max()))
-    cy = 0.5 * (float(ys.min()) + float(ys.max()))
-    half_span = max(50.0, 0.5 * max(float(xs.max() - xs.min()), float(ys.max() - ys.min())))
+    xs64 = np.array([p.x for p in planets], dtype=np.float64)
+    ys64 = np.array([p.y for p in planets], dtype=np.float64)
+    rs64 = np.array([p.radius for p in planets], dtype=np.float64)
+    ships64 = np.array([p.ships for p in planets], dtype=np.float64)
+    prods64 = np.array([p.production for p in planets], dtype=np.float64)
+    owners_raw = np.array([p.owner for p in planets], dtype=np.int32)
+
+    cx = 0.5 * (float(xs64.min()) + float(xs64.max()))
+    cy = 0.5 * (float(ys64.min()) + float(ys64.max()))
+    half_span = max(50.0, 0.5 * max(float(xs64.max() - xs64.min()), float(ys64.max() - ys64.min())))
 
     opp = 2 if player == 1 else 1
     my_tot_ships = sim.total_ships(player)
@@ -195,136 +201,154 @@ def extract_galcon_features(
     prod_ratio = (my_tot_prod - en_tot_prod) / max(40.0, my_tot_prod + en_tot_prod)
     step_prog = min(1.0, float(sim.tick) / max(1.0, float(sim.max_ticks)))
 
-    pf = np.zeros((n, p_dim), dtype=np.float32)
-    tf = np.zeros((n, GALCON_TIMELINE_HORIZON, GALCON_TIMELINE_DIM), dtype=np.float32)
+    my_arrs, en_arrs, po_all, ps_all = project_all_planet_futures(
+        sim, planets, player, horizon=GALCON_TIMELINE_HORIZON
+    )
+    futures = [(my_arrs[i], en_arrs[i], po_all[i], ps_all[i]) for i in range(n)]
+
+    # Vectorized exact pairwise ETA matrix (N, N) matching sim.planet_eta_ticks bit-for-bit
+    step_dist = max(1e-6, sim.fleet_speed * sim.tick_dt)
+    dx = xs64[None, :] - xs64[:, None]
+    dy = ys64[None, :] - ys64[:, None]
+    dist = np.maximum(0.0, np.hypot(dx, dy) - rs64[:, None] - rs64[None, :])
+    etas = np.maximum(1.0, np.ceil(dist / step_dist)).astype(np.float32)
+    np.fill_diagonal(etas, 0.0)
+
+    is_mine_b = owners_raw == player
+    is_en_b = (owners_raw != 0) & (owners_raw != player)
+    is_neu_b = owners_raw == 0
+    owned_mask = is_mine_b & (ships64 >= 2.0)
+
+    # Vectorized safe_surplus and threat signals
+    lost_mask = po_all <= 0.0  # (N, H)
+    any_lost = lost_mask.any(axis=1)
+    first_lost = np.argmax(lost_mask, axis=1)  # valid wherever any_lost is True
+    min_hold = ps_all.min(axis=1)
+    safe_surplus = np.where(
+        is_mine_b & (~any_lost),
+        np.maximum(0.0, np.minimum(ships64.astype(np.float32), min_hold)),
+        0.0,
+    ).astype(np.float32)
+    is_threatened = (is_mine_b & any_lost).astype(np.float32)
+    threat_urgency = np.where(
+        is_mine_b & any_lost,
+        1.0 / (1.0 + 0.25 * (first_lost.astype(np.float32) + 1.0)),
+        0.0,
+    ).astype(np.float32)
+    lost_ps = ps_all[np.arange(n), first_lost]
+    deficit_log = np.where(
+        is_mine_b & any_lost,
+        np.log1p(np.maximum(0.0, lost_ps + 2.0)) / 5.5,
+        0.0,
+    ).astype(np.float32)
+
+    # Nearest enemy / friendly ETAs
+    if np.any(is_en_b):
+        en_idx = np.flatnonzero(is_en_b)
+        min_en_eta = etas[:, en_idx].min(axis=1).astype(np.float32)
+    else:
+        en_idx = np.empty((0,), dtype=np.int64)
+        min_en_eta = np.full((n,), 40.0, dtype=np.float32)
+
+    if np.any(is_mine_b):
+        my_idx = np.flatnonzero(is_mine_b)
+        if len(my_idx) == 1:
+            min_my_eta = etas[:, my_idx[0]].astype(np.float32).copy()
+            min_my_eta[my_idx[0]] = 40.0
+        else:
+            etas_my = etas[:, my_idx].copy()
+            for col_k, p_i in enumerate(my_idx):
+                etas_my[p_i, col_k] = 1e9
+            min_my_eta = etas_my.min(axis=1).astype(np.float32)
+    else:
+        min_my_eta = np.full((n,), 40.0, dtype=np.float32)
+
+    frontline = (min_my_eta - min_en_eta) / np.maximum(10.0, min_my_eta + min_en_eta)
+
+    pf = np.empty((n, p_dim), dtype=np.float32)
+    pf[:, 0] = ((xs64 - cx) / half_span).astype(np.float32)
+    pf[:, 1] = ((ys64 - cy) / half_span).astype(np.float32)
+    pf[:, 2] = is_mine_b.astype(np.float32)
+    pf[:, 3] = is_en_b.astype(np.float32)
+    pf[:, 4] = is_neu_b.astype(np.float32)
+    pf[:, 5] = (np.log1p(np.maximum(0.0, ships64)) / 5.5).astype(np.float32)
+    pf[:, 6] = (prods64 / 100.0).astype(np.float32)
+    pf[:, 7] = (rs64 / 35.0).astype(np.float32)
+    pf[:, 8] = (np.log1p(safe_surplus) / 5.5).astype(np.float32)
+    pf[:, 9] = (np.log1p(my_arrs.sum(axis=1)) / 5.5).astype(np.float32)
+    pf[:, 10] = (np.log1p(en_arrs.sum(axis=1)) / 5.5).astype(np.float32)
+    pf[:, 11] = (po_all[:, -1] * (np.log1p(np.maximum(0.0, ps_all[:, -1])) / 5.5)).astype(np.float32)
+    pf[:, 12] = np.minimum(1.0, min_en_eta / 35.0)
+    pf[:, 13] = np.minimum(1.0, min_my_eta / 35.0)
+    pf[:, 14] = frontline.astype(np.float32)
+    pf[:, 15] = float(ship_ratio)
+    pf[:, 16] = float(prod_ratio)
+    pf[:, 17] = float(step_prog)
+
+    if feature_version >= 2:
+        rush_threat = np.zeros((n,), dtype=np.float32)
+        if len(en_idx) > 0 and np.any(is_mine_b):
+            # Nearest enemy planet j minimizing etas[j, i]
+            sub_etas = etas[en_idx, :]  # (E, N)
+            best_e_loc = np.argmin(sub_etas, axis=0)  # (N,)
+            nearest_en = en_idx[best_e_loc]
+            eta_e = sub_etas[best_e_loc, np.arange(n)]
+            growth_dur = (prods64 / PRODUCTION_DIVISOR) * sim.tick_dt * eta_e
+            rt = (ships64[nearest_en] * 0.85 - ships64 - growth_dur) / 60.0
+            rush_threat = np.where(is_mine_b, np.clip(rt, 0.0, 2.0), 0.0).astype(np.float32)
+        pf[:, 18] = is_threatened
+        pf[:, 19] = threat_urgency
+        pf[:, 20] = deficit_log
+        pf[:, 21] = rush_threat
+
+    # Vectorized timeline features (N, H, 8)
+    tf = np.empty((n, GALCON_TIMELINE_HORIZON, GALCON_TIMELINE_DIM), dtype=np.float32)
+    tf[:, :, 0] = np.log1p(my_arrs) / 5.0
+    tf[:, :, 1] = np.log1p(en_arrs) / 5.0
+    tf[:, :, 2] = (po_all > 0.0).astype(np.float32)
+    tf[:, :, 3] = (po_all < 0.0).astype(np.float32)
+    tf[:, :, 4] = (po_all == 0.0).astype(np.float32)
+    tf[:, :, 5] = np.log1p(np.maximum(0.0, ps_all)) / 5.5
+    tf[:, 0, 6] = 0.0
+    tf[:, 1:, 6] = (po_all[:, 1:] != po_all[:, :-1]).astype(np.float32)
+    tf[:, :, 7] = (np.arange(GALCON_TIMELINE_HORIZON, dtype=np.float32) / float(GALCON_TIMELINE_HORIZON))[None, :]
+
+    # Vectorized D4-invariant edge features (N, N, e_dim)
+    legal = ~np.eye(n, dtype=bool)
+    t_idx = np.clip(etas.astype(np.int64) - 1, 0, GALCON_TIMELINE_HORIZON - 1)  # (N, N)
+    j_grid = np.broadcast_to(np.arange(n)[None, :], (n, n))
+    owner_eta = po_all[j_grid, t_idx]  # (N, N)
+    ships_eta = ps_all[j_grid, t_idx]  # (N, N)
+    prod_rate_j = (prods64 / PRODUCTION_DIVISOR).astype(np.float32)[None, :]  # (1, N)
+    extra = np.where(
+        owner_eta < 0.0,
+        prod_rate_j * float(sim.tick_dt) * np.maximum(0.0, etas - float(GALCON_TIMELINE_HORIZON)),
+        0.0,
+    ).astype(np.float32)
+    need = ships_eta + extra + 1.5
+    src_ships = ships64.astype(np.float32)[:, None]  # (N, 1)
+    src_safe = safe_surplus[:, None]  # (N, 1)
+    can_capture = ((owner_eta <= 0.0) & (src_ships > need)).astype(np.float32)
+    safe_capture = ((owner_eta <= 0.0) & (src_safe > need)).astype(np.float32)
+    steal_flag = ((is_neu_b[None, :]) & (owner_eta < 0.0)).astype(np.float32)
+    defend_flag = ((is_mine_b[None, :]) & (owner_eta <= 0.0)).astype(np.float32)
+    roi = (prod_rate_j * 20.0) / np.maximum(3.0, need + 0.45 * etas * np.maximum(0.3, prod_rate_j))
+
     ef = np.zeros((n, n, e_dim), dtype=np.float32)
-    legal = np.zeros((n, n), dtype=bool)
-    owned_mask = np.zeros((n,), dtype=bool)
-    safe_surplus = np.zeros((n,), dtype=np.float32)
-
-    futures = [project_planet_future(sim, p.id, player, horizon=GALCON_TIMELINE_HORIZON) for p in planets]
-
-    my_indices = [i for i, p in enumerate(planets) if p.owner == player]
-    en_indices = [i for i, p in enumerate(planets) if p.owner != 0 and p.owner != player]
-
-    etas = np.zeros((n, n), dtype=np.float32)
-    for i in range(n):
-        for j in range(n):
-            if i != j:
-                etas[i, j] = float(sim.planet_eta_ticks(planets[i], planets[j]))
-
-    for i, p in enumerate(planets):
-        my_arr, en_arr, po, ps = futures[i]
-        is_mine = 1.0 if p.owner == player else 0.0
-        is_en = 1.0 if (p.owner != 0 and p.owner != player) else 0.0
-        is_neu = 1.0 if p.owner == 0 else 0.0
-        owned_mask[i] = p.owner == player and p.ships >= 2.0
-
-        is_threatened = 0.0
-        threat_urgency = 0.0
-        deficit_log = 0.0
-        if p.owner == player:
-            lost_idx = next((t for t in range(GALCON_TIMELINE_HORIZON) if po[t] <= 0), -1)
-            if lost_idx >= 0:
-                safe_surplus[i] = 0.0
-                is_threatened = 1.0
-                threat_urgency = 1.0 / (1.0 + 0.25 * float(lost_idx + 1))
-                deficit_log = math.log1p(max(0.0, float(ps[lost_idx]) + 2.0)) / 5.5
-            else:
-                min_hold = float(ps.min())
-                safe_surplus[i] = max(0.0, min(float(p.ships), min_hold))
-
-        min_en_eta = min((etas[i, j] for j in en_indices), default=40.0)
-        min_my_eta = min((etas[i, j] for j in my_indices if j != i), default=40.0)
-        frontline = (min_my_eta - min_en_eta) / max(10.0, min_my_eta + min_en_eta)
-
-        base_feats = [
-            (p.x - cx) / half_span,
-            (p.y - cy) / half_span,
-            is_mine,
-            is_en,
-            is_neu,
-            math.log1p(max(0.0, p.ships)) / 5.5,
-            p.production / 100.0,
-            p.radius / 35.0,
-            math.log1p(safe_surplus[i]) / 5.5,
-            math.log1p(float(my_arr.sum())) / 5.5,
-            math.log1p(float(en_arr.sum())) / 5.5,
-            float(po[-1]) * (math.log1p(max(0.0, float(ps[-1]))) / 5.5),
-            min(1.0, min_en_eta / 35.0),
-            min(1.0, min_my_eta / 35.0),
-            frontline,
-            ship_ratio,
-            prod_ratio,
-            step_prog,
-        ]
-        if feature_version >= 2:
-            # Explicit rush-threat signal: could the nearest enemy planet all-in kill us?
-            rush_threat = 0.0
-            if p.owner == player and en_indices:
-                nearest_en_idx = min(en_indices, key=lambda j: etas[j, i])
-                en_p = planets[nearest_en_idx]
-                eta_e = etas[nearest_en_idx, i]
-                growth_dur = (p.production / PRODUCTION_DIVISOR) * sim.tick_dt * eta_e
-                rush_threat = max(0.0, min(2.0, (en_p.ships * 0.85 - p.ships - growth_dur) / 60.0))
-            base_feats.extend([is_threatened, threat_urgency, deficit_log, rush_threat])
-        pf[i] = np.array(base_feats, dtype=np.float32)
-
-        for t in range(GALCON_TIMELINE_HORIZON):
-            tf[i, t, 0] = math.log1p(float(my_arr[t])) / 5.0
-            tf[i, t, 1] = math.log1p(float(en_arr[t])) / 5.0
-            tf[i, t, 2] = 1.0 if po[t] > 0 else 0.0
-            tf[i, t, 3] = 1.0 if po[t] < 0 else 0.0
-            tf[i, t, 4] = 1.0 if po[t] == 0 else 0.0
-            tf[i, t, 5] = math.log1p(max(0.0, float(ps[t]))) / 5.5
-            tf[i, t, 6] = 1.0 if (t > 0 and po[t] != po[t - 1]) else 0.0
-            tf[i, t, 7] = float(t) / float(GALCON_TIMELINE_HORIZON)
-
-    # Edge features (100% D4-invariant!)
-    for i in range(n):
-        src = planets[i]
-        for j in range(n):
-            if i == j:
-                continue
-            legal[i, j] = True
-            dst = planets[j]
-            eta = etas[i, j]
-            _, _, po_j, ps_j = futures[j]
-            t_idx = min(GALCON_TIMELINE_HORIZON - 1, max(0, int(eta) - 1))
-            owner_eta = float(po_j[t_idx])
-            ships_eta = float(ps_j[t_idx])
-            extra = (
-                (dst.production / PRODUCTION_DIVISOR) * sim.tick_dt * max(0.0, eta - float(GALCON_TIMELINE_HORIZON))
-                if owner_eta < 0
-                else 0.0
-            )
-            need = ships_eta + extra + 1.5
-            can_capture = 1.0 if (owner_eta <= 0 and src.ships > need) else 0.0
-            safe_capture = 1.0 if (owner_eta <= 0 and safe_surplus[i] > need) else 0.0
-            steal_flag = 1.0 if (dst.owner == 0 and owner_eta < 0) else 0.0
-            defend_flag = 1.0 if (dst.owner == player and owner_eta <= 0) else 0.0
-            prod_rate = dst.production / PRODUCTION_DIVISOR
-            roi = (prod_rate * 20.0) / max(3.0, need + 0.45 * eta * max(0.3, prod_rate))
-            en_eta_src = pf[i, 12]
-            en_eta_dst = pf[j, 12]
-
-            edge_vec = [
-                min(1.0, eta / 35.0),
-                1.0 / (1.0 + 0.12 * eta),
-                min(2.0, float(src.ships) / max(1.0, need)),
-                can_capture,
-                safe_capture,
-                steal_flag,
-                defend_flag,
-                min(2.0, roi),
-                owner_eta,
-                en_eta_src - en_eta_dst,  # positive => moving toward enemy frontline
-            ]
-            if feature_version >= 2:
-                exact_frac_needed = min(1.0, need / max(1.0, float(src.ships)))
-                rush_punish = 1.0 if (dst.owner != 0 and dst.owner != player and dst.production >= 70.0 and src.ships > need) else 0.0
-                edge_vec.extend([exact_frac_needed, rush_punish])
-            ef[i, j] = np.array(edge_vec, dtype=np.float32)
+    ef[:, :, 0] = np.minimum(1.0, etas / 35.0)
+    ef[:, :, 1] = 1.0 / (1.0 + 0.12 * etas)
+    ef[:, :, 2] = np.minimum(2.0, src_ships / np.maximum(1.0, need))
+    ef[:, :, 3] = can_capture
+    ef[:, :, 4] = safe_capture
+    ef[:, :, 5] = steal_flag
+    ef[:, :, 6] = defend_flag
+    ef[:, :, 7] = np.minimum(2.0, roi)
+    ef[:, :, 8] = owner_eta
+    ef[:, :, 9] = pf[:, 12:13] - pf[None, :, 12]
+    if feature_version >= 2:
+        ef[:, :, 10] = np.minimum(1.0, need / np.maximum(1.0, src_ships))
+        ef[:, :, 11] = ((is_en_b[None, :]) & (prods64[None, :] >= 70.0) & (src_ships > need)).astype(np.float32)
+    ef[~legal] = 0.0
 
     return EncodedGalconState(
         player=player,
@@ -1552,13 +1576,14 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
     ) -> Tuple[List[Order], List[List[Order]], List[float], float]:
         """Run batched opponent-adaptive reactive lookahead search and return ``(best_plan, candidates, scores, best_score)``."""
         t0 = time.perf_counter()
-        deadline = t0 + self.time_budget_sec
         if self.opponent_adaptive:
             self._update_opp_profile(sim, player)
         enc = extract_galcon_features(sim, player, feature_version=self.feature_version)
         n = len(enc.planet_ids)
         if n == 0 or not np.any(enc.owned_mask):
             return [], [], [], 0.0
+        eff_budget = max(self.time_budget_sec, 0.30) if n >= 22 else self.time_budget_sec
+        deadline = t0 + eff_budget
 
         redir_enc = (
             extract_galcon_redir_features(sim, enc)
@@ -1749,12 +1774,16 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                 if not opp_adv_orders:
                     opp_adv_orders = self._build_focus_fire_plan(sim, opp_enc, op, max_sources=3)
 
-        # Build ply schedule (e.g. num_plies=2, horizon=12 -> [6, 12]; num_plies=3, horizon=15 -> [5, 10, 15])
+        # Wave 8 map-adaptive lookahead: on Large (>=22pl) maps, extend rollout to 22 ticks and 3 reactive plies
+        # (enabled by 10.8x-19.0x vectorized features; jumps Large 22-28pl Paired Sparky 16.7% -> 50.0% while
+        # keeping Standard 18pl at exact 2-ply h=16 for 65.0% vs Sparky at ~60ms/tick).
+        eff_horizon = max(self.rollout_horizon, 22) if n >= 22 else self.rollout_horizon
+        eff_plies = max(self.num_plies, 3) if (n >= 22 and self.reactive_mid_ply) else self.num_plies
         ply_steps = [
-            max(1, int(round(self.rollout_horizon * (k + 1) / self.num_plies)))
-            for k in range(self.num_plies)
+            max(1, int(round(eff_horizon * (k + 1) / eff_plies)))
+            for k in range(eff_plies)
         ]
-        ply_steps[-1] = self.rollout_horizon
+        ply_steps[-1] = eff_horizon
 
         eval_cands: List[List[Order]] = []
         rolls: List[GalconSim] = []

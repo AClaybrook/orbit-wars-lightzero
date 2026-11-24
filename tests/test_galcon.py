@@ -623,4 +623,55 @@ def test_wave7_ms_probs_search_and_ensemble_gbots(tmp_path):
     assert isinstance(orders, list)
 
 
+def test_wave8_vectorized_futures_and_adaptive_large_horizon(tmp_path: Path):
+    import random
+    from galcon.sim import project_all_planet_futures, project_planet_future
+    from galcon.train import _sample_gen3_map_config
+    from galcon.transformer_bot import build_galcon_gen4_transformer
+
+    # 1. Exact numerical parity between vectorized project_all_planet_futures and project_planet_future
+    for seed, n_pl, w, h, sym in [(14001, 18, 400.0, 240.0, True), (14702, 26, 560.0, 340.0, False)]:
+        sim = GalconSim.create(seed=seed, num_planets=n_pl, width=w, height=h, symmetric=sym)
+        tact = GalconTacticalBot()
+        for _ in range(15):
+            sim.step({1: tact.act(sim, 1), 2: tact.act(sim, 2)})
+            if sim.done:
+                break
+        planets = sorted(sim.planets.values(), key=lambda p: p.id)
+        for player in (1, 2):
+            my_a, en_a, po_a, ps_a = project_all_planet_futures(sim, planets, player, horizon=24)
+            for idx, p in enumerate(planets):
+                r_my, r_en, r_po, r_ps = project_planet_future(sim, p.id, player, horizon=24)
+                assert np.allclose(my_a[idx], r_my, atol=1e-6)
+                assert np.allclose(en_a[idx], r_en, atol=1e-6)
+                assert np.allclose(po_a[idx], r_po, atol=1e-6)
+                assert np.allclose(ps_a[idx], r_ps, atol=1e-6)
+
+    # 2. _sample_gen3_map_config respects large_prob
+    rng = random.Random(777)
+    samples = [_sample_gen3_map_config(rng, large_prob=0.50) for _ in range(200)]
+    large_frac = sum(1 for n_pl, _, _, _ in samples if n_pl >= 22) / len(samples)
+    assert 0.35 <= large_frac <= 0.65
+
+    # 3. Map-adaptive Large horizon runs cleanly on 24pl asymmetric arena
+    m = build_galcon_gen4_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
+    ckpt = tmp_path / "w8_test.pt"
+    torch.save(
+        {
+            "model_config": m.config,
+            "model_state_dict": m.state_dict(),
+            "has_trained_redir": True,
+            "has_trained_multi_send": True,
+            "use_canonical_d4": True,
+        },
+        ckpt,
+    )
+    ag = GalconSearchTransformerAgent(ckpt, rollout_horizon=16, num_plies=2, time_budget_sec=0.20)
+    sim_lg = GalconSim.create(seed=14700, num_planets=24, width=560.0, height=340.0, symmetric=False)
+    plan, cands, scores, best_sc = ag.act_with_search_info(sim_lg, 1)
+    assert isinstance(plan, list)
+    assert len(cands) == len(scores) >= 1
+    assert -1.0 <= best_sc <= 1.0
+
+
 
