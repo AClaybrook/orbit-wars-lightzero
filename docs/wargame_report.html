@@ -538,11 +538,33 @@
         ctx.fillText(tk.l, tp.sx, tp.sy + 4);
       });
 
-      // Live scenario beacon pin (only clamp inside cube if sliders exceed plotted range)
-      let bu, bv;
-      if (currentSlice === "elo_coord") { bu = Math.max(0, Math.min(1, (curDElo - 150) / 650)); bv = curCoord; }
-      else if (currentSlice === "elo_res") { bu = Math.max(0, Math.min(1, (curDElo - 150) / 650)); bv = Math.max(0, Math.min(1, Math.log(curRes / 0.5) / Math.log(16.0))); }
-      else { bu = curCoord; bv = Math.max(0, Math.min(1, Math.log(curRes / 0.5) / Math.log(16.0))); }
+      // Save projected grid vertices for mouse-hover hit-testing
+      last3DPts = [];
+      for (let i = 0; i <= N; i++) {
+        for (let j = 0; j <= N; j++) {
+          const u = i / N, v = j / N, p = pts[i][j];
+          last3DPts.push({ sx: p.sx, sy: p.sy, u, v, z: p.z, depth: p.depth });
+        }
+      }
+
+      // Live scenario beacon pin (clamped inside plotted cube if sliders exceed axis bounds)
+      let bu, bv, xValStr, yValStr;
+      if (currentSlice === "elo_coord") {
+        bu = Math.max(0, Math.min(1, (curDElo - 150) / 650));
+        bv = curCoord;
+        xValStr = `ΔElo ${curDElo >= 0 ? "+" : ""}${curDElo}`;
+        yValStr = `Coord ${Math.round(curCoord * 100)}%`;
+      } else if (currentSlice === "elo_res") {
+        bu = Math.max(0, Math.min(1, (curDElo - 150) / 650));
+        bv = Math.max(0, Math.min(1, Math.log(curRes / 0.5) / Math.log(16.0)));
+        xValStr = `ΔElo ${curDElo >= 0 ? "+" : ""}${curDElo}`;
+        yValStr = `Ships ${curRes.toFixed(2)}×`;
+      } else {
+        bu = curCoord;
+        bv = Math.max(0, Math.min(1, Math.log(curRes / 0.5) / Math.log(16.0)));
+        xValStr = `Coord ${Math.round(curCoord * 100)}%`;
+        yValStr = `Ships ${curRes.toFixed(2)}×`;
+      }
       const bz = predictProb(curDElo, curCoord, curRes);
       const pinBase = projectOrtho(bu * 2 - 1, bv * 2 - 1, 0, W, H), pinTop = projectOrtho(bu * 2 - 1, bv * 2 - 1, bz, W, H);
       ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2.2;
@@ -558,7 +580,106 @@
       ctx.fillText(xTitle, pX.sx, pX.sy + 6);
       ctx.fillText(yTitle, pY.sx, pY.sy + 6);
       ctx.textAlign = "left"; ctx.fillStyle = muted; ctx.font = "11px ui-monospace, monospace";
-      ctx.fillText("Z: Coalition Win % (Orthographic Cube)", 14, 22);
+      ctx.fillText("Z: Coalition Win % • Hover surface or drag to rotate", 14, 22);
+
+      // Selected pin floating callout pill (always visible)
+      drawCallout(
+        ctx,
+        pinTop.sx,
+        pinTop.sy,
+        `Selected: ${(bz * 100).toFixed(1)}% Win`,
+        `${xValStr}  •  ${yValStr}`,
+        W,
+        H,
+        heatColor(bz),
+        false
+      );
+
+      // Interactive hover point highlight & floating tooltip
+      if (hover3D && !dragging) {
+        const hpBase = projectOrtho(hover3D.u * 2 - 1, hover3D.v * 2 - 1, 0, W, H);
+        const hpTop = projectOrtho(hover3D.u * 2 - 1, hover3D.v * 2 - 1, hover3D.z, W, H);
+        ctx.save();
+        ctx.strokeStyle = cssVar("--primary");
+        ctx.lineWidth = 1.6;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath(); ctx.moveTo(hpBase.sx, hpBase.sy); ctx.lineTo(hpTop.sx, hpTop.sy); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.beginPath(); ctx.arc(hpTop.sx, hpTop.sy, 5.5, 0, Math.PI * 2);
+        ctx.fillStyle = cssVar("--primary"); ctx.fill();
+        ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1.8; ctx.stroke();
+        ctx.restore();
+
+        let hxStr, hyStr;
+        if (currentSlice === "elo_coord") {
+          hxStr = `ΔElo +${Math.round(150 + hover3D.u * 650)}`;
+          hyStr = `Coord ${Math.round(hover3D.v * 100)}%`;
+        } else if (currentSlice === "elo_res") {
+          hxStr = `ΔElo +${Math.round(150 + hover3D.u * 650)}`;
+          hyStr = `Ships ${(0.5 * Math.pow(16.0, hover3D.v)).toFixed(2)}×`;
+        } else {
+          hxStr = `Coord ${Math.round(hover3D.u * 100)}%`;
+          hyStr = `Ships ${(0.5 * Math.pow(16.0, hover3D.v)).toFixed(2)}×`;
+        }
+        drawCallout(
+          ctx,
+          hpTop.sx,
+          hpTop.sy,
+          `Hover: ${(hover3D.z * 100).toFixed(1)}% Win`,
+          `${hxStr}  •  ${hyStr}`,
+          W,
+          H,
+          cssVar("--primary"),
+          true
+        );
+      }
+    }
+
+    function drawCallout(ctx, ax, ay, title, subtitle, W, H, accent, preferBelow) {
+      ctx.save();
+      ctx.font = "bold 11.5px ui-monospace, monospace";
+      const w1 = ctx.measureText(title).width;
+      ctx.font = "10.5px ui-monospace, monospace";
+      const w2 = ctx.measureText(subtitle).width;
+      const boxW = Math.max(w1, w2) + 20;
+      const boxH = 38;
+      let bx = ax + 14;
+      let by = preferBelow ? ay + 14 : ay - boxH - 14;
+      if (bx + boxW > W - 8) bx = ax - boxW - 14;
+      if (bx < 8) bx = 8;
+      if (by < 8) by = ay + 14;
+      if (by + boxH > H - 8) by = ay - boxH - 14;
+      by = Math.max(8, Math.min(H - boxH - 8, by));
+
+      // Leader line
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(bx + (bx > ax ? 0 : boxW), by + boxH / 2);
+      ctx.stroke();
+
+      // Rounded pill card
+      ctx.shadowColor = "rgba(0,0,0,0.35)";
+      ctx.shadowBlur = 8;
+      ctx.fillStyle = cssVar("--card");
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.roundRect(bx, by, boxW, boxH, 7);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.stroke();
+
+      // Text
+      ctx.textAlign = "left";
+      ctx.fillStyle = cssVar("--foreground");
+      ctx.font = "bold 11.5px ui-monospace, monospace";
+      ctx.fillText(title, bx + 10, by + 15);
+      ctx.fillStyle = cssVar("--muted-foreground");
+      ctx.font = "10.5px ui-monospace, monospace";
+      ctx.fillText(subtitle, bx + 10, by + 30);
+      ctx.restore();
     }
 
     function updateCalculator() {
@@ -607,6 +728,11 @@
       return dElo < allies[0].dElo ? padT + 8 : padT + (allies.length - 0.5) * ch;
     }
 
+    let hoverCoordCell = null;
+    let hoverResCell = null;
+    let last3DPts = [];
+    let hover3D = null;
+
     function drawCoordHeatmap() {
       const canvas = document.getElementById("canvas-coord-map");
       if (!canvas) return;
@@ -623,6 +749,9 @@
       for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
         const val = COORD_GRID[r][c], x = padL + c * cw, y = padT + r * ch;
         ctx.fillStyle = heatColor(val / 100); ctx.globalAlpha = 0.85; ctx.fillRect(x + 2, y + 2, cw - 4, ch - 4); ctx.globalAlpha = 1;
+        if (hoverCoordCell && hoverCoordCell.r === r && hoverCoordCell.c === c) {
+          ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2.4; ctx.strokeRect(x + 3, y + 3, cw - 6, ch - 6);
+        }
         ctx.fillStyle = val >= 35 && val <= 70 ? "#0f172a" : "#ffffff";
         ctx.font = "bold 14px ui-monospace, monospace"; ctx.textAlign = "center";
         ctx.fillText(val + "%", x + cw / 2, y + ch / 2 + 2);
@@ -650,6 +779,23 @@
       for (let c = 0; c < cols; c++) ctx.fillText(COORD_COLS[c], padL + (c + 0.5) * cw, H - 16);
       ctx.fillStyle = fg; ctx.font = "bold 10.5px sans-serif";
       ctx.fillText("Dashed white line = fitted 50/50 break-even boundary", padL + gw / 2, 16);
+
+      if (hoverCoordCell) {
+        const { r, c } = hoverCoordCell;
+        const obs = COORD_GRID[r][c];
+        const mod = (predictProb(COORD_ALLIES[r].dElo, c / 4, 3.0) * 100).toFixed(1);
+        drawCallout(
+          ctx,
+          padL + (c + 0.5) * cw,
+          padT + (r + 0.5) * ch,
+          `Obs: ${obs}% (${Math.round(obs/25)}/4) • Fit: ${mod}%`,
+          `ΔElo +${COORD_ALLIES[r].dElo} • ${COORD_COLS[c]}`,
+          W,
+          H,
+          cssVar("--primary"),
+          false
+        );
+      }
     }
 
     function drawResHeatmap() {
@@ -661,6 +807,7 @@
       ctx.clearRect(0, 0, W, H); ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
 
       const grid = currentResMode === "ff" ? RES_GRID_FF : RES_GRID_FFA;
+      const ratios = [6.0, 3.0, 1.5, 1.0, 0.6];
       const padL = 104, padR = 16, padT = 26, padB = 46;
       const gw = W - padL - padR, gh = H - padT - padB;
       const rows = RES_ALLIES.length, cols = RES_COLS.length;
@@ -669,6 +816,9 @@
       for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
         const val = grid[r][c], x = padL + c * cw, y = padT + r * ch;
         ctx.fillStyle = heatColor(val / 100); ctx.globalAlpha = 0.85; ctx.fillRect(x + 2, y + 2, cw - 4, ch - 4); ctx.globalAlpha = 1;
+        if (hoverResCell && hoverResCell.r === r && hoverResCell.c === c) {
+          ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2.4; ctx.strokeRect(x + 3, y + 3, cw - 6, ch - 6);
+        }
         ctx.fillStyle = val >= 35 && val <= 70 ? "#0f172a" : "#ffffff";
         ctx.font = "bold 14px ui-monospace, monospace"; ctx.textAlign = "center";
         ctx.fillText(val + "%", x + cw / 2, y + ch / 2 + 2);
@@ -691,6 +841,23 @@
         currentResMode === "ff" ? "100% Zero-Lat Focus-Fire: Starting ships amplify coordination" : "0% Uncoordinated FFA: Even 6x starting ships = 0% wins",
         padL + gw / 2, 16
       );
+
+      if (hoverResCell) {
+        const { r, c } = hoverResCell;
+        const obs = grid[r][c];
+        const mod = (predictProb(RES_ALLIES[r].dElo, currentResMode === "ff" ? 1.0 : 0.0, ratios[c]) * 100).toFixed(1);
+        drawCallout(
+          ctx,
+          padL + (c + 0.5) * cw,
+          padT + (r + 0.5) * ch,
+          `Obs: ${obs}% (${Math.round(obs/25)}/4) • Fit: ${mod}%`,
+          `ΔElo +${RES_ALLIES[r].dElo} • Ships ${ratios[c].toFixed(1)}×`,
+          W,
+          H,
+          cssVar("--primary"),
+          false
+        );
+      }
     }
 
     function drawAll() { draw3DSurface(); drawCoordHeatmap(); drawResHeatmap(); }
@@ -719,6 +886,7 @@
 
     document.querySelectorAll(".slice-btn").forEach(btn => btn.addEventListener("click", () => {
       currentSlice = btn.dataset.slice;
+      hover3D = null;
       document.querySelectorAll(".slice-btn").forEach(b => {
         b.className = b === btn
           ? "slice-btn px-2.5 py-1 rounded-md font-semibold border border-[var(--primary)] bg-[var(--primary)] text-[var(--primary-foreground)] cursor-pointer"
@@ -729,14 +897,46 @@
 
     const c3d = document.getElementById("canvas-3d");
     let dragging = false, lx = 0, ly = 0;
-    c3d.addEventListener("pointerdown", e => { dragging = true; lx = e.clientX; ly = e.clientY; c3d.setPointerCapture(e.pointerId); });
+    c3d.addEventListener("pointerdown", e => { dragging = true; hover3D = null; lx = e.clientX; ly = e.clientY; c3d.setPointerCapture(e.pointerId); draw3DSurface(); });
     c3d.addEventListener("pointerup", () => { dragging = false; });
+    c3d.addEventListener("pointerleave", () => { if (!dragging && hover3D) { hover3D = null; draw3DSurface(); } });
     c3d.addEventListener("pointermove", e => {
-      if (!dragging) return;
-      yaw += (e.clientX - lx) * 0.01;
-      pitch = Math.max(0.15, Math.min(1.25, pitch + (e.clientY - ly) * 0.008));
-      lx = e.clientX; ly = e.clientY;
-      draw3DSurface();
+      if (dragging) {
+        yaw += (e.clientX - lx) * 0.01;
+        pitch = Math.max(0.15, Math.min(1.25, pitch + (e.clientY - ly) * 0.008));
+        lx = e.clientX; ly = e.clientY;
+        draw3DSurface();
+        return;
+      }
+      const rect = c3d.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) * (c3d.width / rect.width);
+      const my = (e.clientY - rect.top) * (c3d.height / rect.height);
+      let best = null, bestD = 22;
+      for (const pt of last3DPts) {
+        const d = Math.hypot(pt.sx - mx, pt.sy - my);
+        if (d < bestD) { bestD = d; best = pt; }
+      }
+      if (best !== hover3D) { hover3D = best; draw3DSurface(); }
+    });
+
+    // 2D heatmap hover listeners
+    const bindHeatmapHover = (canvasId, padL, padR, padT, padB, rows, cols, onChange) => {
+      const cv = document.getElementById(canvasId);
+      cv.addEventListener("pointerleave", () => onChange(null));
+      cv.addEventListener("pointermove", e => {
+        const rect = cv.getBoundingClientRect();
+        const mx = (e.clientX - rect.left) * (cv.width / rect.width);
+        const my = (e.clientY - rect.top) * (cv.height / rect.height);
+        const cw = (cv.width - padL - padR) / cols, ch = (cv.height - padT - padB) / rows;
+        const c = Math.floor((mx - padL) / cw), r = Math.floor((my - padT) / ch);
+        onChange(r >= 0 && r < rows && c >= 0 && c < cols ? { r, c } : null);
+      });
+    };
+    bindHeatmapHover("canvas-coord-map", 112, 16, 26, 46, COORD_ALLIES.length, COORD_COLS.length, cell => {
+      hoverCoordCell = cell; drawCoordHeatmap();
+    });
+    bindHeatmapHover("canvas-res-map", 104, 16, 26, 46, RES_ALLIES.length, RES_COLS.length, cell => {
+      hoverResCell = cell; drawResHeatmap();
     });
 
     ["sl-boss-elo", "sl-ally-elo", "sl-coord", "sl-res"].forEach(id =>
