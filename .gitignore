@@ -24,6 +24,7 @@ data_lightzero*/
 outputs/
 checkpoints/*
 !checkpoints/galcon_transformer_best.pt
+!checkpoints/galcon_wave7_p1.pt
 !checkpoints/galcon_gen3_champion.pt
 !checkpoints/galcon_gen4_ppo_s2.pt
 !checkpoints/planet_transformer_best.pt
@@ -35,6 +36,7 @@ ckpts/
 *.pth.tar
 *.pt
 !checkpoints/galcon_transformer_best.pt
+!checkpoints/galcon_wave7_p1.pt
 !checkpoints/galcon_gen3_champion.pt
 !checkpoints/galcon_gen4_ppo_s2.pt
 !checkpoints/planet_transformer_best.pt

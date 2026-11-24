@@ -2403,6 +2403,7 @@ def _gen4_ei_worker(
     rollout_horizon: int,
     lua_opp_str: str,
     filter_losing_policy: bool,
+    lua_opp2_str: str = "",
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     torch.set_num_threads(1)
     return collect_gen4_multisend_ei_dataset(
@@ -2411,6 +2412,7 @@ def _gen4_ei_worker(
         seed=seed,
         rollout_horizon=rollout_horizon,
         lua_opp_path=Path(lua_opp_str) if lua_opp_str else None,
+        lua_opp2_path=Path(lua_opp2_str) if lua_opp2_str else None,
         filter_losing_policy=filter_losing_policy,
         workers=1,
     )
@@ -2421,14 +2423,15 @@ def collect_gen4_multisend_ei_dataset(
     *,
     num_games: int = 56,
     seed: int = 30000,
-    rollout_horizon: int = 12,
+    rollout_horizon: int = 16,
     lua_opp_path: Optional[Path] = None,
+    lua_opp2_path: Optional[Path] = None,
     filter_losing_policy: bool = True,
     workers: int = 1,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """Collect winning/drawing multi-send trajectories from our Opponent-Adaptive 2-Ply Reactive Search.
 
-    Distills ONLY our own search agent's plans (never imitating external opponents) into Gen 4's
+    Distills ONLY our own search agent's plans (never imitating external opponents) into Gen 4/7's
     native pairwise ``(ms_target, ms_frac)`` head + Canonical D4 coordinates + value + ``t+10`` + ``/REDIR``.
     """
     if workers > 1 and num_games >= 2:
@@ -2438,6 +2441,7 @@ def collect_gen4_multisend_ei_dataset(
         shards = [base + (1 if i < rem else 0) for i in range(n_w)]
         t_par = time.time()
         lua_str = str(lua_opp_path.resolve()) if (lua_opp_path is not None and lua_opp_path.is_file()) else ""
+        lua2_str = str(lua_opp2_path.resolve()) if (lua_opp2_path is not None and lua_opp2_path.is_file()) else ""
         ctx = mp.get_context("spawn")
         with ProcessPoolExecutor(max_workers=n_w, mp_context=ctx) as ex:
             futs = [
@@ -2449,6 +2453,7 @@ def collect_gen4_multisend_ei_dataset(
                     rollout_horizon,
                     lua_str,
                     filter_losing_policy,
+                    lua2_str,
                 )
                 for idx, cnt in enumerate(shards)
             ]
@@ -2464,21 +2469,26 @@ def collect_gen4_multisend_ei_dataset(
 
     rng = random.Random(seed)
     lua_opp = None
+    lua_opp2 = None
     if lua_opp_path is not None and lua_opp_path.is_file():
         from galcon.lua_bridge import GalconLuaBotBridge
 
         lua_opp = GalconLuaBotBridge(lua_opp_path)
+    if lua_opp2_path is not None and lua_opp2_path.is_file():
+        from galcon.lua_bridge import GalconLuaBotBridge
+
+        lua_opp2 = GalconLuaBotBridge(lua_opp2_path)
 
     search_ag = GalconSearchTransformerAgent(
         ckpt_path,
         use_d4_canonical=True,
         rollout_horizon=rollout_horizon,
         num_plies=2,
-        time_budget_sec=0.14,
-        neural_value_weight=0.85,
+        time_budget_sec=0.24,
+        neural_value_weight=0.70,
         reactive_mid_ply=True,
         opponent_adaptive=True,
-        prior_bonus=0.025,
+        prior_bonus=0.010,
     )
 
     pf_l, tf_l, ef_l, le_l, om_l, pm_l = [], [], [], [], [], []
@@ -2493,6 +2503,7 @@ def collect_gen4_multisend_ei_dataset(
     opp_cycle = ["rusher", "tactical", "classic", "macro", "rusher", "tactical"]
     bot_idx = 0
     boss_idx = 0
+    boss2_idx = 0
 
     try:
         for g in range(num_games):
@@ -2502,7 +2513,31 @@ def collect_gen4_multisend_ei_dataset(
 
             is_selfplay = False
             is_boss = False
-            if lua_opp is not None:
+            if lua_opp is not None and lua_opp2 is not None:
+                slot = g % 5
+                if slot in (0, 1):
+                    is_boss = True
+                    boss_idx += 1
+                    opp_bot = lua_opp
+                    our_pid = 1 if (boss_idx % 2 == 1) else 2
+                    opp_pid = 2 if our_pid == 1 else 1
+                elif slot == 2:
+                    is_boss = True
+                    boss2_idx += 1
+                    opp_bot = lua_opp2
+                    our_pid = 1 if (boss2_idx % 2 == 1) else 2
+                    opp_pid = 2 if our_pid == 1 else 1
+                elif slot == 3:
+                    is_selfplay = True
+                    opp_bot = None
+                    our_pid = opp_pid = 0
+                else:
+                    opp_kind = opp_cycle[bot_idx % len(opp_cycle)]
+                    bot_idx += 1
+                    opp_bot = _make_sparring_bot(rng, opp_kind)
+                    our_pid = 1 if (bot_idx % 2 == 0) else 2
+                    opp_pid = 2 if our_pid == 1 else 1
+            elif lua_opp is not None:
                 slot = g % 4
                 if slot in (0, 1):
                     is_boss = True
@@ -2624,6 +2659,8 @@ def collect_gen4_multisend_ei_dataset(
     finally:
         if lua_opp is not None:
             lua_opp.close()
+        if lua_opp2 is not None:
+            lua_opp2.close()
 
     data = {
         "planet_feats": np.stack(pf_l).astype(np.float32),
@@ -4029,11 +4066,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.stage == "gen4_ei":
         resume_p = Path(args.resume) if args.resume else Path("checkpoints/galcon_transformer_best.pt")
         lua_p = Path(args.lua_opp) if args.lua_opp else None
+        lua_p2 = Path(args.lua_opp2) if args.lua_opp2 else None
         g4_data, g4_redir = collect_gen4_multisend_ei_dataset(
             resume_p,
             num_games=args.search_games,
             seed=args.seed,
             lua_opp_path=lua_p,
+            lua_opp2_path=lua_p2,
             workers=args.workers,
         )
         old_r = _load_redir_npz()

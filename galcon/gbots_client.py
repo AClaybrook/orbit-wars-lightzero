@@ -209,7 +209,9 @@ def run_gbots_loop(
     return ticks_handled
 
 
-def _build_bot(bot_kind: str, checkpoint: Optional[str]) -> Callable[[GalconSim, int], List[Order]]:
+def _build_bot(
+    bot_kind: str, checkpoint: Optional[str], checkpoint2: Optional[str] = None
+) -> Callable[[GalconSim, int], List[Order]]:
     if bot_kind == "classic":
         return GalconClassicBot().act
     if bot_kind == "tactical":
@@ -222,15 +224,24 @@ def _build_bot(bot_kind: str, checkpoint: Optional[str]) -> Callable[[GalconSim,
         from galcon.heuristic_bot import GalconMacroBot
 
         return GalconMacroBot().act
-    if bot_kind in ("transformer", "search"):
-        from galcon.transformer_bot import GalconSearchTransformerAgent, GalconTransformerAgent
+    if bot_kind in ("transformer", "search", "ensemble"):
+        from galcon.transformer_bot import (
+            EnsembleGalconSearchAgent,
+            GalconSearchTransformerAgent,
+            GalconTransformerAgent,
+        )
 
         ckpt = checkpoint or "checkpoints/galcon_transformer_best.pt"
         if not Path(ckpt).is_file():
             raise FileNotFoundError(f"Galcon checkpoint not found: {ckpt}")
+        if bot_kind == "ensemble":
+            ckpt2 = checkpoint2 or "checkpoints/galcon_wave7_p1.pt"
+            if not Path(ckpt2).is_file():
+                raise FileNotFoundError(f"Galcon ensemble secondary checkpoint not found: {ckpt2}")
+            return EnsembleGalconSearchAgent([ckpt, ckpt2], use_d4_canonical=True, use_d4_tta=False).act
         if bot_kind == "search":
-            return GalconSearchTransformerAgent(ckpt).act
-        return GalconTransformerAgent(ckpt).act
+            return GalconSearchTransformerAgent(ckpt, use_d4_canonical=True, use_d4_tta=False).act
+        return GalconTransformerAgent(ckpt, use_d4_canonical=True, use_d4_tta=False).act
     raise ValueError(f"Unknown --bot kind: {bot_kind}")
 
 
@@ -238,12 +249,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Run our Galcon bot over Phil Hassey's gbots pipe protocol.")
     parser.add_argument(
         "--bot",
-        choices=["tactical", "classic", "rusher", "macro", "transformer", "search"],
+        choices=["tactical", "classic", "rusher", "macro", "transformer", "search", "ensemble"],
         default="transformer",
     )
     parser.add_argument("--checkpoint", default="checkpoints/galcon_transformer_best.pt")
+    parser.add_argument("--checkpoint2", default="checkpoints/galcon_wave7_p1.pt")
     args = parser.parse_args(argv)
-    act_fn = _build_bot(args.bot, args.checkpoint)
+    act_fn = _build_bot(args.bot, args.checkpoint, args.checkpoint2)
     run_gbots_loop(act_fn)
     return 0
 
