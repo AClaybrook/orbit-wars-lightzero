@@ -294,7 +294,7 @@ class GalconLuaBotBridge:
         loop_fn: str = "auto",
         reset_fn: str = "auto",
     ) -> None:
-        self.lua_bot_path = Path(lua_bot_path)
+        self.lua_bot_path = Path(lua_bot_path).resolve()
         if not self.lua_bot_path.is_file():
             raise FileNotFoundError(f"Lua bot file not found: {self.lua_bot_path}")
         lua_bin = shutil.which("lua5.3") or shutil.which("lua")

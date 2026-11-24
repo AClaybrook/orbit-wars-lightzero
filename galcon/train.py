@@ -18,9 +18,12 @@ Gen 2 Teacher-Free Self-Play RL Flywheel:
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 import copy
 import math
+import multiprocessing as mp
 import random
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -1792,6 +1795,7 @@ def rl_mirror_league_ppo_gen3(
     draw_penalty: float = -0.40,
     eval_every: int = 5,
     seed: int = 20000,
+    train_threads: int = 2,
 ) -> Path:
     """Gen 3 Paired-Seed Mirror League PPO (GRPO-style variance reduction) + Large-Arena Generalization.
 
@@ -1801,7 +1805,7 @@ def rl_mirror_league_ppo_gen3(
     and large 22-28 planet asymmetric ``gbots`` arenas against Gen 2/Gen 3 snapshots, heuristics,
     and optionally an external Galcon 2 Lua boss (e.g. ``esparano``'s ``Sparky v1.6``).
     """
-    torch.set_num_threads(2)
+    torch.set_num_threads(max(1, int(train_threads)))
     torch.manual_seed(seed)
     np.random.seed(seed)
     rng = random.Random(seed)
@@ -2151,7 +2155,7 @@ def rl_mirror_league_ppo_gen3(
             ent_coef = 0.005 * (1.0 - 0.50 * (it / max(1, iters)))
             r_iter = iter(redir_loader) if redir_loader is not None else None
 
-            torch.set_num_threads(2)
+            torch.set_num_threads(max(1, int(train_threads)))
             for _ in range(2):
                 for b_idx, (pf, tf, ef, le, om, pm, acts, f_acts, old_lp, adv, ret, aux_o, aux_s) in enumerate(loader):
                     pf, tf, ef, le, om, pm, acts, f_acts, aux_o, aux_s = _trim_batch_n(
@@ -2282,6 +2286,26 @@ def rl_mirror_league_ppo_gen3(
 # ---------------------------------------------------------------------------
 
 
+def _gen4_ei_worker(
+    ckpt_path_str: str,
+    num_games: int,
+    seed: int,
+    rollout_horizon: int,
+    lua_opp_str: str,
+    filter_losing_policy: bool,
+) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
+    torch.set_num_threads(1)
+    return collect_gen4_multisend_ei_dataset(
+        Path(ckpt_path_str),
+        num_games=num_games,
+        seed=seed,
+        rollout_horizon=rollout_horizon,
+        lua_opp_path=Path(lua_opp_str) if lua_opp_str else None,
+        filter_losing_policy=filter_losing_policy,
+        workers=1,
+    )
+
+
 def collect_gen4_multisend_ei_dataset(
     ckpt_path: Path,
     *,
@@ -2290,12 +2314,44 @@ def collect_gen4_multisend_ei_dataset(
     rollout_horizon: int = 12,
     lua_opp_path: Optional[Path] = None,
     filter_losing_policy: bool = True,
+    workers: int = 1,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """Collect winning/drawing multi-send trajectories from our Opponent-Adaptive 2-Ply Reactive Search.
 
     Distills ONLY our own search agent's plans (never imitating external opponents) into Gen 4's
     native pairwise ``(ms_target, ms_frac)`` head + Canonical D4 coordinates + value + ``t+10`` + ``/REDIR``.
     """
+    if workers > 1 and num_games >= 2:
+        n_w = min(int(workers), int(num_games))
+        base = num_games // n_w
+        rem = num_games % n_w
+        shards = [base + (1 if i < rem else 0) for i in range(n_w)]
+        t_par = time.time()
+        lua_str = str(lua_opp_path.resolve()) if (lua_opp_path is not None and lua_opp_path.is_file()) else ""
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=n_w, mp_context=ctx) as ex:
+            futs = [
+                ex.submit(
+                    _gen4_ei_worker,
+                    str(ckpt_path.resolve()),
+                    cnt,
+                    seed + idx * 1000,
+                    rollout_horizon,
+                    lua_str,
+                    filter_losing_policy,
+                )
+                for idx, cnt in enumerate(shards)
+            ]
+            results = [f.result() for f in futs]
+        merged_d = _merge_datasets([r[0] for r in results])
+        merged_r = _merge_datasets([r[1] for r in results])
+        print(
+            f"[Galcon Gen4 Multi-Send EI x{n_w} workers] Merged {len(merged_d.get('val_targets', []))} states "
+            f"+ {len(merged_r.get('planet_feats', []))} redir states across {num_games} games in {time.time()-t_par:.1f}s",
+            flush=True,
+        )
+        return merged_d, merged_r
+
     rng = random.Random(seed)
     lua_opp = None
     if lua_opp_path is not None and lua_opp_path.is_file():
@@ -2552,9 +2608,10 @@ def train_gen4_multisend_supervised(
     lr: float = 3.5e-4,
     seed: int = 42,
     label: str = "Gen4-MultiSend-EI",
+    train_threads: int = 2,
 ) -> Path:
     """Warm-start ``GalconGen4Transformer`` from Gen 3 weights and train the native multi-send head in Canonical D4."""
-    torch.set_num_threads(2)
+    torch.set_num_threads(max(1, int(train_threads)))
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
@@ -2750,6 +2807,309 @@ def _fast_gen4_neural_act(
     return orders
 
 
+def _load_gen4_policy_from_ckpt(ckpt_path: Path, *, allow_non_ms: bool = False) -> GalconPlanetTransformer:
+    """Instantiate a ``GalconPlanetTransformer`` directly from a saved checkpoint dict."""
+    ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
+    cfg = ckpt["model_config"]
+    enable_ms = (
+        bool(cfg.get("enable_multi_send", False) or any(k.startswith("ms_head.") for k in ckpt["model_state_dict"]))
+        if allow_non_ms
+        else True
+    )
+    model = build_galcon_gen2_transformer(
+        d_model=int(cfg["d_model"]),
+        n_heads=int(cfg["n_heads"]),
+        n_layers=int(cfg["n_layers"]),
+        dim_ff=int(cfg["dim_ff"]),
+        feature_version=int(cfg.get("feature_version", 2)),
+        enable_multi_send=enable_ms,
+    )
+    model.load_state_dict(ckpt["model_state_dict"])
+    return model
+
+
+def _run_gen4_ppo_episode(
+    policy: GalconPlanetTransformer,
+    map_seed: int,
+    n_pl: int,
+    w: float,
+    h: float,
+    sym: bool,
+    ours_pid: int,
+    opp_snap: Optional[GalconPlanetTransformer],
+    opp_bot,
+    *,
+    is_boss: bool,
+    gamma: float,
+    gae_lam: float,
+    frac_std: float,
+    draw_penalty: float,
+    boss_draw_penalty: float,
+    max_sends_per_planet: int,
+):
+    """Run one Gen 4 multi-send PPO rollout episode and compute GAE advantages/returns."""
+    opp_pid = 2 if ours_pid == 1 else 1
+    sim = GalconSim.create(
+        seed=map_seed, num_planets=n_pl, width=w, height=h, max_ticks=220 if n_pl >= 22 else 200, symmetric=sym
+    )
+    ep_steps = []
+    snaps: List[Tuple[int, np.ndarray, np.ndarray]] = []
+    prev_pot = evaluate_galcon_state(sim, ours_pid)
+    while not sim.done:
+        if sim.tick % 2 == 0:
+            enc = extract_galcon_features(sim, ours_pid, feature_version=2)
+            n = len(enc.planet_ids)
+            so, ss = _snapshot_planet_state(sim, enc.planet_ids, ours_pid)
+            snaps.append((sim.tick, so, ss))
+            enc_c = copy.copy(enc)
+            enc_c.planet_feats = canonicalize_galcon_d4(enc.planet_feats)
+            pad = pad_galcon_state(enc_c)
+
+            with torch.no_grad():
+                pf_t = torch.from_numpy(enc_c.planet_feats[None])
+                tf_t = torch.from_numpy(enc_c.timeline_feats[None])
+                ef_t = torch.from_numpy(enc_c.edge_feats[None])
+                pm_t = torch.ones((1, n), dtype=torch.bool)
+                _, _, val, h_emb = policy(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
+                ms_l, ms_f = policy.predict_multi_send(h_emb, ef_t)
+                le_t = torch.from_numpy(enc.legal_edges)
+                om_t = torch.from_numpy(enc.owned_mask)
+                edge_m = om_t.unsqueeze(-1) & le_t
+
+                ms_l0 = ms_l[0].masked_fill(~edge_m, -1e9)
+                b_dist = torch.distributions.Bernoulli(logits=ms_l0)
+                a_edge = b_dist.sample() * edge_m.float()
+                ms_probs_np = torch.sigmoid(ms_l0).numpy()
+                a_np = a_edge.numpy()
+                for i in range(n):
+                    if enc.owned_mask[i]:
+                        act_js = np.where(a_np[i] > 0.5)[0]
+                        if len(act_js) > max_sends_per_planet:
+                            keep = act_js[np.argsort(-ms_probs_np[i, act_js])[:max_sends_per_planet]]
+                            a_np[i] = 0.0
+                            a_np[i, keep] = 1.0
+                a_edge = torch.from_numpy(a_np)
+                lp_bern = (b_dist.log_prob(a_edge) * edge_m.float()).sum()
+
+                f_mu = ms_f[0].clamp(0.06, 0.98)
+                f_dist = torch.distributions.Normal(f_mu, frac_std)
+                f_samp = f_dist.sample().clamp(0.06, 1.0)
+                lp_frac = (f_dist.log_prob(f_samp) * a_edge).sum()
+                total_lp = float((lp_bern + 0.20 * lp_frac).item())
+                v_pred = float(val[0].item())
+
+                o_ours: List[Order] = []
+                f_np = f_samp.numpy()
+                for i in range(n):
+                    if not enc.owned_mask[i]:
+                        continue
+                    orig_s = float(enc.planets[i].ships)
+                    if orig_s < 2.0:
+                        continue
+                    act_js = [int(j) for j in np.where(a_np[i] > 0.5)[0]]
+                    if not act_js:
+                        continue
+                    act_js.sort(key=lambda j: -float(ms_probs_np[i, j]))
+                    rem = orig_s
+                    for j in act_js:
+                        if rem < 2.0:
+                            break
+                        want = min(rem, max(1.0, float(f_np[i, j]) * orig_s))
+                        ratio = want / max(1.0, rem)
+                        pct = 100 if ratio >= 0.92 else max(5, min(100, int(round(ratio * 100.0))))
+                        sent = math.floor(rem * (pct / 100.0) + 1e-9)
+                        if sent >= 1:
+                            o_ours.append(SendOrder(enc.planet_ids[i], enc.planet_ids[j], pct))
+                            rem = max(0.0, rem - sent)
+
+                if sim.allow_redirect and sim.fleets:
+                    renc = extract_galcon_redir_features(sim, enc)
+                    if renc.fleet_ids:
+                        rlogits = policy.predict_redir_logits(
+                            h_emb,
+                            torch.from_numpy(renc.cur_dst_idx[None]),
+                            torch.from_numpy(renc.redir_feats[None]),
+                            pm_t,
+                        )
+                        rprobs = F.softmax(rlogits[0], dim=-1).numpy()
+                        for fi, fid in enumerate(renc.fleet_ids):
+                            c_idx = int(renc.cur_dst_idx[fi])
+                            bj = int(np.argmax(rprobs[fi]))
+                            if bj != c_idx and float(rprobs[fi, bj]) >= 0.55:
+                                o_ours.append(RedirOrder(fid, enc.planet_ids[bj]))
+
+            a_pad = np.zeros((GALCON_MAX_PLANETS, GALCON_MAX_PLANETS), dtype=np.float32)
+            a_pad[:n, :n] = a_np
+            f_pad = np.zeros((GALCON_MAX_PLANETS, GALCON_MAX_PLANETS), dtype=np.float32)
+            f_pad[:n, :n] = f_np
+
+            o_opp = _fast_gen4_neural_act(opp_snap, sim, opp_pid) if opp_snap is not None else opp_bot.act(sim, opp_pid)
+            cur_tick = sim.tick
+            sim.step({ours_pid: o_ours, opp_pid: o_opp})
+            if not sim.done:
+                sim.step({})
+            new_pot = evaluate_galcon_state(sim, ours_pid)
+            step_rew = 0.05 * (new_pot - prev_pot)
+            prev_pot = new_pot
+            ep_steps.append((cur_tick, pad, a_pad, f_pad, total_lp, v_pred, step_rew))
+        else:
+            sim.step({})
+
+    enc_f = extract_galcon_features(sim, ours_pid, feature_version=2)
+    so, ss = _snapshot_planet_state(sim, enc_f.planet_ids, ours_pid)
+    snaps.append((sim.tick, so, ss))
+    win = sim.winner()
+    speed_bonus = 0.10 * max(0.0, 1.0 - float(sim.tick) / max(1.0, float(sim.max_ticks)))
+    d_rew = boss_draw_penalty if is_boss else draw_penalty
+    term_rew = (1.0 + speed_bonus) if win == ours_pid else (d_rew if win == 0 else -1.0)
+    won = 1 if win == ours_pid else 0
+
+    T = len(ep_steps)
+    advs = np.zeros((T,), dtype=np.float32)
+    rets = np.zeros((T,), dtype=np.float32)
+    if T > 0:
+        rews = [s[6] for s in ep_steps]
+        rews[-1] += term_rew
+        vals = [s[5] for s in ep_steps] + [0.0]
+        gae = 0.0
+        for t in reversed(range(T)):
+            delta = rews[t] + gamma * vals[t + 1] - vals[t]
+            gae = delta + gamma * gae_lam * gae
+            advs[t] = gae
+            rets[t] = float(np.clip(gae + vals[t], -1.15, 1.15))
+    return ep_steps, snaps, advs, rets, term_rew, won
+
+
+def _append_gen4_pair_to_buf(buf: Dict[str, List], ep_a, ep_b) -> int:
+    """Append paired P1/P2 rollout trajectories with GRPO split-pair centering to buffer."""
+    term_a, won_a = ep_a[4], ep_a[5]
+    term_b, won_b = ep_b[4], ep_b[5]
+    pair_shift = 0.0
+    split = 0
+    if won_a != won_b:
+        split = 1
+        pair_shift = 0.30 * 0.5 * (term_a + term_b)
+    for ep_steps, snaps, advs, rets, _, _ in (ep_a, ep_b):
+        for idx_t, (cur_tick, pad, a_pad, f_pad, old_lp, _, _) in enumerate(ep_steps):
+            target_tick = cur_tick + 10
+            fut_o, fut_s = snaps[-1][1], snaps[-1][2]
+            for st, so_s, ss_s in snaps:
+                if st >= target_tick:
+                    fut_o, fut_s = so_s, ss_s
+                    break
+            buf["pf"].append(pad["planet_feats"])
+            buf["tf"].append(pad["timeline_feats"])
+            buf["ef"].append(pad["edge_feats"])
+            buf["le"].append(pad["legal_edges"])
+            buf["om"].append(pad["owned_mask"])
+            buf["pm"].append(pad["pad_mask"])
+            buf["acts"].append(a_pad)
+            buf["f_acts"].append(f_pad)
+            buf["old_lp"].append(old_lp)
+            buf["ret"].append(rets[idx_t])
+            buf["adv"].append(advs[idx_t] - pair_shift)
+            buf["aux_o"].append(fut_o)
+            buf["aux_s"].append(fut_s)
+    return split
+
+
+def _gen4_ppo_rollout_worker(args_tuple):
+    """Worker entrypoint for parallel paired-mirror Gen 4 PPO rollout collection."""
+    (
+        policy_ckpt_str,
+        snap_ckpt_strs,
+        pair_jobs,
+        lua_opp_str,
+        lua_opp2_str,
+        gamma,
+        gae_lam,
+        frac_std,
+        draw_penalty,
+        boss_draw_penalty,
+        max_sends_per_planet,
+        worker_seed,
+    ) = args_tuple
+    torch.set_num_threads(1)
+    torch.manual_seed(worker_seed)
+    np.random.seed(worker_seed % (2**31 - 1))
+    w_rng = random.Random(worker_seed)
+
+    policy = _load_gen4_policy_from_ckpt(Path(policy_ckpt_str)).eval()
+    for p in policy.parameters():
+        p.requires_grad_(False)
+
+    needed_snaps = {opp_idx for (_, _, _, _, _, ok, opp_idx) in pair_jobs if ok == "snap"}
+    snap_map: Dict[int, GalconPlanetTransformer] = {}
+    for s_idx in needed_snaps:
+        sm = _load_gen4_policy_from_ckpt(Path(snap_ckpt_strs[s_idx]), allow_non_ms=True).eval()
+        for p in sm.parameters():
+            p.requires_grad_(False)
+        snap_map[s_idx] = sm
+
+    lua_opp = None
+    lua_opp2 = None
+    buf: Dict[str, List] = {
+        k: [] for k in ("pf", "tf", "ef", "le", "om", "pm", "acts", "f_acts", "old_lp", "adv", "ret", "aux_o", "aux_s")
+    }
+    wins = sp_wins = sp_eps = bot_wins = bot_eps = boss_wins = boss_eps = split_pairs = total_eps = 0
+
+    try:
+        if lua_opp_str:
+            from galcon.lua_bridge import GalconLuaBotBridge
+
+            lua_opp = GalconLuaBotBridge(lua_opp_str)
+        if lua_opp2_str:
+            from galcon.lua_bridge import GalconLuaBotBridge
+
+            lua_opp2 = GalconLuaBotBridge(lua_opp2_str)
+
+        for map_seed, n_pl, w, h, sym, opp_kind, opp_idx in pair_jobs:
+            opp_snap = snap_map[opp_idx] if opp_kind == "snap" else None
+            opp_bot = None
+            is_boss = False
+            if opp_kind == "boss":
+                opp_bot = lua_opp
+                is_boss = True
+            elif opp_kind == "boss2":
+                opp_bot = lua_opp2 if lua_opp2 is not None else _make_sparring_bot(w_rng, "tactical")
+            elif opp_kind != "snap":
+                opp_bot = _make_sparring_bot(w_rng, opp_kind)
+
+            ep_a = _run_gen4_ppo_episode(
+                policy, map_seed, n_pl, w, h, sym, 1, opp_snap, opp_bot,
+                is_boss=is_boss, gamma=gamma, gae_lam=gae_lam, frac_std=frac_std,
+                draw_penalty=draw_penalty, boss_draw_penalty=boss_draw_penalty,
+                max_sends_per_planet=max_sends_per_planet,
+            )
+            ep_b = _run_gen4_ppo_episode(
+                policy, map_seed, n_pl, w, h, sym, 2, opp_snap, opp_bot,
+                is_boss=is_boss, gamma=gamma, gae_lam=gae_lam, frac_std=frac_std,
+                draw_penalty=draw_penalty, boss_draw_penalty=boss_draw_penalty,
+                max_sends_per_planet=max_sends_per_planet,
+            )
+            total_eps += 2
+            won_a, won_b = ep_a[5], ep_b[5]
+            wins += won_a + won_b
+            if is_boss:
+                boss_eps += 2
+                boss_wins += won_a + won_b
+            elif opp_snap is not None:
+                sp_eps += 2
+                sp_wins += won_a + won_b
+            else:
+                bot_eps += 2
+                bot_wins += won_a + won_b
+            split_pairs += _append_gen4_pair_to_buf(buf, ep_a, ep_b)
+    finally:
+        if lua_opp is not None:
+            lua_opp.close()
+        if lua_opp2 is not None:
+            lua_opp2.close()
+
+    arr_buf = {k: np.stack(v) for k, v in buf.items()} if buf["ret"] else {}
+    return arr_buf, wins, sp_wins, sp_eps, bot_wins, bot_eps, boss_wins, boss_eps, split_pairs, total_eps
+
+
 def rl_mirror_league_ppo_gen4(
     ckpt_path: Path,
     out_path: Path,
@@ -2757,6 +3117,7 @@ def rl_mirror_league_ppo_gen4(
     redir_replay: Optional[Dict[str, np.ndarray]] = None,
     anchor_ckpt_path: Optional[Path] = None,
     lua_opp_path: Optional[Path] = None,
+    lua_opp2_path: Optional[Path] = None,
     iters: int = 12,
     pairs_per_iter: int = 8,
     lr: float = 4.5e-5,
@@ -2766,9 +3127,12 @@ def rl_mirror_league_ppo_gen4(
     gae_lam: float = 0.95,
     frac_std: float = 0.065,
     draw_penalty: float = -0.40,
+    boss_draw_penalty: float = 0.10,
     max_sends_per_planet: int = 6,
     eval_every: int = 4,
     seed: int = 34000,
+    train_threads: int = 2,
+    workers: int = 1,
 ) -> Path:
     """Gen 4 Native Multi-Send Paired-Seed Mirror League PPO in 1x Canonical D4 space.
 
@@ -2786,17 +3150,14 @@ def rl_mirror_league_ppo_gen4(
         from galcon.lua_bridge import GalconLuaBotBridge
 
         lua_opp = GalconLuaBotBridge(lua_opp_path)
+    has_lua2 = lua_opp2_path is not None and lua_opp2_path.is_file()
+    lua_opp2 = None
+    if has_lua2 and workers <= 1:
+        from galcon.lua_bridge import GalconLuaBotBridge
 
-    ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
-    cfg = ckpt["model_config"]
-    policy = build_galcon_gen4_transformer(
-        d_model=int(cfg["d_model"]),
-        n_heads=int(cfg["n_heads"]),
-        n_layers=int(cfg["n_layers"]),
-        dim_ff=int(cfg["dim_ff"]),
-        feature_version=int(cfg.get("feature_version", 2)),
-    )
-    policy.load_state_dict(ckpt["model_state_dict"])
+        lua_opp2 = GalconLuaBotBridge(lua_opp2_path)
+
+    policy = _load_gen4_policy_from_ckpt(ckpt_path)
 
     ema_teacher = copy.deepcopy(policy).eval()
     for p in ema_teacher.parameters():
@@ -2804,19 +3165,7 @@ def rl_mirror_league_ppo_gen4(
 
     snapshot_pool: List[GalconPlanetTransformer] = []
     if anchor_ckpt_path is not None and anchor_ckpt_path.is_file():
-        a_ck = torch.load(str(anchor_ckpt_path), map_location="cpu", weights_only=False)
-        a_cfg = a_ck["model_config"]
-        a_ms = bool(a_cfg.get("enable_multi_send", False) or any(k.startswith("ms_head.") for k in a_ck["model_state_dict"]))
-        a_m = build_galcon_gen2_transformer(
-            d_model=int(a_cfg["d_model"]),
-            n_heads=int(a_cfg["n_heads"]),
-            n_layers=int(a_cfg["n_layers"]),
-            dim_ff=int(a_cfg["dim_ff"]),
-            feature_version=int(a_cfg.get("feature_version", 2)),
-            enable_multi_send=a_ms,
-        )
-        a_m.load_state_dict(a_ck["model_state_dict"])
-        a_m.eval()
+        a_m = _load_gen4_policy_from_ckpt(anchor_ckpt_path, allow_non_ms=True).eval()
         for p in a_m.parameters():
             p.requires_grad_(False)
         snapshot_pool.append(a_m)
@@ -2893,255 +3242,191 @@ def rl_mirror_league_ppo_gen4(
                 score_g += 1.0 if w_id == a_p else (0.5 if w_id == 0 else 0.0)
         return score_g / max(1, tot_g)
 
-    def run_single_episode(
-        map_seed: int,
-        n_pl: int,
-        w: float,
-        h: float,
-        sym: bool,
-        ours_pid: int,
-        opp_snap: Optional[GalconPlanetTransformer],
-        opp_bot,
-        is_boss: bool = False,
-    ):
-        opp_pid = 2 if ours_pid == 1 else 1
-        sim = GalconSim.create(
-            seed=map_seed, num_planets=n_pl, width=w, height=h, max_ticks=220 if n_pl >= 22 else 200, symmetric=sym
-        )
-        ep_steps = []
-        snaps: List[Tuple[int, np.ndarray, np.ndarray]] = []
-        prev_pot = evaluate_galcon_state(sim, ours_pid)
-        while not sim.done:
-            if sim.tick % 2 == 0:
-                enc = extract_galcon_features(sim, ours_pid, feature_version=2)
-                n = len(enc.planet_ids)
-                so, ss = _snapshot_planet_state(sim, enc.planet_ids, ours_pid)
-                snaps.append((sim.tick, so, ss))
-                enc_c = copy.copy(enc)
-                enc_c.planet_feats = canonicalize_galcon_d4(enc.planet_feats)
-                pad = pad_galcon_state(enc_c)
-
-                with torch.no_grad():
-                    pf_t = torch.from_numpy(enc_c.planet_feats[None])
-                    tf_t = torch.from_numpy(enc_c.timeline_feats[None])
-                    ef_t = torch.from_numpy(enc_c.edge_feats[None])
-                    pm_t = torch.ones((1, n), dtype=torch.bool)
-                    _, _, val, h_emb = policy(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
-                    ms_l, ms_f = policy.predict_multi_send(h_emb, ef_t)
-                    le_t = torch.from_numpy(enc.legal_edges)
-                    om_t = torch.from_numpy(enc.owned_mask)
-                    edge_m = om_t.unsqueeze(-1) & le_t
-
-                    ms_l0 = ms_l[0].masked_fill(~edge_m, -1e9)
-                    b_dist = torch.distributions.Bernoulli(logits=ms_l0)
-                    a_edge = b_dist.sample() * edge_m.float()
-                    # Cap active edges per planet to max_sends_per_planet by descending logit
-                    ms_probs_np = torch.sigmoid(ms_l0).numpy()
-                    a_np = a_edge.numpy()
-                    for i in range(n):
-                        if enc.owned_mask[i]:
-                            act_js = np.where(a_np[i] > 0.5)[0]
-                            if len(act_js) > max_sends_per_planet:
-                                keep = act_js[np.argsort(-ms_probs_np[i, act_js])[:max_sends_per_planet]]
-                                a_np[i] = 0.0
-                                a_np[i, keep] = 1.0
-                    a_edge = torch.from_numpy(a_np)
-                    lp_bern = (b_dist.log_prob(a_edge) * edge_m.float()).sum()
-
-                    f_mu = ms_f[0].clamp(0.06, 0.98)
-                    f_dist = torch.distributions.Normal(f_mu, frac_std)
-                    f_samp = f_dist.sample().clamp(0.06, 1.0)
-                    lp_frac = (f_dist.log_prob(f_samp) * a_edge).sum()
-                    total_lp = float((lp_bern + 0.20 * lp_frac).item())
-                    v_pred = float(val[0].item())
-
-                    o_ours: List[Order] = []
-                    f_np = f_samp.numpy()
-                    for i in range(n):
-                        if not enc.owned_mask[i]:
-                            continue
-                        orig_s = float(enc.planets[i].ships)
-                        if orig_s < 2.0:
-                            continue
-                        act_js = [int(j) for j in np.where(a_np[i] > 0.5)[0]]
-                        if not act_js:
-                            continue
-                        act_js.sort(key=lambda j: -float(ms_probs_np[i, j]))
-                        rem = orig_s
-                        for j in act_js:
-                            if rem < 2.0:
-                                break
-                            want = min(rem, max(1.0, float(f_np[i, j]) * orig_s))
-                            ratio = want / max(1.0, rem)
-                            pct = 100 if ratio >= 0.92 else max(5, min(100, int(round(ratio * 100.0))))
-                            sent = math.floor(rem * (pct / 100.0) + 1e-9)
-                            if sent >= 1:
-                                o_ours.append(SendOrder(enc.planet_ids[i], enc.planet_ids[j], pct))
-                                rem = max(0.0, rem - sent)
-
-                    if sim.allow_redirect and sim.fleets:
-                        renc = extract_galcon_redir_features(sim, enc)
-                        if renc.fleet_ids:
-                            rlogits = policy.predict_redir_logits(
-                                h_emb,
-                                torch.from_numpy(renc.cur_dst_idx[None]),
-                                torch.from_numpy(renc.redir_feats[None]),
-                                pm_t,
-                            )
-                            rprobs = F.softmax(rlogits[0], dim=-1).numpy()
-                            for fi, fid in enumerate(renc.fleet_ids):
-                                c_idx = int(renc.cur_dst_idx[fi])
-                                bj = int(np.argmax(rprobs[fi]))
-                                if bj != c_idx and float(rprobs[fi, bj]) >= 0.55:
-                                    o_ours.append(RedirOrder(fid, enc.planet_ids[bj]))
-
-                a_pad = np.zeros((GALCON_MAX_PLANETS, GALCON_MAX_PLANETS), dtype=np.float32)
-                a_pad[:n, :n] = a_np
-                f_pad = np.zeros((GALCON_MAX_PLANETS, GALCON_MAX_PLANETS), dtype=np.float32)
-                f_pad[:n, :n] = f_np
-
-                o_opp = _fast_gen4_neural_act(opp_snap, sim, opp_pid) if opp_snap is not None else opp_bot.act(sim, opp_pid)
-                cur_tick = sim.tick
-                sim.step({ours_pid: o_ours, opp_pid: o_opp})
-                if not sim.done:
-                    sim.step({})
-                new_pot = evaluate_galcon_state(sim, ours_pid)
-                step_rew = 0.05 * (new_pot - prev_pot)
-                prev_pot = new_pot
-                ep_steps.append((cur_tick, pad, a_pad, f_pad, total_lp, v_pred, step_rew))
-            else:
-                sim.step({})
-
-        enc_f = extract_galcon_features(sim, ours_pid, feature_version=2)
-        so, ss = _snapshot_planet_state(sim, enc_f.planet_ids, ours_pid)
-        snaps.append((sim.tick, so, ss))
-        win = sim.winner()
-        speed_bonus = 0.10 * max(0.0, 1.0 - float(sim.tick) / max(1.0, float(sim.max_ticks)))
-        d_rew = 0.10 if is_boss else draw_penalty
-        term_rew = (1.0 + speed_bonus) if win == ours_pid else (d_rew if win == 0 else -1.0)
-        won = 1 if win == ours_pid else 0
-
-        T = len(ep_steps)
-        advs = np.zeros((T,), dtype=np.float32)
-        rets = np.zeros((T,), dtype=np.float32)
-        if T > 0:
-            rews = [s[6] for s in ep_steps]
-            rews[-1] += term_rew
-            vals = [s[5] for s in ep_steps] + [0.0]
-            gae = 0.0
-            for t in reversed(range(T)):
-                delta = rews[t] + gamma * vals[t + 1] - vals[t]
-                gae = delta + gamma * gae_lam * gae
-                advs[t] = gae
-                rets[t] = float(np.clip(gae + vals[t], -1.15, 1.15))
-        return ep_steps, snaps, advs, rets, term_rew, won
+    tmp_dir_ctx = None
+    pool_exec: Optional[ProcessPoolExecutor] = None
+    snap_ckpt_paths: List[str] = []
+    snap_seq = 0
 
     try:
         torch.set_num_threads(1)
         best_score = quick_gen4_val(policy)
+        use_parallel = workers > 1 and pairs_per_iter >= 2
+        if use_parallel:
+            tmp_dir_ctx = tempfile.TemporaryDirectory(prefix="galcon_gen4_ppo_")
+            tmp_root = Path(tmp_dir_ctx.name)
+            for s_m in snapshot_pool:
+                sp_p = tmp_root / f"snap_{snap_seq}.pt"
+                snap_seq += 1
+                torch.save({"model_config": s_m.config, "model_state_dict": s_m.state_dict()}, sp_p)
+                snap_ckpt_paths.append(str(sp_p))
+            n_w = min(int(workers), int(pairs_per_iter))
+            pool_exec = ProcessPoolExecutor(max_workers=n_w, mp_context=mp.get_context("spawn"))
+
         boss_tag = f"+LuaBoss({lua_opp_path.stem})" if lua_opp is not None else ""
+        par_tag = f" x{min(int(workers), int(pairs_per_iter))}w" if use_parallel else ""
         print(
-            f"[Galcon Gen4 Multi-Send Mirror PPO{boss_tag}] Start 26g std+large val score = {100*best_score:.1f}% (pool={len(snapshot_pool)})",
+            f"[Galcon Gen4 Multi-Send Mirror PPO{boss_tag}{par_tag}] Start 26g std+large val score = {100*best_score:.1f}% (pool={len(snapshot_pool)})",
             flush=True,
         )
         t0 = time.time()
 
+        lua1_str = str(lua_opp_path.resolve()) if (lua_opp_path is not None and lua_opp_path.is_file()) else ""
+        lua2_str = str(lua_opp2_path.resolve()) if (lua_opp2_path is not None and lua_opp2_path.is_file()) else ""
+
         for it in range(1, iters + 1):
             torch.set_num_threads(1)
             policy.eval()
-            buf = {k: [] for k in ("pf", "tf", "ef", "le", "om", "pm", "acts", "f_acts", "old_lp", "adv", "ret", "aux_o", "aux_s")}
-            wins = sp_wins = sp_eps = bot_wins = bot_eps = boss_wins = boss_eps = 0
-            split_pairs = 0
 
+            pair_jobs = []
             for k in range(pairs_per_iter):
                 n_pl, w, h, sym = _sample_gen3_map_config(rng)
                 map_seed = seed + it * 500 + k
-
                 u = rng.random()
-                opp_snap: Optional[GalconPlanetTransformer] = None
-                opp_bot = None
-                is_boss = False
-                if lua_opp is not None and u < 0.30:
-                    opp_bot = lua_opp
-                    is_boss = True
-                elif u < (0.65 if lua_opp is not None else 0.45):
-                    opp_snap = snapshot_pool[0] if rng.random() < 0.40 else rng.choice(snapshot_pool)
-                elif u < (0.80 if lua_opp is not None else 0.68):
-                    opp_bot = _make_sparring_bot(rng, "tactical")
-                elif u < (0.90 if lua_opp is not None else 0.82):
-                    opp_bot = _make_sparring_bot(rng, "rusher")
-                elif u < (0.95 if lua_opp is not None else 0.92):
-                    opp_bot = _make_sparring_bot(rng, "classic")
+                if lua_opp is not None:
+                    if u < 0.40:
+                        opp_kind, opp_idx = "boss", -1
+                    elif u < 0.72:
+                        opp_idx = 0 if rng.random() < 0.40 else rng.randrange(len(snapshot_pool))
+                        opp_kind = "snap"
+                    elif u < 0.85:
+                        opp_kind, opp_idx = ("boss2" if has_lua2 else "tactical"), -1
+                    elif u < 0.92:
+                        opp_kind, opp_idx = "tactical", -1
+                    elif u < 0.96:
+                        opp_kind, opp_idx = "rusher", -1
+                    else:
+                        opp_kind, opp_idx = ("classic" if rng.random() < 0.5 else "macro"), -1
                 else:
-                    opp_bot = _make_sparring_bot(rng, "macro")
+                    if u < 0.45:
+                        opp_idx = 0 if rng.random() < 0.40 else rng.randrange(len(snapshot_pool))
+                        opp_kind = "snap"
+                    elif u < 0.68:
+                        opp_kind, opp_idx = "tactical", -1
+                    elif u < 0.82:
+                        opp_kind, opp_idx = "rusher", -1
+                    elif u < 0.92:
+                        opp_kind, opp_idx = "classic", -1
+                    else:
+                        opp_kind, opp_idx = "macro", -1
+                pair_jobs.append((map_seed, n_pl, w, h, sym, opp_kind, opp_idx))
 
-                ep_a = run_single_episode(map_seed, n_pl, w, h, sym, 1, opp_snap, opp_bot, is_boss=is_boss)
-                ep_b = run_single_episode(map_seed, n_pl, w, h, sym, 2, opp_snap, opp_bot, is_boss=is_boss)
-                total_eps += 2
+            wins = sp_wins = sp_eps = bot_wins = bot_eps = boss_wins = boss_eps = split_pairs = 0
+            if use_parallel and pool_exec is not None and tmp_dir_ctx is not None:
+                pol_p = Path(tmp_dir_ctx.name) / "policy_cur.pt"
+                torch.save({"model_config": policy.config, "model_state_dict": policy.state_dict()}, pol_p)
+                n_w = min(int(workers), len(pair_jobs))
+                shards = [pair_jobs[w_i::n_w] for w_i in range(n_w)]
+                worker_args = [
+                    (
+                        str(pol_p),
+                        list(snap_ckpt_paths),
+                        sh,
+                        lua1_str,
+                        lua2_str,
+                        gamma,
+                        gae_lam,
+                        frac_std,
+                        draw_penalty,
+                        boss_draw_penalty,
+                        max_sends_per_planet,
+                        seed + it * 10000 + w_i,
+                    )
+                    for w_i, sh in enumerate(shards)
+                    if sh
+                ]
+                w_outs = list(pool_exec.map(_gen4_ppo_rollout_worker, worker_args))
+                merged = _merge_datasets([o[0] for o in w_outs if o[0]])
+                for o in w_outs:
+                    wins += o[1]
+                    sp_wins += o[2]
+                    sp_eps += o[3]
+                    bot_wins += o[4]
+                    bot_eps += o[5]
+                    boss_wins += o[6]
+                    boss_eps += o[7]
+                    split_pairs += o[8]
+                    total_eps += o[9]
+                adv_arr = merged["adv"].astype(np.float32)
+                adv_arr = (adv_arr - adv_arr.mean()) / (adv_arr.std() + 1e-6)
+                ds = TensorDataset(
+                    torch.from_numpy(merged["pf"]),
+                    torch.from_numpy(merged["tf"]),
+                    torch.from_numpy(merged["ef"]),
+                    torch.from_numpy(merged["le"]),
+                    torch.from_numpy(merged["om"]),
+                    torch.from_numpy(merged["pm"]),
+                    torch.from_numpy(merged["acts"]),
+                    torch.from_numpy(merged["f_acts"]),
+                    torch.from_numpy(merged["old_lp"].astype(np.float32)),
+                    torch.from_numpy(adv_arr),
+                    torch.from_numpy(merged["ret"].astype(np.float32)),
+                    torch.from_numpy(merged["aux_o"]),
+                    torch.from_numpy(merged["aux_s"]),
+                )
+            else:
+                buf = {k: [] for k in ("pf", "tf", "ef", "le", "om", "pm", "acts", "f_acts", "old_lp", "adv", "ret", "aux_o", "aux_s")}
+                for map_seed, n_pl, w, h, sym, opp_kind, opp_idx in pair_jobs:
+                    opp_snap = snapshot_pool[opp_idx] if opp_kind == "snap" else None
+                    opp_bot = None
+                    is_boss = False
+                    if opp_kind == "boss":
+                        opp_bot = lua_opp
+                        is_boss = True
+                    elif opp_kind == "boss2":
+                        opp_bot = lua_opp2 if lua_opp2 is not None else _make_sparring_bot(rng, "tactical")
+                    elif opp_kind != "snap":
+                        opp_bot = _make_sparring_bot(rng, opp_kind)
 
-                term_a, won_a = ep_a[4], ep_a[5]
-                term_b, won_b = ep_b[4], ep_b[5]
-                wins += won_a + won_b
-                if is_boss:
-                    boss_eps += 2
-                    boss_wins += won_a + won_b
-                elif opp_snap is not None:
-                    sp_eps += 2
-                    sp_wins += won_a + won_b
-                else:
-                    bot_eps += 2
-                    bot_wins += won_a + won_b
+                    ep_a = _run_gen4_ppo_episode(
+                        policy, map_seed, n_pl, w, h, sym, 1, opp_snap, opp_bot,
+                        is_boss=is_boss, gamma=gamma, gae_lam=gae_lam, frac_std=frac_std,
+                        draw_penalty=draw_penalty, boss_draw_penalty=boss_draw_penalty,
+                        max_sends_per_planet=max_sends_per_planet,
+                    )
+                    ep_b = _run_gen4_ppo_episode(
+                        policy, map_seed, n_pl, w, h, sym, 2, opp_snap, opp_bot,
+                        is_boss=is_boss, gamma=gamma, gae_lam=gae_lam, frac_std=frac_std,
+                        draw_penalty=draw_penalty, boss_draw_penalty=boss_draw_penalty,
+                        max_sends_per_planet=max_sends_per_planet,
+                    )
+                    total_eps += 2
+                    won_a, won_b = ep_a[5], ep_b[5]
+                    wins += won_a + won_b
+                    if is_boss:
+                        boss_eps += 2
+                        boss_wins += won_a + won_b
+                    elif opp_snap is not None:
+                        sp_eps += 2
+                        sp_wins += won_a + won_b
+                    else:
+                        bot_eps += 2
+                        bot_wins += won_a + won_b
+                    split_pairs += _append_gen4_pair_to_buf(buf, ep_a, ep_b)
 
-                pair_shift = 0.0
-                if won_a != won_b:
-                    split_pairs += 1
-                    pair_shift = 0.30 * 0.5 * (term_a + term_b)
-
-                for ep_steps, snaps, advs, rets, _, _ in (ep_a, ep_b):
-                    for idx_t, (cur_tick, pad, a_pad, f_pad, old_lp, _, _) in enumerate(ep_steps):
-                        target_tick = cur_tick + 10
-                        fut_o, fut_s = snaps[-1][1], snaps[-1][2]
-                        for st, so_s, ss_s in snaps:
-                            if st >= target_tick:
-                                fut_o, fut_s = so_s, ss_s
-                                break
-                        buf["pf"].append(pad["planet_feats"])
-                        buf["tf"].append(pad["timeline_feats"])
-                        buf["ef"].append(pad["edge_feats"])
-                        buf["le"].append(pad["legal_edges"])
-                        buf["om"].append(pad["owned_mask"])
-                        buf["pm"].append(pad["pad_mask"])
-                        buf["acts"].append(a_pad)
-                        buf["f_acts"].append(f_pad)
-                        buf["old_lp"].append(old_lp)
-                        buf["ret"].append(rets[idx_t])
-                        buf["adv"].append(advs[idx_t] - pair_shift)
-                        buf["aux_o"].append(fut_o)
-                        buf["aux_s"].append(fut_s)
+                adv_arr = np.array(buf["adv"], dtype=np.float32)
+                adv_arr = (adv_arr - adv_arr.mean()) / (adv_arr.std() + 1e-6)
+                ds = TensorDataset(
+                    torch.from_numpy(np.stack(buf["pf"])),
+                    torch.from_numpy(np.stack(buf["tf"])),
+                    torch.from_numpy(np.stack(buf["ef"])),
+                    torch.from_numpy(np.stack(buf["le"])),
+                    torch.from_numpy(np.stack(buf["om"])),
+                    torch.from_numpy(np.stack(buf["pm"])),
+                    torch.from_numpy(np.stack(buf["acts"])),
+                    torch.from_numpy(np.stack(buf["f_acts"])),
+                    torch.from_numpy(np.array(buf["old_lp"], dtype=np.float32)),
+                    torch.from_numpy(adv_arr),
+                    torch.from_numpy(np.array(buf["ret"], dtype=np.float32)),
+                    torch.from_numpy(np.stack(buf["aux_o"])),
+                    torch.from_numpy(np.stack(buf["aux_s"])),
+                )
 
             policy.train()
-            adv_arr = np.array(buf["adv"], dtype=np.float32)
-            adv_arr = (adv_arr - adv_arr.mean()) / (adv_arr.std() + 1e-6)
-            ds = TensorDataset(
-                torch.from_numpy(np.stack(buf["pf"])),
-                torch.from_numpy(np.stack(buf["tf"])),
-                torch.from_numpy(np.stack(buf["ef"])),
-                torch.from_numpy(np.stack(buf["le"])),
-                torch.from_numpy(np.stack(buf["om"])),
-                torch.from_numpy(np.stack(buf["pm"])),
-                torch.from_numpy(np.stack(buf["acts"])),
-                torch.from_numpy(np.stack(buf["f_acts"])),
-                torch.from_numpy(np.array(buf["old_lp"], dtype=np.float32)),
-                torch.from_numpy(adv_arr),
-                torch.from_numpy(np.array(buf["ret"], dtype=np.float32)),
-                torch.from_numpy(np.stack(buf["aux_o"])),
-                torch.from_numpy(np.stack(buf["aux_s"])),
-            )
             loader = DataLoader(ds, batch_size=64, shuffle=True)
             ent_coef = 0.004 * (1.0 - 0.45 * (it / max(1, iters)))
             r_iter = iter(redir_loader) if redir_loader is not None else None
 
-            torch.set_num_threads(2)
+            torch.set_num_threads(max(1, int(train_threads)))
             for _ in range(2):
                 for b_idx, (pf, tf, ef, le, om, pm, acts, f_acts, old_lp, adv, ret, aux_o, aux_s) in enumerate(loader):
                     pf, tf, ef, le, om, pm, acts, f_acts, aux_o, aux_s = _trim_batch_n(
@@ -3204,14 +3489,21 @@ def rl_mirror_league_ppo_gen4(
                 for p in snap_copy.parameters():
                     p.requires_grad_(False)
                 snapshot_pool.append(snap_copy)
+                if use_parallel and tmp_dir_ctx is not None:
+                    sp_p = Path(tmp_dir_ctx.name) / f"snap_{snap_seq}.pt"
+                    snap_seq += 1
+                    torch.save({"model_config": snap_copy.config, "model_state_dict": snap_copy.state_dict()}, sp_p)
+                    snap_ckpt_paths.append(str(sp_p))
                 if len(snapshot_pool) > 10:
                     snapshot_pool = [snapshot_pool[0]] + snapshot_pool[-9:]
+                    if use_parallel:
+                        snap_ckpt_paths = [snap_ckpt_paths[0]] + snap_ckpt_paths[-9:]
 
             boss_str = f", boss={boss_wins}/{boss_eps}" if boss_eps > 0 else ""
             log_msg = (
                 f"[Galcon Gen4 Multi-Send PPO] iter {it:2d}/{iters} (eps={total_eps}, {time.time()-t0:5.1f}s) | "
                 f"wins={wins}/{2*pairs_per_iter} (sp={sp_wins}/{sp_eps}, bots={bot_wins}/{bot_eps}{boss_str}, splits={split_pairs}) | "
-                f"states={len(buf['ret'])} | pool={len(snapshot_pool)}"
+                f"states={len(ds)} | pool={len(snapshot_pool)}"
             )
             if it % eval_every == 0 or it == iters:
                 g_sc = quick_gen4_val(policy)
@@ -3260,8 +3552,14 @@ def rl_mirror_league_ppo_gen4(
         )
         return out_path
     finally:
+        if pool_exec is not None:
+            pool_exec.shutdown(wait=True)
+        if tmp_dir_ctx is not None:
+            tmp_dir_ctx.cleanup()
         if lua_opp is not None:
             lua_opp.close()
+        if lua_opp2 is not None:
+            lua_opp2.close()
 
 
 def evaluate_matchup(
@@ -3315,6 +3613,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resume", default="")
     parser.add_argument("--gen2-anchor", default="checkpoints/galcon_gen2_champion.pt")
     parser.add_argument("--lua-opp", default="")
+    parser.add_argument("--lua-opp2", default="")
+    parser.add_argument("--boss-draw-penalty", type=float, default=0.10)
     parser.add_argument("--redir-npz", default="checkpoints/galcon_gen2_redir.npz")
     parser.add_argument("--bc-games", type=int, default=80)
     parser.add_argument("--dagger-games", type=int, default=30)
@@ -3327,6 +3627,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lr", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=6000)
     parser.add_argument("--eval-games", type=int, default=20)
+    parser.add_argument("--train-threads", type=int, default=2)
+    parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--out", default="checkpoints/galcon_transformer_best.pt")
     parser.add_argument("--v1-ckpt", default="checkpoints/galcon_v1_baseline.pt")
     args = parser.parse_args(argv)
@@ -3419,6 +3721,7 @@ def main(argv: list[str] | None = None) -> int:
             pairs_per_iter=args.mirror_pairs,
             lr=args.lr if args.lr > 0 else 4.5e-5,
             seed=args.seed,
+            train_threads=args.train_threads,
         )
         return 0
 
@@ -3430,6 +3733,7 @@ def main(argv: list[str] | None = None) -> int:
             num_games=args.search_games,
             seed=args.seed,
             lua_opp_path=lua_p,
+            workers=args.workers,
         )
         old_r = _load_redir_npz()
         merged_r = _merge_datasets([old_r, g4_redir]) if old_r else g4_redir
@@ -3442,6 +3746,7 @@ def main(argv: list[str] | None = None) -> int:
             epochs=args.epochs,
             lr=args.lr if args.lr > 0 else 3.5e-4,
             seed=args.seed,
+            train_threads=args.train_threads,
         )
         return 0
 
@@ -3454,10 +3759,14 @@ def main(argv: list[str] | None = None) -> int:
             redir_replay=redir_replay,
             anchor_ckpt_path=Path(args.gen2_anchor) if args.gen2_anchor else None,
             lua_opp_path=Path(args.lua_opp) if args.lua_opp else None,
+            lua_opp2_path=Path(args.lua_opp2) if args.lua_opp2 else None,
             iters=args.ppo_iters,
             pairs_per_iter=args.mirror_pairs,
             lr=args.lr if args.lr > 0 else 4.5e-5,
+            boss_draw_penalty=args.boss_draw_penalty,
             seed=args.seed,
+            train_threads=args.train_threads,
+            workers=args.workers,
         )
         return 0
 

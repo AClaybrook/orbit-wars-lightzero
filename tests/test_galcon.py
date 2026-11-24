@@ -418,3 +418,83 @@ def test_galcon_gen4_multisend_canonical_d4_and_adaptive_search(tmp_path: Path):
     assert -1.0 <= best_sc <= 1.0
     assert canonicalize_galcon_d4(enc.planet_feats).shape == enc.planet_feats.shape
 
+
+def test_galcon_wave5_adversarial_search_and_ensemble(tmp_path: Path):
+    from galcon.transformer_bot import EnsembleGalconSearchAgent, build_galcon_gen4_transformer
+
+    sim = GalconSim.create(seed=5150, num_planets=16, width=400.0, height=240.0)
+    # Give P1 multiple friendly planets with rear/front surplus to exercise tunnel-feed and focus-fire proposals
+    pids = sorted(sim.planets.keys())
+    sim.planets[pids[0]].owner = 1
+    sim.planets[pids[0]].ships = 60.0
+    sim.planets[pids[1]].owner = 1
+    sim.planets[pids[1]].ships = 55.0
+    sim.planets[pids[2]].owner = 2
+    sim.planets[pids[2]].ships = 40.0
+
+    ckpts = []
+    for idx, sd in enumerate((11, 22)):
+        torch.manual_seed(sd)
+        model = build_galcon_gen4_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
+        p = tmp_path / f"galcon_w5_m{idx}.pt"
+        torch.save(
+            {
+                "model_config": model.config,
+                "model_state_dict": model.state_dict(),
+                "has_trained_redir": True,
+                "has_trained_multi_send": True,
+                "use_canonical_d4": True,
+            },
+            p,
+        )
+        ckpts.append(p)
+
+    adv_ag = GalconSearchTransformerAgent(
+        ckpts[0],
+        multi_send_threshold=0.45,
+        rollout_horizon=10,
+        num_plies=2,
+        time_budget_sec=0.30,
+        opponent_adaptive=True,
+        adversarial_search=True,
+    )
+    enc = extract_galcon_features(sim, player=1, feature_version=2)
+    probs, _, _, _, _, _ = adv_ag._predict_all(enc)
+    ff = adv_ag._build_focus_fire_plan(sim, enc, probs, max_sources=4)
+    tun = adv_ag._build_tunnel_feed_plan(sim, enc)
+    assert isinstance(ff, list) and isinstance(tun, list)
+
+    best_plan, cands, scores, best_sc = adv_ag.act_with_search_info(sim, 1)
+    assert isinstance(best_plan, list)
+    assert len(cands) == len(scores) >= 1
+    assert -1.0 <= best_sc <= 1.0
+
+    ens = EnsembleGalconSearchAgent(
+        ckpts,
+        weights=[0.5, 0.5],
+        multi_send_threshold=0.45,
+        rollout_horizon=10,
+        num_plies=2,
+        time_budget_sec=0.30,
+        opponent_adaptive=True,
+        adversarial_search=True,
+    )
+    pure_orders = ens.act_pure(sim, 1)
+    assert isinstance(pure_orders, list)
+
+    p0, _, v0, _, ms0, _ = ens._predict_all(enc)
+    for flip in (False, True):
+        for k in range(4):
+            enc_t = extract_galcon_features(sim, player=1, feature_version=2)
+            enc_t.planet_feats = apply_galcon_d4(enc_t.planet_feats, k_rot=k, flip_x=flip)
+            pt, _, vt, _, mst, _ = ens._predict_all(enc_t)
+            assert np.allclose(p0, pt, atol=1e-5)
+            assert abs(v0 - vt) < 1e-5
+            assert mst is not None and np.allclose(ms0, mst, atol=1e-5)
+
+    e_plan, e_cands, e_scores, e_sc = ens.act_with_search_info(sim, 1)
+    assert isinstance(e_plan, list)
+    assert len(e_cands) == len(e_scores) >= 1
+    assert -1.0 <= e_sc <= 1.0
+
+
