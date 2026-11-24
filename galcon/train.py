@@ -3253,6 +3253,111 @@ def _gen4_ppo_rollout_worker(args_tuple):
     return arr_buf, wins, sp_wins, sp_eps, bot_wins, bot_eps, boss_wins, boss_eps, boss2_wins, boss2_eps, split_pairs, total_eps
 
 
+def _build_stratified_gen4_opp_schedule(
+    pairs_per_iter: int,
+    *,
+    has_lua1: bool,
+    has_lua2: bool,
+    pool_size: int,
+    rng: random.Random,
+    sparky_share: float = 0.42,
+    esparan_share: float = 0.17,
+) -> List[Tuple[str, int]]:
+    """Allocate deterministic, low-variance opponent pairs per PPO iteration.
+
+    Prevents RNG starvation where Sparky v1.6 could drop to 1/12 pairs in an iteration
+    while keeping EsparanBot v0.2, snapshot self-play, and built-in heuristics balanced.
+    """
+    n = max(1, int(pairs_per_iter))
+    heur_cycle = ["tactical", "macro", "rusher", "classic"]
+    rng.shuffle(heur_cycle)
+    sched: List[Tuple[str, int]] = []
+
+    def _pick_snap() -> Tuple[str, int]:
+        if pool_size <= 1:
+            return ("snap", 0)
+        idx = 0 if rng.random() < 0.45 else rng.randrange(pool_size)
+        return ("snap", idx)
+
+    if has_lua1 and has_lua2:
+        n_b1 = min(n, max(1, int(round(n * max(0.0, sparky_share)))))
+        n_b2 = min(max(0, n - n_b1), max(1, int(round(n * max(0.0, esparan_share)))) if esparan_share > 0 else 0)
+        rem = max(0, n - n_b1 - n_b2)
+        n_snap = int(round(rem * 0.60))
+        n_heur = max(0, rem - n_snap)
+        sched.extend([("boss", -1)] * n_b1)
+        sched.extend([("boss2", -1)] * n_b2)
+        sched.extend([_pick_snap() for _ in range(n_snap)])
+        sched.extend([(heur_cycle[i % len(heur_cycle)], -1) for i in range(n_heur)])
+    elif has_lua1:
+        n_b1 = min(n, max(1, int(round(n * max(0.0, sparky_share)))))
+        rem = max(0, n - n_b1)
+        n_snap = int(round(rem * 0.55))
+        n_heur = max(0, rem - n_snap)
+        sched.extend([("boss", -1)] * n_b1)
+        sched.extend([_pick_snap() for _ in range(n_snap)])
+        sched.extend([(heur_cycle[i % len(heur_cycle)], -1) for i in range(n_heur)])
+    else:
+        n_snap = int(round(n * 0.45))
+        n_heur = max(0, n - n_snap)
+        sched.extend([_pick_snap() for _ in range(n_snap)])
+        sched.extend([(heur_cycle[i % len(heur_cycle)], -1) for i in range(n_heur)])
+
+    rng.shuffle(sched)
+    return sched
+
+
+def _compute_gen4_val_gate(
+    buckets: Dict[str, Tuple[float, int]],
+    *,
+    has_lua1: bool,
+    has_lua2: bool,
+) -> Dict[str, float]:
+    """Compute raw and Sparky-weighted composite validation scores from per-bucket (score, games)."""
+    tot_sc = sum(v[0] for v in buckets.values())
+    tot_g = max(1, sum(v[1] for v in buckets.values()))
+    raw = tot_sc / tot_g
+    spky = buckets["boss"][0] / max(1, buckets["boss"][1]) if "boss" in buckets and buckets["boss"][1] > 0 else raw
+    esp = buckets["boss2"][0] / max(1, buckets["boss2"][1]) if "boss2" in buckets and buckets["boss2"][1] > 0 else raw
+    anc = buckets["anc"][0] / max(1, buckets["anc"][1]) if "anc" in buckets and buckets["anc"][1] > 0 else raw
+    heur = buckets["heur"][0] / max(1, buckets["heur"][1]) if "heur" in buckets and buckets["heur"][1] > 0 else raw
+    if has_lua1 and has_lua2:
+        comp = 0.45 * spky + 0.25 * esp + 0.15 * anc + 0.15 * heur
+    elif has_lua1:
+        comp = 0.55 * spky + 0.20 * anc + 0.25 * heur
+    else:
+        comp = raw
+    return {
+        "raw": float(raw),
+        "comp": float(comp),
+        "spky": float(spky),
+        "esp": float(esp),
+        "anc": float(anc),
+        "heur": float(heur),
+        "games": float(tot_g),
+    }
+
+
+def _should_promote_gen4_val(
+    cur: Dict[str, float],
+    best: Dict[str, float],
+    start: Dict[str, float],
+    *,
+    has_lua1: bool,
+    sparky_slack: float = 0.032,
+) -> bool:
+    """Strictly gate checkpoint promotion so heuristic gains cannot mask a Sparky v1.6 regression."""
+    if has_lua1:
+        floor = max(best["spky"] - sparky_slack, start["spky"] - sparky_slack)
+        if cur["spky"] + 1e-9 < floor:
+            return False
+    if cur["comp"] > best["comp"] + 1e-6:
+        return True
+    if abs(cur["comp"] - best["comp"]) <= 1e-6 and has_lua1 and cur["spky"] > best["spky"] + 1e-6:
+        return True
+    return False
+
+
 def rl_mirror_league_ppo_gen4(
     ckpt_path: Path,
     out_path: Path,
@@ -3271,6 +3376,8 @@ def rl_mirror_league_ppo_gen4(
     frac_std: float = 0.065,
     draw_penalty: float = -0.40,
     boss_draw_penalty: float = 0.10,
+    sparky_share: float = 0.42,
+    esparan_share: float = 0.17,
     max_sends_per_planet: int = 6,
     eval_every: int = 4,
     seed: int = 34000,
@@ -3340,20 +3447,20 @@ def rl_mirror_league_ppo_gen4(
     best_state = _cpu_state_dict(policy)
     total_eps = 0
 
-    def quick_gen4_val(model_eval: GalconPlanetTransformer) -> Tuple[float, int]:
+    def quick_gen4_val(model_eval: GalconPlanetTransformer) -> Dict[str, float]:
         model_eval.eval()
         anchor_ref = snapshot_pool[0]
-        score_g = 0.0
-        tot_g = 0
+        b_sc: Dict[str, float] = {"heur": 0.0, "anc": 0.0, "boss": 0.0, "boss2": 0.0}
+        b_cnt: Dict[str, int] = {"heur": 0, "anc": 0, "boss": 0, "boss2": 0}
         std_opps = [
-            ("tac", GalconTacticalBot(), 4),
-            ("rush", GalconRusherBot(style="all_in"), 4),
-            ("macro", GalconMacroBot(), 4),
+            ("heur", GalconTacticalBot(), 4),
+            ("heur", GalconRusherBot(style="all_in"), 4),
+            ("heur", GalconMacroBot(), 4),
             ("anc", anchor_ref, 4),
-            ("boss", lua_opp if lua_opp is not None else GalconTacticalBot(), 6),
+            ("boss", lua_opp if lua_opp is not None else GalconTacticalBot(), 12 if lua_opp is not None else 6),
         ]
         if lua_opp2 is not None:
-            std_opps.append(("boss2", lua_opp2, 6))
+            std_opps.append(("boss2", lua_opp2, 8))
         for oi, (tag, ob, ng) in enumerate(std_opps):
             for k in range(ng):
                 g_rng = random.Random(39000 + oi * 100 + k)
@@ -3368,14 +3475,17 @@ def rl_mirror_league_ppo_gen4(
                         s.step({a_p: oa, b_p: ob_act})
                     else:
                         s.step({})
-                tot_g += 1
                 w_id = s.winner()
-                score_g += 1.0 if w_id == a_p else (0.5 if w_id == 0 else 0.0)
+                pts = 1.0 if w_id == a_p else (0.5 if w_id == 0 else 0.0)
+                bucket = tag if (tag != "boss" or lua_opp is not None) else "heur"
+                b_sc[bucket] += pts
+                b_cnt[bucket] += 1
         for k in range(4):
             for a_p in (1, 2):
                 b_p = 2 if a_p == 1 else 1
-                ob = (lua_opp if lua_opp is not None else GalconTacticalBot()) if (k % 2 == 0) else anchor_ref
-                is_nn = (k % 2 == 1)
+                is_boss_lg = (k % 2 == 0)
+                ob = (lua_opp if lua_opp is not None else GalconTacticalBot()) if is_boss_lg else anchor_ref
+                is_nn = not is_boss_lg
                 s = GalconSim.create(
                     seed=39500 + k, num_planets=24 + (k % 3), width=560.0, height=340.0, max_ticks=220, symmetric=(k % 2 == 0)
                 )
@@ -3386,10 +3496,27 @@ def rl_mirror_league_ppo_gen4(
                         s.step({a_p: oa, b_p: ob_act})
                     else:
                         s.step({})
-                tot_g += 1
                 w_id = s.winner()
-                score_g += 1.0 if w_id == a_p else (0.5 if w_id == 0 else 0.0)
-        return score_g / max(1, tot_g), tot_g
+                pts = 1.0 if w_id == a_p else (0.5 if w_id == 0 else 0.0)
+                bucket = "anc" if is_nn else ("boss" if lua_opp is not None else "heur")
+                b_sc[bucket] += pts
+                b_cnt[bucket] += 1
+        buckets = {k: (b_sc[k], b_cnt[k]) for k in b_sc if b_cnt[k] > 0}
+        return _compute_gen4_val_gate(buckets, has_lua1=(lua_opp is not None), has_lua2=(lua_opp2 is not None))
+
+    def _fmt_val(vm: Dict[str, float]) -> str:
+        vg = int(round(vm["games"]))
+        if lua_opp is not None and lua_opp2 is not None:
+            return (
+                f"val_{vg}g={100*vm['raw']:.1f}% "
+                f"[comp={100*vm['comp']:.1f}% | spky={100*vm['spky']:.1f}% esp={100*vm['esp']:.1f}% anc={100*vm['anc']:.1f}% heur={100*vm['heur']:.1f}%]"
+            )
+        if lua_opp is not None:
+            return (
+                f"val_{vg}g={100*vm['raw']:.1f}% "
+                f"[comp={100*vm['comp']:.1f}% | spky={100*vm['spky']:.1f}% anc={100*vm['anc']:.1f}% heur={100*vm['heur']:.1f}%]"
+            )
+        return f"val_{vg}g={100*vm['raw']:.1f}% [anc={100*vm['anc']:.1f}% heur={100*vm['heur']:.1f}%]"
 
     tmp_dir_ctx = None
     pool_exec: Optional[ProcessPoolExecutor] = None
@@ -3398,7 +3525,9 @@ def rl_mirror_league_ppo_gen4(
 
     try:
         torch.set_num_threads(1)
-        best_score, val_games = quick_gen4_val(cpu_policy)
+        start_val = quick_gen4_val(cpu_policy)
+        best_val = dict(start_val)
+        best_score = float(best_val["comp"])
         use_parallel = workers > 1 and pairs_per_iter >= 2
         if use_parallel:
             tmp_dir_ctx = tempfile.TemporaryDirectory(prefix="galcon_gen4_ppo_")
@@ -3415,7 +3544,7 @@ def rl_mirror_league_ppo_gen4(
         par_tag = f" x{min(int(workers), int(pairs_per_iter))}w" if use_parallel else ""
         dev_tag = " dml" if use_dml else (f" {train_dev}" if train_dev.type != "cpu" else "")
         print(
-            f"[Galcon Gen4 Multi-Send Mirror PPO{boss_tag}{par_tag}{dev_tag}] Start {val_games}g std+large val score = {100*best_score:.1f}% (pool={len(snapshot_pool)})",
+            f"[Galcon Gen4 Multi-Send Mirror PPO{boss_tag}{par_tag}{dev_tag}] Start {_fmt_val(start_val)} (pool={len(snapshot_pool)})",
             flush=True,
         )
         t0 = time.time()
@@ -3427,52 +3556,19 @@ def rl_mirror_league_ppo_gen4(
             torch.set_num_threads(1)
             cpu_policy.eval()
 
+            opp_sched = _build_stratified_gen4_opp_schedule(
+                pairs_per_iter,
+                has_lua1=(lua_opp is not None),
+                has_lua2=has_lua2,
+                pool_size=len(snapshot_pool),
+                rng=rng,
+                sparky_share=sparky_share,
+                esparan_share=esparan_share,
+            )
             pair_jobs = []
-            for k in range(pairs_per_iter):
+            for k, (opp_kind, opp_idx) in enumerate(opp_sched):
                 n_pl, w, h, sym = _sample_gen3_map_config(rng)
                 map_seed = seed + it * 500 + k
-                u = rng.random()
-                if lua_opp is not None and has_lua2:
-                    # Wave 6 balanced dual-boss mix: 30% Sparky, 20% EsparanBot, 32% snapshots, 18% heuristics
-                    if u < 0.30:
-                        opp_kind, opp_idx = "boss", -1
-                    elif u < 0.50:
-                        opp_kind, opp_idx = "boss2", -1
-                    elif u < 0.82:
-                        opp_idx = 0 if rng.random() < 0.40 else rng.randrange(len(snapshot_pool))
-                        opp_kind = "snap"
-                    elif u < 0.88:
-                        opp_kind, opp_idx = "tactical", -1
-                    elif u < 0.93:
-                        opp_kind, opp_idx = "macro", -1
-                    elif u < 0.97:
-                        opp_kind, opp_idx = "rusher", -1
-                    else:
-                        opp_kind, opp_idx = "classic", -1
-                elif lua_opp is not None:
-                    if u < 0.40:
-                        opp_kind, opp_idx = "boss", -1
-                    elif u < 0.72:
-                        opp_idx = 0 if rng.random() < 0.40 else rng.randrange(len(snapshot_pool))
-                        opp_kind = "snap"
-                    elif u < 0.85:
-                        opp_kind, opp_idx = "tactical", -1
-                    elif u < 0.92:
-                        opp_kind, opp_idx = "rusher", -1
-                    else:
-                        opp_kind, opp_idx = ("classic" if rng.random() < 0.5 else "macro"), -1
-                else:
-                    if u < 0.45:
-                        opp_idx = 0 if rng.random() < 0.40 else rng.randrange(len(snapshot_pool))
-                        opp_kind = "snap"
-                    elif u < 0.68:
-                        opp_kind, opp_idx = "tactical", -1
-                    elif u < 0.82:
-                        opp_kind, opp_idx = "rusher", -1
-                    elif u < 0.92:
-                        opp_kind, opp_idx = "classic", -1
-                    else:
-                        opp_kind, opp_idx = "macro", -1
                 pair_jobs.append((map_seed, n_pl, w, h, sym, opp_kind, opp_idx))
 
             wins = sp_wins = sp_eps = bot_wins = bot_eps = boss_wins = boss_eps = boss2_wins = boss2_eps = split_pairs = 0
@@ -3704,10 +3800,11 @@ def rl_mirror_league_ppo_gen4(
                 f"states={len(ds)} | pool={len(snapshot_pool)}"
             )
             if it % eval_every == 0 or it == iters:
-                g_sc, vg = quick_gen4_val(cpu_policy)
-                log_msg += f" | val_{vg}g={100*g_sc:.1f}%"
-                if g_sc >= best_score:
-                    best_score = g_sc
+                cur_val = quick_gen4_val(cpu_policy)
+                log_msg += f" | {_fmt_val(cur_val)}"
+                if _should_promote_gen4_val(cur_val, best_val, start_val, has_lua1=(lua_opp is not None)):
+                    best_val = dict(cur_val)
+                    best_score = float(best_val["comp"])
                     best_state = copy.deepcopy(cpu_sd)
                     torch.save(
                         {
@@ -3717,6 +3814,7 @@ def rl_mirror_league_ppo_gen4(
                             "has_trained_multi_send": True,
                             "use_canonical_d4": True,
                             "val_gen4_score": best_score,
+                            "val_gen4_breakdown": best_val,
                             "ppo_episodes": total_eps,
                         },
                         out_path,
@@ -3744,6 +3842,7 @@ def rl_mirror_league_ppo_gen4(
                 "has_trained_multi_send": True,
                 "use_canonical_d4": True,
                 "val_gen4_score": best_score,
+                "val_gen4_breakdown": best_val,
                 "ppo_episodes": total_eps,
             },
             out_path,
@@ -3813,6 +3912,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lua-opp", default="")
     parser.add_argument("--lua-opp2", default="")
     parser.add_argument("--boss-draw-penalty", type=float, default=0.10)
+    parser.add_argument("--sparky-share", type=float, default=0.42)
+    parser.add_argument("--esparan-share", type=float, default=0.17)
+    parser.add_argument("--eval-every", type=int, default=4)
     parser.add_argument("--redir-npz", default="checkpoints/galcon_gen2_redir.npz")
     parser.add_argument("--bc-games", type=int, default=80)
     parser.add_argument("--dagger-games", type=int, default=30)
@@ -3964,6 +4066,9 @@ def main(argv: list[str] | None = None) -> int:
             pairs_per_iter=args.mirror_pairs,
             lr=args.lr if args.lr > 0 else 4.5e-5,
             boss_draw_penalty=args.boss_draw_penalty,
+            sparky_share=args.sparky_share,
+            esparan_share=args.esparan_share,
+            eval_every=max(1, args.eval_every),
             seed=args.seed,
             train_threads=args.train_threads,
             workers=args.workers,

@@ -545,4 +545,44 @@ def test_dml_adamw_matches_torch_adamw_and_device_resolver():
     assert torch.allclose(ent, dist.entropy(), atol=1e-5)
 
 
+def test_wave6b_stratified_schedule_and_sparky_val_gate():
+    import random
+    from galcon.train import (
+        _build_stratified_gen4_opp_schedule,
+        _compute_gen4_val_gate,
+        _should_promote_gen4_val,
+    )
+
+    # 1. Stratified dual-boss schedule guarantees exact Sparky/EsparanBot allocation every iter
+    sched = _build_stratified_gen4_opp_schedule(
+        12, has_lua1=True, has_lua2=True, pool_size=4, rng=random.Random(123), sparky_share=0.42, esparan_share=0.17
+    )
+    assert len(sched) == 12
+    assert sum(1 for k, _ in sched if k == "boss") == 5
+    assert sum(1 for k, _ in sched if k == "boss2") == 2
+    assert sum(1 for k, _ in sched if k == "snap") == 3
+    assert sum(1 for k, _ in sched if k in {"tactical", "macro", "rusher", "classic"}) == 2
+
+    # 2. Sparky-gated validation rejects checkpoints that trade Sparky wins for heuristic wins
+    start = _compute_gen4_val_gate(
+        {"boss": (8.0, 16), "boss2": (5.0, 8), "anc": (4.0, 8), "heur": (10.0, 12)},
+        has_lua1=True,
+        has_lua2=True,
+    )
+    regressed_sparky = _compute_gen4_val_gate(
+        {"boss": (6.0, 16), "boss2": (7.0, 8), "anc": (5.0, 8), "heur": (12.0, 12)},
+        has_lua1=True,
+        has_lua2=True,
+    )
+    assert not _should_promote_gen4_val(regressed_sparky, start, start, has_lua1=True)
+
+    # 3. Genuine dual-boss improvement promotes cleanly
+    improved = _compute_gen4_val_gate(
+        {"boss": (9.0, 16), "boss2": (6.0, 8), "anc": (4.0, 8), "heur": (10.0, 12)},
+        has_lua1=True,
+        has_lua2=True,
+    )
+    assert _should_promote_gen4_val(improved, start, start, has_lua1=True)
+
+
 

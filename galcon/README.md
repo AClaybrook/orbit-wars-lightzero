@@ -1,6 +1,19 @@
-# Galcon AI Gen 4 — Native Multi-Send Transformer, Bit-Exact 1× Canonical D4 & Opponent-Adaptive Search
+# Galcon AI Wave 6B — Sparky-Gated Dual-Boss Multi-Send Transformer, 1× Canonical D4 & Opponent-Adaptive Search
 
 A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-lightzero` that cross-pollinates our Orbit Wars **`PlanetTimelineTransformer`** (`orbit_wars_bot/planet_transformer.py`) to classic Galcon, Phil Hassey's official **`gbots`** protocol, and zero-copy head-to-head benchmarking against Evan Sparano's (`esparano/GalconModVault`) unmodified Lua tournament bots (`Sparky v1.6` & `EsparanBot v0.2`) via [`galcon/lua_bridge.py`](lua_bridge.py).
+
+## Wave 6B Highlights (Promoted Champion: `checkpoints/galcon_transformer_best.pt`)
+- **Positive Pure & 2-Ply Search Records vs. `esparano Sparky v1.6` (`1821.4 Elo` Lua Grandmaster):**
+  - **`Wave 6B` + 2-Ply Adaptive / Adversarial Search (`1×` Canon D4):** **`9–7–4` (`55.0%`)** vs. `Sparky v1.6` (`20g s=14000`, new record: 9 decisive wins, `+5.0%` over Gen 4 Search's `8–8–4` and `+8.8%` over Wave 5 Search's `46.2%`).
+  - **`Wave 6B` Pure (`1.29M`, `1×` Canon D4, `~19 ms` VM / `~8 ms` desktop, ZERO search):**
+    - **`15–13–12` (`52.5%`)** over **40 held-out games** vs. `Sparky v1.6` (`s=14000`: **`8–4–8 / 60.0%`**, `s=9500`: `7–9–4 / 45.0%`) — **`+7.5%`** over Wave 5 Pure's `14–18–8` (`45.0%`) on the exact same 40 seeds!
+    - **`9–5–6` (`60.0%`)** head-to-head vs. Wave 5 Pure (`20g s=18000`).
+    - **`20–8–8` (`66.7%`)** vs. `EsparanBot v0.2` (`36g`, up from Wave 5's `65.3%`; `83.3%` on `s=9500`).
+    - **`16–0–0` (`100.0%`)** vs. `TacticalBot`, **`14–1–1` (`90.6%`)** vs. `Rusher (All-In)`, **`14–2–0` (`87.5%`)** vs. `MacroBot` and `ClassicBot`.
+- **Sparky-Gated 44-Game Validation (`val_44g`) & Stratified Dual-Boss PPO (`galcon/train.py`):**
+  - Stratified per-iteration opponent scheduling (`--sparky-share 0.42`, `--esparan-share 0.17`) eliminates RNG starvation on Sparky games.
+  - 44-game validation gate (`16` Sparky + `8` EsparanBot + `8` Anchor + `12` Heuristics) logs full per-bucket breakdowns (`spky=`, `esp=`, `anc=`, `heur=`) and enforces a **Sparky-priority composite + strict Sparky regression floor** so heuristic gains can never silently overwrite a stronger Sparky checkpoint.
+  - Zero-fallback **DirectML (`DMLAdamW`)** GPU training (`--device dml`) alongside multi-process CPU rollouts (`--workers`, `--train-threads`).
 
 ## Gen 4 Highlights
 - **#1 Overall on the 1,056-Game Bradley-Terry Elo Ladder (`1824.5 Elo`, surpassing `esparano Sparky v1.6` at `1821.4 Elo`!)**:
