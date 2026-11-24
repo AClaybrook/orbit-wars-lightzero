@@ -357,3 +357,64 @@ end
     finally:
         bridge.close()
 
+
+def test_galcon_gen4_multisend_canonical_d4_and_adaptive_search(tmp_path: Path):
+    from galcon.transformer_bot import build_galcon_gen4_transformer, canonicalize_galcon_d4
+
+    sim = GalconSim.create(seed=4242, num_planets=14, width=360.0, height=220.0)
+    enc = extract_galcon_features(sim, player=1, feature_version=2)
+    n = len(enc.planet_ids)
+
+    # 1. Exact 8x D4 invariance in ONE single 1x forward pass via canonicalize_galcon_d4
+    model = build_galcon_gen4_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
+    ckpt = tmp_path / "galcon_gen4_test.pt"
+    torch.save(
+        {
+            "model_config": model.config,
+            "model_state_dict": model.state_dict(),
+            "has_trained_redir": True,
+            "has_trained_multi_send": True,
+            "use_canonical_d4": True,
+        },
+        ckpt,
+    )
+    ag = GalconTransformerAgent(ckpt, multi_send_threshold=0.05)
+    assert ag.has_trained_multi_send and ag.use_d4_canonical
+
+    p0, _, v0, _, ms0, mf0 = ag._predict_all(enc)
+    assert ms0 is not None and mf0 is not None
+    assert ms0.shape == (n, n) and mf0.shape == (n, n)
+    for flip in (False, True):
+        for k in range(4):
+            enc_t = extract_galcon_features(sim, player=1, feature_version=2)
+            enc_t.planet_feats = apply_galcon_d4(enc_t.planet_feats, k_rot=k, flip_x=flip)
+            pt, _, vt, _, mst, _ = ag._predict_all(enc_t)
+            assert np.allclose(p0, pt, atol=1e-5)
+            assert abs(v0 - vt) < 1e-5
+            assert mst is not None and np.allclose(ms0, mst, atol=1e-5)
+
+    # 2. Multi-send decoder emits multiple simultaneous SendOrders from one surplus planet
+    fake_ms_p = np.zeros((n, n), dtype=np.float32)
+    fake_ms_f = np.full((n, n), 0.15, dtype=np.float32)
+    fake_ms_p[0, 2] = 0.90
+    fake_ms_p[0, 3] = 0.85
+    fake_ms_p[0, 4] = 0.80
+    ords = ag._decode_multi_send_orders(sim, enc, fake_ms_p, fake_ms_f, threshold=0.50)
+    sends_from_home = [o for o in ords if isinstance(o, SendOrder) and o.src_id == enc.planet_ids[0]]
+    assert len(sends_from_home) == 3
+
+    # 3. Opponent-adaptive 2-ply & 3-ply search runs cleanly under budget
+    s_ag = GalconSearchTransformerAgent(
+        ckpt,
+        multi_send_threshold=0.45,
+        rollout_horizon=9,
+        num_plies=3,
+        time_budget_sec=0.30,
+        opponent_adaptive=True,
+    )
+    best_plan, cands, scores, best_sc = s_ag.act_with_search_info(sim, 1)
+    assert isinstance(best_plan, list)
+    assert len(cands) == len(scores) >= 1
+    assert -1.0 <= best_sc <= 1.0
+    assert canonicalize_galcon_d4(enc.planet_feats).shape == enc.planet_feats.shape
+

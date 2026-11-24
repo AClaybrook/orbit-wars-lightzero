@@ -97,6 +97,60 @@ def apply_galcon_d4(planet_feats: np.ndarray, k_rot: int = 0, flip_x: bool = Fal
     return out
 
 
+def canonicalize_galcon_d4(planet_feats: np.ndarray) -> np.ndarray:
+    """Map ``planet_feats`` (shape ``(N, F)``) to its unique canonical D4 octant in O(N) time.
+
+    Because the 8 D4 transforms form a closed finite group, selecting the unique orbit member
+    minimizing a deterministic coordinate/ownership key guarantees exact 8x D4 invariance
+    in a single ``1x`` forward pass (~5x faster than 8x D4 TTA on CPU).
+    """
+    if planet_feats.ndim != 2 or planet_feats.shape[0] == 0:
+        return planet_feats.copy()
+    is_me = planet_feats[:, 2]
+    is_en = planet_feats[:, 3]
+    ships = planet_feats[:, 5]
+    prod = planet_feats[:, 6]
+    w_me = is_me * (0.25 + prod + ships)
+    w_en = is_en * (0.25 + prod + ships)
+    sum_me = float(w_me.sum())
+    sum_en = float(w_en.sum())
+
+    best_key = None
+    best_arr = None
+    for flip_x in (False, True):
+        for k_rot in range(4):
+            cand = apply_galcon_d4(planet_feats, k_rot=k_rot, flip_x=flip_x)
+            cx = cand[:, 0]
+            cy = cand[:, 1]
+            mx = float((w_me * cx).sum() / sum_me) if sum_me > 1e-6 else 0.0
+            my = float((w_me * cy).sum() / sum_me) if sum_me > 1e-6 else 0.0
+            ex = float((w_en * cx).sum() / sum_en) if sum_en > 1e-6 else 0.0
+            ey = float((w_en * cy).sum() / sum_en) if sum_en > 1e-6 else 0.0
+            vx, vy = mx - ex, my - ey
+            if math.hypot(vx, vy) < 1e-4:
+                vx, vy = mx, my
+            # Canonical octant: vx <= 0, vy <= 0, |vx| >= |vy|; exact tie-break via sorted planet coords
+            oct_key = (
+                0 if vx <= 1e-5 else 1,
+                0 if vy <= 1e-5 else 1,
+                0 if abs(vx) >= abs(vy) - 1e-5 else 1,
+                round(vx, 4),
+                round(vy, 4),
+            )
+            tie_key = tuple(
+                sorted(
+                    (round(float(cx[i]), 3), round(float(cy[i]), 3), round(float(is_me[i] - is_en[i]), 1), round(float(prod[i]), 2))
+                    for i in range(cand.shape[0])
+                )
+            )
+            full_key = (oct_key, tie_key)
+            if best_key is None or full_key < best_key:
+                best_key = full_key
+                best_arr = cand
+    assert best_arr is not None
+    return best_arr
+
+
 def extract_galcon_features(
     sim: GalconSim,
     player: int,
@@ -533,13 +587,15 @@ def build_galcon_transformer(
 
 
 class GalconPlanetTransformer(nn.Module):
-    """Gen 2 Galcon Transformer wrapping ``PlanetTimelineTransformer`` with world-model & ``/REDIR`` heads.
+    """Gen 2/3/4 Galcon Transformer wrapping ``PlanetTimelineTransformer`` with world-model, ``/REDIR`` & native multi-send heads.
 
     Directly reuses ``orbit_wars_bot.planet_transformer.PlanetTimelineTransformer`` as its
     core trunk + policy/fraction/value heads (keeping zero modifications to ``orbit_wars_bot/``)
     and adds:
     1. ``aux_future_head``: predicts each planet's ``t+10`` ownership (3-way) + ``log1p(ships)/5.5``.
-    2. ``redir_*`` heads: native 8x D4-invariant mid-flight ``/REDIR`` scorer over flying fleets.
+    2. ``redir_*`` heads: native D4-invariant mid-flight ``/REDIR`` scorer over flying fleets.
+    3. ``ms_*`` heads (Gen 4, optional): independent pairwise Bernoulli multi-target send head
+       ``(ms_logits, ms_fracs)`` enabling native simultaneous multi-neutral openings & pincers.
     """
 
     def __init__(
@@ -554,8 +610,10 @@ class GalconPlanetTransformer(nn.Module):
         n_layers: int = 5,
         dim_ff: int = 384,
         feature_version: int = 2,
+        enable_multi_send: bool = False,
     ) -> None:
         super().__init__()
+        self.enable_multi_send = bool(enable_multi_send)
         self.backbone = PlanetTimelineTransformer(
             planet_dim=planet_dim,
             timeline_dim=timeline_dim,
@@ -569,6 +627,7 @@ class GalconPlanetTransformer(nn.Module):
             **self.backbone.config,
             "redir_dim": redir_dim,
             "feature_version": feature_version,
+            "enable_multi_send": self.enable_multi_send,
             "model_class": "GalconPlanetTransformer",
         }
         # Auxiliary t+10 future-state world-model head: [owner_neu, owner_me, owner_en, ships_log]
@@ -585,6 +644,18 @@ class GalconPlanetTransformer(nn.Module):
             nn.GELU(),
             nn.Linear(d_model // 2, 1),
         )
+        # Gen 4 native pairwise multi-target send head: independent (send_logit, send_frac) per edge (i, j)
+        if self.enable_multi_send:
+            self.ms_src_proj = nn.Linear(d_model, d_model // 2)
+            self.ms_dst_proj = nn.Linear(d_model, d_model // 2)
+            self.ms_edge_proj = nn.Linear(edge_dim, d_model // 2)
+            self.ms_head = nn.Sequential(
+                nn.GELU(),
+                nn.Linear(d_model // 2, 2),
+            )
+            # Initialize send logit bias conservatively (-2.2) so warm-started Gen 4 starts calm
+            nn.init.constant_(self.ms_head[1].bias[0], -2.2)
+            nn.init.constant_(self.ms_head[1].bias[1], -0.4)
 
     def encode_planets(
         self,
@@ -626,6 +697,22 @@ class GalconPlanetTransformer(nn.Module):
         pooled = (h * vw).sum(dim=1)
         value = torch.tanh(self.backbone.val_head(pooled).squeeze(-1))
         return action_logits, frac_preds, value
+
+    def predict_multi_send(
+        self,
+        h: torch.Tensor,
+        edge_feats: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Predict independent pairwise ``(ms_logits, ms_fracs)`` of shape ``(B, N, N)`` each."""
+        if not self.enable_multi_send:
+            raise RuntimeError("predict_multi_send called on a model without enable_multi_send=True")
+        pair = (
+            self.ms_src_proj(h).unsqueeze(2)
+            + self.ms_dst_proj(h).unsqueeze(1)
+            + self.ms_edge_proj(edge_feats)
+        )
+        out = self.ms_head(pair)
+        return out[..., 0], torch.sigmoid(out[..., 1])
 
     def predict_aux_future(self, h: torch.Tensor) -> torch.Tensor:
         """Predict per-planet ``t+10`` state ``(B, N, 4)``: ``[own_neu, own_me, own_en, log_ships]``."""
@@ -679,8 +766,9 @@ def build_galcon_gen2_transformer(
     n_layers: int = 5,
     dim_ff: int = 384,
     feature_version: int = 2,
+    enable_multi_send: bool = False,
 ) -> GalconPlanetTransformer:
-    """Instantiate the Gen 2 ~1.28M ``GalconPlanetTransformer`` with world-model & ``/REDIR`` heads."""
+    """Instantiate the Gen 2/3/4 ``GalconPlanetTransformer`` with world-model, ``/REDIR`` & optional multi-send heads."""
     return GalconPlanetTransformer(
         planet_dim=GALCON_PLANET_DIM_V2 if feature_version >= 2 else GALCON_PLANET_DIM,
         timeline_dim=GALCON_TIMELINE_DIM,
@@ -691,6 +779,26 @@ def build_galcon_gen2_transformer(
         n_layers=n_layers,
         dim_ff=dim_ff,
         feature_version=feature_version,
+        enable_multi_send=enable_multi_send,
+    )
+
+
+def build_galcon_gen4_transformer(
+    *,
+    d_model: int = 160,
+    n_heads: int = 4,
+    n_layers: int = 5,
+    dim_ff: int = 384,
+    feature_version: int = 2,
+) -> GalconPlanetTransformer:
+    """Instantiate the Gen 4 ``1.29M`` ``GalconPlanetTransformer`` with native pairwise multi-target send head."""
+    return build_galcon_gen2_transformer(
+        d_model=d_model,
+        n_heads=n_heads,
+        n_layers=n_layers,
+        dim_ff=dim_ff,
+        feature_version=feature_version,
+        enable_multi_send=True,
     )
 
 
@@ -698,7 +806,7 @@ def load_galcon_model_from_checkpoint(
     checkpoint_path: str | Path,
     device: str | torch.device = "cpu",
 ) -> Tuple[nn.Module, int, bool]:
-    """Load either a v1 ``PlanetTimelineTransformer`` or Gen 2 ``GalconPlanetTransformer`` checkpoint.
+    """Load a v1, Gen 2/3, or Gen 4 multi-send Galcon Transformer checkpoint.
 
     Returns ``(model, feature_version, has_native_redir)``.
     """
@@ -706,9 +814,11 @@ def load_galcon_model_from_checkpoint(
     cfg = dict(ckpt.get("model_config", {}))
     model_cls = cfg.pop("model_class", None) or ckpt.get("model_class")
     has_redir = bool(ckpt.get("has_trained_redir", False))
+    sd = ckpt["model_state_dict"]
+    has_ms = bool(cfg.get("enable_multi_send", False) or any(k.startswith("ms_head.") for k in sd.keys()))
 
     if model_cls == "GalconPlanetTransformer" or "redir_dim" in cfg or any(
-        k.startswith("backbone.") for k in ckpt["model_state_dict"].keys()
+        k.startswith("backbone.") for k in sd.keys()
     ):
         fv = int(cfg.get("feature_version", 2 if cfg.get("planet_dim", 18) >= 22 else 1))
         model = GalconPlanetTransformer(
@@ -721,15 +831,20 @@ def load_galcon_model_from_checkpoint(
             n_layers=int(cfg.get("n_layers", 5)),
             dim_ff=int(cfg.get("dim_ff", 384)),
             feature_version=fv,
+            enable_multi_send=has_ms,
         ).to(device)
-        model.load_state_dict(ckpt["model_state_dict"])
+        model.load_state_dict(sd)
+        model.has_trained_multi_send = bool(ckpt.get("has_trained_multi_send", has_ms))
+        model.use_canonical_d4_trained = bool(ckpt.get("use_canonical_d4", False))
         model.eval()
         return model, fv, has_redir
 
     fv = 2 if int(cfg.get("planet_dim", 18)) >= 22 else 1
     clean_cfg = {k: v for k, v in cfg.items() if k in ("planet_dim", "timeline_dim", "edge_dim", "d_model", "n_heads", "n_layers", "dim_ff")}
     model = PlanetTimelineTransformer(**clean_cfg).to(device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    model.load_state_dict(sd)
+    model.has_trained_multi_send = False
+    model.use_canonical_d4_trained = False
     model.eval()
     return model, fv, False
 
@@ -743,22 +858,34 @@ class GalconTransformerAgent:
         *,
         launch_threshold: float = 0.50,
         redir_threshold: float = 0.55,
+        multi_send_threshold: float = 0.45,
+        max_sends_per_planet: int = 6,
         use_d4_tta: bool = True,
+        use_d4_canonical: Optional[bool] = None,
         enable_redirect_overlay: bool = True,
         use_native_redir: bool = True,
+        use_multi_send: bool = True,
         device: str = "cpu",
     ) -> None:
         torch.set_num_threads(1)
         self.device = torch.device(device)
         self.launch_threshold = float(launch_threshold)
         self.redir_threshold = float(redir_threshold)
+        self.multi_send_threshold = float(multi_send_threshold)
+        self.max_sends_per_planet = max(1, int(max_sends_per_planet))
         self.use_d4_tta = bool(use_d4_tta)
         self.enable_redirect_overlay = bool(enable_redirect_overlay)
         self.use_native_redir = bool(use_native_redir)
+        self.use_multi_send = bool(use_multi_send)
 
         self.model, self.feature_version, self.has_trained_redir = load_galcon_model_from_checkpoint(
             checkpoint_path, device=self.device
         )
+        self.has_trained_multi_send = bool(getattr(self.model, "has_trained_multi_send", False))
+        if use_d4_canonical is None:
+            self.use_d4_canonical = bool(getattr(self.model, "use_canonical_d4_trained", False))
+        else:
+            self.use_d4_canonical = bool(use_d4_canonical)
 
     @torch.no_grad()
     def predict_probs_and_value(
@@ -767,7 +894,7 @@ class GalconTransformerAgent:
         *,
         use_d4_tta: Optional[bool] = None,
     ) -> Tuple[np.ndarray, np.ndarray, float]:
-        probs, mean_fracs, val, _ = self._predict_full(enc, redir_enc=None, use_d4_tta=use_d4_tta)
+        probs, mean_fracs, val, _, _, _ = self._predict_all(enc, redir_enc=None, use_d4_tta=use_d4_tta)
         return probs, mean_fracs, val
 
     @torch.no_grad()
@@ -778,23 +905,32 @@ class GalconTransformerAgent:
         *,
         use_d4_tta: Optional[bool] = None,
     ) -> Tuple[np.ndarray, np.ndarray, float, Optional[np.ndarray]]:
-        return self._predict_full(enc, redir_enc=redir_enc, use_d4_tta=use_d4_tta)
+        probs, mean_fracs, val, redir_probs, _, _ = self._predict_all(
+            enc, redir_enc=redir_enc, use_d4_tta=use_d4_tta
+        )
+        return probs, mean_fracs, val, redir_probs
 
     @torch.no_grad()
-    def _predict_full(
+    def _predict_all(
         self,
         enc: EncodedGalconState,
         *,
         redir_enc: Optional[EncodedRedirState] = None,
         use_d4_tta: Optional[bool] = None,
-    ) -> Tuple[np.ndarray, np.ndarray, float, Optional[np.ndarray]]:
+        use_d4_canonical: Optional[bool] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, float, Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
         n = len(enc.planet_ids)
         if n == 0:
-            return np.zeros((0, 1), dtype=np.float32), np.zeros((0, 0), dtype=np.float32), 0.0, None
-        d4 = self.use_d4_tta if use_d4_tta is None else bool(use_d4_tta)
-        syms = [(k, f) for f in (False, True) for k in range(4)] if d4 else [(0, False)]
-        k_b = len(syms)
-        pf_b = np.stack([apply_galcon_d4(enc.planet_feats, k_rot=k, flip_x=f) for k, f in syms], axis=0)
+            return np.zeros((0, 1), dtype=np.float32), np.zeros((0, 0), dtype=np.float32), 0.0, None, None, None
+        canon = self.use_d4_canonical if use_d4_canonical is None else bool(use_d4_canonical)
+        d4 = False if canon else (self.use_d4_tta if use_d4_tta is None else bool(use_d4_tta))
+        if canon:
+            pf_b = canonicalize_galcon_d4(enc.planet_feats)[None]
+            k_b = 1
+        else:
+            syms = [(k, f) for f in (False, True) for k in range(4)] if d4 else [(0, False)]
+            k_b = len(syms)
+            pf_b = np.stack([apply_galcon_d4(enc.planet_feats, k_rot=k, flip_x=f) for k, f in syms], axis=0)
         tf_b = np.broadcast_to(enc.timeline_feats[None], (k_b, n, GALCON_TIMELINE_HORIZON, GALCON_TIMELINE_DIM)).copy()
         ef_b = np.broadcast_to(enc.edge_feats[None], (k_b, n, n, enc.edge_feats.shape[-1])).copy()
         pm_b = np.ones((k_b, n), dtype=bool)
@@ -809,27 +945,76 @@ class GalconTransformerAgent:
             and redir_enc is not None
             and len(redir_enc.fleet_ids) > 0
         )
-        if want_redir:
+        want_ms = (
+            isinstance(self.model, GalconPlanetTransformer)
+            and self.model.enable_multi_send
+        )
+        if want_redir or want_ms:
             logits, fracs, vals, h = self.model(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
-            f_cnt = len(redir_enc.fleet_ids)
-            cd_t = torch.from_numpy(
-                np.broadcast_to(redir_enc.cur_dst_idx[None], (k_b, f_cnt)).copy()
-            ).to(self.device)
-            rf_t = torch.from_numpy(
-                np.broadcast_to(redir_enc.redir_feats[None], (k_b, f_cnt, n, GALCON_REDIR_DIM)).copy()
-            ).to(self.device)
-            r_logits = self.model.predict_redir_logits(h, cd_t, rf_t, pm_t)
-            redir_probs = F.softmax(r_logits, dim=-1).mean(dim=0).cpu().numpy()
+            redir_probs = None
+            if want_redir and redir_enc is not None:
+                f_cnt = len(redir_enc.fleet_ids)
+                cd_t = torch.from_numpy(
+                    np.broadcast_to(redir_enc.cur_dst_idx[None], (k_b, f_cnt)).copy()
+                ).to(self.device)
+                rf_t = torch.from_numpy(
+                    np.broadcast_to(redir_enc.redir_feats[None], (k_b, f_cnt, n, GALCON_REDIR_DIM)).copy()
+                ).to(self.device)
+                r_logits = self.model.predict_redir_logits(h, cd_t, rf_t, pm_t)
+                redir_probs = F.softmax(r_logits, dim=-1).mean(dim=0).cpu().numpy()
+            ms_probs = None
+            ms_fracs = None
+            if want_ms:
+                ms_logits, ms_fr = self.model.predict_multi_send(h, ef_t)
+                legal_t = torch.from_numpy(enc.legal_edges).to(self.device)
+                ms_logits = ms_logits.masked_fill(~legal_t.unsqueeze(0), -1e9)
+                ms_probs = torch.sigmoid(ms_logits).mean(dim=0).cpu().numpy()
+                ms_fracs = ms_fr.mean(dim=0).cpu().numpy()
         else:
             logits, fracs, vals = self.model(pf_t, tf_t, ef_t, pm_t)
             redir_probs = None
+            ms_probs = None
+            ms_fracs = None
 
         legal = torch.from_numpy(enc.legal_edges).to(self.device)
         mask = torch.cat([torch.ones((n, 1), dtype=torch.bool, device=self.device), legal], dim=-1)
         logits = logits.masked_fill(~mask.unsqueeze(0), -1e9)
         probs = F.softmax(logits, dim=-1).mean(dim=0).cpu().numpy()
         mean_fracs = fracs.mean(dim=0).cpu().numpy()
-        return probs, mean_fracs, float(vals.mean().item()), redir_probs
+        return probs, mean_fracs, float(vals.mean().item()), redir_probs, ms_probs, ms_fracs
+
+    def _append_redirects(
+        self,
+        orders: List[Order],
+        sim: GalconSim,
+        enc: EncodedGalconState,
+        *,
+        redir_enc: Optional[EncodedRedirState],
+        redir_probs: Optional[np.ndarray],
+        include_redirects: bool,
+    ) -> None:
+        if not (include_redirects and sim.allow_redirect and sim.fleets):
+            return
+        emitted_fids = set()
+        if (
+            self.use_native_redir
+            and self.has_trained_redir
+            and redir_enc is not None
+            and redir_probs is not None
+            and len(redir_enc.fleet_ids) > 0
+        ):
+            for fi, fid in enumerate(redir_enc.fleet_ids):
+                cur_idx = int(redir_enc.cur_dst_idx[fi])
+                p_row = redir_probs[fi]
+                best_j = int(np.argmax(p_row))
+                if best_j != cur_idx and float(p_row[best_j]) >= self.redir_threshold:
+                    orders.append(RedirOrder(fid, enc.planet_ids[best_j]))
+                    emitted_fids.add(fid)
+        elif self.enable_redirect_overlay:
+            smart_redirs, _ = compute_smart_redirects(sim, enc, verify_rollout=False)
+            for ro in smart_redirs:
+                if ro.fleet_id not in emitted_fids:
+                    orders.append(ro)
 
     def _decode_orders(
         self,
@@ -866,28 +1051,69 @@ class GalconTransformerAgent:
             pct = 100 if f >= 0.90 else max(5, min(100, int(round(f * 100.0))))
             orders.append(SendOrder(enc.planet_ids[i], enc.planet_ids[best_j], pct))
 
-        # Mid-flight redirects: native learned /REDIR head for Gen 2, upgraded smart overlay fallback
-        if include_redirects and sim.allow_redirect and sim.fleets:
-            emitted_fids = set()
-            if (
-                self.use_native_redir
-                and self.has_trained_redir
-                and redir_enc is not None
-                and redir_probs is not None
-                and len(redir_enc.fleet_ids) > 0
-            ):
-                for fi, fid in enumerate(redir_enc.fleet_ids):
-                    cur_idx = int(redir_enc.cur_dst_idx[fi])
-                    p_row = redir_probs[fi]
-                    best_j = int(np.argmax(p_row))
-                    if best_j != cur_idx and float(p_row[best_j]) >= self.redir_threshold:
-                        orders.append(RedirOrder(fid, enc.planet_ids[best_j]))
-                        emitted_fids.add(fid)
-            elif self.enable_redirect_overlay:
-                smart_redirs, _ = compute_smart_redirects(sim, enc, verify_rollout=False)
-                for ro in smart_redirs:
-                    if ro.fleet_id not in emitted_fids:
-                        orders.append(ro)
+        self._append_redirects(
+            orders, sim, enc, redir_enc=redir_enc, redir_probs=redir_probs, include_redirects=include_redirects
+        )
+        return orders
+
+    def _decode_multi_send_orders(
+        self,
+        sim: GalconSim,
+        enc: EncodedGalconState,
+        ms_probs: np.ndarray,
+        ms_fracs: np.ndarray,
+        *,
+        threshold: float,
+        frac_scale: float = 1.0,
+        edge_overrides: Optional[Dict[Tuple[int, int], bool]] = None,
+        redir_enc: Optional[EncodedRedirState] = None,
+        redir_probs: Optional[np.ndarray] = None,
+        include_redirects: bool = True,
+    ) -> List[Order]:
+        """Decode Gen 4 independent pairwise multi-target send probabilities into exact sequential ``SendOrder``s."""
+        n = len(enc.planet_ids)
+        orders: List[Order] = []
+        for i in range(n):
+            if not enc.owned_mask[i] or not np.any(enc.legal_edges[i]):
+                continue
+            src = enc.planets[i]
+            orig_ships = float(src.ships)
+            if orig_ships < 2.0:
+                continue
+
+            selected: List[Tuple[float, int]] = []
+            for j in range(n):
+                if j == i or not enc.legal_edges[i, j]:
+                    continue
+                p_ij = float(ms_probs[i, j])
+                if edge_overrides is not None and (i, j) in edge_overrides:
+                    fire = bool(edge_overrides[(i, j)])
+                else:
+                    fire = p_ij >= threshold
+                if fire:
+                    selected.append((p_ij, j))
+            if not selected:
+                continue
+            selected.sort(key=lambda x: -x[0])
+            selected = selected[: self.max_sends_per_planet]
+
+            rem = orig_ships
+            for _, j in selected:
+                if rem < 2.0:
+                    break
+                want = float(ms_fracs[i, j]) * float(frac_scale) * orig_ships
+                want = min(rem, max(1.0, want))
+                ratio = want / max(1.0, rem)
+                pct = 100 if ratio >= 0.92 else max(5, min(100, int(round(ratio * 100.0))))
+                sent = math.floor(rem * (pct / 100.0) + 1e-9)
+                if sent < 1:
+                    continue
+                orders.append(SendOrder(enc.planet_ids[i], enc.planet_ids[j], pct))
+                rem = max(0.0, rem - sent)
+
+        self._append_redirects(
+            orders, sim, enc, redir_enc=redir_enc, redir_probs=redir_probs, include_redirects=include_redirects
+        )
         return orders
 
     @torch.no_grad()
@@ -900,7 +1126,17 @@ class GalconTransformerAgent:
             if (self.use_native_redir and self.has_trained_redir and sim.allow_redirect and sim.fleets)
             else None
         )
-        probs, mean_fracs, _, redir_probs = self.predict_probs_value_and_redir(enc, redir_enc)
+        probs, mean_fracs, _, redir_probs, ms_probs, ms_fracs = self._predict_all(enc, redir_enc=redir_enc)
+        if self.use_multi_send and self.has_trained_multi_send and ms_probs is not None and ms_fracs is not None:
+            return self._decode_multi_send_orders(
+                sim,
+                enc,
+                ms_probs,
+                ms_fracs,
+                threshold=self.multi_send_threshold,
+                redir_enc=redir_enc,
+                redir_probs=redir_probs,
+            )
         return self._decode_orders(
             sim,
             enc,
@@ -913,16 +1149,15 @@ class GalconTransformerAgent:
 
 
 class GalconSearchTransformerAgent(GalconTransformerAgent):
-    """Gen 3 Batched Reactive-Opponent Neural Search over ``GalconTransformerAgent`` in ``GalconSim``.
+    """Gen 3/4 Batched Opponent-Adaptive Multi-Ply Reactive Neural Search over ``GalconTransformerAgent``.
 
-    Evaluates 8-10 policy-proposed candidate plans using a 2-ply reactive neural rollout:
-    - Tick 0: applies each candidate plan against the opponent's neural response.
-    - Mid-rollout (``rollout_horizon // 2``): batches all live rollouts into ONE forward pass
-      for BOTH ``player`` and ``opp`` so both sides react dynamically (counter-rushes, defenses,
-      follow-up captures) instead of sitting idle.
-    - Leaf (``rollout_horizon``): evaluates all leaves in ONE batched forward pass with
-      calibrated ``neural_value_weight=0.85`` and a ``+0.025`` prior-trust margin on the base
-      8x D4 pure policy so Search only overrides Pure when finding a genuinely superior line.
+    Evaluates ~10–12 policy-proposed candidate plans (including Gen 4 native multi-send sweeps and
+    ROI fan-out proposals) using a batched 2-ply or 3-ply reactive neural rollout:
+    - Tracks the opponent's live style online (multi-send macro expander vs. early home-rusher) so
+      simulated opponent replies adapt dynamically to bots like ``esparano Sparky v1.6`` or rushers.
+    - Uses exact ``1x`` Canonical D4 when enabled (~5x faster than 8x D4 TTA on CPU).
+    - Evaluates all rollout leaves in ONE batched forward pass with calibrated ``neural_value_weight=0.85``
+      and a ``+0.025`` prior-trust margin on the base pure policy.
     """
 
     def __init__(
@@ -931,52 +1166,112 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         *,
         launch_threshold: float = 0.50,
         redir_threshold: float = 0.55,
+        multi_send_threshold: float = 0.45,
         use_d4_tta: bool = True,
-        rollout_horizon: int = 12,
-        time_budget_sec: float = 0.18,
-        neural_value_weight: float = 0.85,
+        use_d4_canonical: Optional[bool] = True,
+        rollout_horizon: int = 16,
+        num_plies: int = 2,
+        time_budget_sec: float = 0.22,
+        neural_value_weight: float = 0.70,
         reactive_mid_ply: bool = True,
-        prior_bonus: float = 0.025,
+        opponent_adaptive: bool = True,
+        prior_bonus: float = 0.015,
         device: str = "cpu",
     ) -> None:
         super().__init__(
             checkpoint_path=checkpoint_path,
             launch_threshold=launch_threshold,
             redir_threshold=redir_threshold,
+            multi_send_threshold=multi_send_threshold,
             use_d4_tta=use_d4_tta,
+            use_d4_canonical=use_d4_canonical,
             device=device,
         )
         self.rollout_horizon = max(4, int(rollout_horizon))
+        self.num_plies = max(1, min(3, int(num_plies))) if reactive_mid_ply else 1
         self.time_budget_sec = float(time_budget_sec)
         self.neural_value_weight = float(neural_value_weight)
         self.reactive_mid_ply = bool(reactive_mid_ply)
+        self.opponent_adaptive = bool(opponent_adaptive)
         self.prior_bonus = float(prior_bonus)
+        # Online opponent style tracker (reset automatically whenever sim.tick decreases)
+        self._last_obs_tick = 10**9
+        self._last_seen_fid = -1
+        self._opp_multi_send_ema = 0.0
+        self._opp_rush_ema = 0.0
+
+    def _update_opp_profile(self, sim: GalconSim, player: int) -> None:
+        """Observe newly launched opponent fleets to classify multi-send expanders vs. early rushers."""
+        if sim.tick <= self._last_obs_tick:
+            self._last_seen_fid = -1
+            self._opp_multi_send_ema = 0.0
+            self._opp_rush_ema = 0.0
+        self._last_obs_tick = sim.tick
+        opp = 2 if player == 1 else 1
+        new_by_src: Dict[int, List[Fleet]] = {}
+        max_fid = self._last_seen_fid
+        for fid, fl in sim.fleets.items():
+            if fid > max_fid:
+                max_fid = fid
+            if fid > self._last_seen_fid and fl.owner == opp:
+                new_by_src.setdefault(fl.source, []).append(fl)
+        self._last_seen_fid = max_fid
+        if not new_by_src:
+            return
+        max_fan = max(len(v) for v in new_by_src.values())
+        multi_sig = 1.0 if max_fan >= 2 else 0.0
+        self._opp_multi_send_ema = 0.65 * self._opp_multi_send_ema + 0.35 * multi_sig
+        if sim.tick <= 20:
+            my_homes = {p.id for p in sim.planets.values() if p.owner == player}
+            rush_ships = sum(fl.ships for fls in new_by_src.values() for fl in fls if fl.target in my_homes)
+            rush_sig = 1.0 if rush_ships >= 45.0 else 0.0
+            self._opp_rush_ema = 0.60 * self._opp_rush_ema + 0.40 * rush_sig
+
+    def _prep_pf(self, enc: EncodedGalconState) -> np.ndarray:
+        return canonicalize_galcon_d4(enc.planet_feats) if self.use_d4_canonical else enc.planet_feats
 
     @torch.no_grad()
     def _batch_forward_policy_and_val(
         self, encs: Sequence[EncodedGalconState]
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
         """Run ONE batched 1x forward pass over a list of same-N encoded states."""
         k = len(encs)
         if k == 0:
-            return np.zeros((0, 0, 1), dtype=np.float32), np.zeros((0, 0, 0), dtype=np.float32), np.zeros((0,), dtype=np.float32)
+            return (
+                np.zeros((0, 0, 1), dtype=np.float32),
+                np.zeros((0, 0, 0), dtype=np.float32),
+                np.zeros((0,), dtype=np.float32),
+                None,
+                None,
+            )
         n = len(encs[0].planet_ids)
-        pf_b = np.stack([e.planet_feats for e in encs], axis=0)
+        pf_b = np.stack([self._prep_pf(e) for e in encs], axis=0)
         tf_b = np.stack([e.timeline_feats for e in encs], axis=0)
         ef_b = np.stack([e.edge_feats for e in encs], axis=0)
         le_b = np.stack([e.legal_edges for e in encs], axis=0)
         pm_b = np.ones((k, n), dtype=bool)
-        logits, fracs, vals = self.model(
-            torch.from_numpy(pf_b).to(self.device),
-            torch.from_numpy(tf_b).to(self.device),
-            torch.from_numpy(ef_b).to(self.device),
-            torch.from_numpy(pm_b).to(self.device),
-        )
+        pf_t = torch.from_numpy(pf_b).to(self.device)
+        tf_t = torch.from_numpy(tf_b).to(self.device)
+        ef_t = torch.from_numpy(ef_b).to(self.device)
+        pm_t = torch.from_numpy(pm_b).to(self.device)
         le_t = torch.from_numpy(le_b).to(self.device)
+
+        want_ms = isinstance(self.model, GalconPlanetTransformer) and self.model.enable_multi_send
+        if want_ms:
+            logits, fracs, vals, h = self.model(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
+            ms_l, ms_f = self.model.predict_multi_send(h, ef_t)
+            ms_l = ms_l.masked_fill(~le_t, -1e9)
+            ms_p = torch.sigmoid(ms_l).cpu().numpy()
+            ms_f_np = ms_f.cpu().numpy()
+        else:
+            logits, fracs, vals = self.model(pf_t, tf_t, ef_t, pm_t)
+            ms_p = None
+            ms_f_np = None
+
         mask = torch.cat([torch.ones((k, n, 1), dtype=torch.bool, device=self.device), le_t], dim=-1)
         logits = logits.masked_fill(~mask, -1e9)
         probs = F.softmax(logits, dim=-1).cpu().numpy()
-        return probs, fracs.cpu().numpy(), vals.cpu().numpy()
+        return probs, fracs.cpu().numpy(), vals.cpu().numpy(), ms_p, ms_f_np
 
     @torch.no_grad()
     def _batch_evaluate_leaves(self, leaf_encs: Sequence[EncodedGalconState]) -> np.ndarray:
@@ -985,7 +1280,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         if k == 0:
             return np.zeros((0,), dtype=np.float32)
         n = len(leaf_encs[0].planet_ids)
-        pf_b = np.stack([e.planet_feats for e in leaf_encs], axis=0)
+        pf_b = np.stack([self._prep_pf(e) for e in leaf_encs], axis=0)
         tf_b = np.stack([e.timeline_feats for e in leaf_encs], axis=0)
         ef_b = np.stack([e.edge_feats for e in leaf_encs], axis=0)
         pm_b = np.ones((k, n), dtype=bool)
@@ -1035,8 +1330,12 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                 t_idx = min(GALCON_TIMELINE_HORIZON - 1, max(0, eta - 1))
                 _, _, po, ps = futures[j]
                 if po[t_idx] > 0:
-                    continue  # Already scheduled to be ours
-                extra = 0.0 if dst.owner == 0 else (dst.production / PRODUCTION_DIVISOR) * 0.25 * max(0, eta - GALCON_TIMELINE_HORIZON)
+                    continue
+                extra = (
+                    0.0
+                    if dst.owner == 0
+                    else (dst.production / PRODUCTION_DIVISOR) * 0.25 * max(0, eta - GALCON_TIMELINE_HORIZON)
+                )
                 need = math.ceil(float(ps[t_idx]) + extra) + 2.0
                 if need <= 0.0 or need > budget:
                     continue
@@ -1068,15 +1367,44 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         orders.extend(base_redirs)
         return orders
 
+    def _predict_opponent_reply(
+        self,
+        sim: GalconSim,
+        opp_enc: EncodedGalconState,
+        op: np.ndarray,
+        of: np.ndarray,
+        oms_p: Optional[np.ndarray],
+        oms_f: Optional[np.ndarray],
+    ) -> List[Order]:
+        """Model the opponent's response, adapting to observed multi-send expanders or early rushers."""
+        if not opp_enc.planet_ids or not np.any(opp_enc.owned_mask):
+            return []
+        if self.use_multi_send and self.has_trained_multi_send and oms_p is not None and oms_f is not None:
+            thr = max(0.32, self.multi_send_threshold - (0.08 if self._opp_multi_send_ema >= 0.30 else 0.0))
+            return self._decode_multi_send_orders(
+                sim, opp_enc, oms_p, oms_f, threshold=thr, include_redirects=False
+            )
+        if self.opponent_adaptive and self._opp_multi_send_ema >= 0.30:
+            fan = self._build_fanout_plan(sim, opp_enc, op, max_targets_per_planet=4, reserve_ratio=0.12)
+            if fan:
+                return fan
+        if self.opponent_adaptive and self._opp_rush_ema >= 0.35 and sim.tick <= 24:
+            return self._decode_orders(
+                sim, opp_enc, op, of, launch_threshold=max(0.28, self.launch_threshold - 0.14), frac_scale=1.20, include_redirects=False
+            )
+        return self._decode_orders(sim, opp_enc, op, of, launch_threshold=self.launch_threshold, include_redirects=False)
+
     @torch.no_grad()
     def act_with_search_info(
         self,
         sim: GalconSim,
         player: int,
     ) -> Tuple[List[Order], List[List[Order]], List[float], float]:
-        """Run batched reactive lookahead search and return ``(best_plan, candidates, scores, best_score)``."""
+        """Run batched opponent-adaptive reactive lookahead search and return ``(best_plan, candidates, scores, best_score)``."""
         t0 = time.perf_counter()
         deadline = t0 + self.time_budget_sec
+        if self.opponent_adaptive:
+            self._update_opp_profile(sim, player)
         enc = extract_galcon_features(sim, player, feature_version=self.feature_version)
         n = len(enc.planet_ids)
         if n == 0 or not np.any(enc.owned_mask):
@@ -1087,59 +1415,114 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
             if (self.use_native_redir and self.has_trained_redir and sim.allow_redirect and sim.fleets)
             else None
         )
-        probs, mean_fracs, root_val, redir_probs = self.predict_probs_value_and_redir(enc, redir_enc)
+        probs, mean_fracs, root_val, redir_probs, ms_probs, ms_fracs = self._predict_all(enc, redir_enc=redir_enc)
+        using_ms = self.use_multi_send and self.has_trained_multi_send and ms_probs is not None and ms_fracs is not None
 
-        raw_cands: List[List[Order]] = [
-            self._decode_orders(
-                sim, enc, probs, mean_fracs, launch_threshold=thr, redir_enc=redir_enc, redir_probs=redir_probs
+        raw_cands: List[List[Order]] = []
+        if using_ms and ms_probs is not None and ms_fracs is not None:
+            for thr in (
+                self.multi_send_threshold,
+                max(0.24, self.multi_send_threshold - 0.12),
+                min(0.75, self.multi_send_threshold + 0.12),
+            ):
+                raw_cands.append(
+                    self._decode_multi_send_orders(
+                        sim, enc, ms_probs, ms_fracs, threshold=thr, redir_enc=redir_enc, redir_probs=redir_probs
+                    )
+                )
+            for fs in (0.82, 1.18):
+                raw_cands.append(
+                    self._decode_multi_send_orders(
+                        sim,
+                        enc,
+                        ms_probs,
+                        ms_fracs,
+                        threshold=self.multi_send_threshold,
+                        frac_scale=fs,
+                        redir_enc=redir_enc,
+                        redir_probs=redir_probs,
+                    )
+                )
+            # Flip top-3 most uncertain legal edges (closest to threshold)
+            uncert: List[Tuple[float, int, int, bool]] = []
+            for i in range(n):
+                if not enc.owned_mask[i]:
+                    continue
+                for j in range(n):
+                    if enc.legal_edges[i, j]:
+                        p_ij = float(ms_probs[i, j])
+                        if 0.18 <= p_ij <= 0.82:
+                            uncert.append((abs(p_ij - self.multi_send_threshold), i, j, p_ij < self.multi_send_threshold))
+            uncert.sort(key=lambda x: x[0])
+            for _, i_e, j_e, new_val in uncert[:3]:
+                raw_cands.append(
+                    self._decode_multi_send_orders(
+                        sim,
+                        enc,
+                        ms_probs,
+                        ms_fracs,
+                        threshold=self.multi_send_threshold,
+                        edge_overrides={(i_e, j_e): new_val},
+                        redir_enc=redir_enc,
+                        redir_probs=redir_probs,
+                    )
+                )
+            # Also include the single-target head plan as a conservative baseline candidate
+            raw_cands.append(
+                self._decode_orders(
+                    sim, enc, probs, mean_fracs, launch_threshold=self.launch_threshold, redir_enc=redir_enc, redir_probs=redir_probs
+                )
             )
+        else:
             for thr in (
                 self.launch_threshold,
                 max(0.24, self.launch_threshold - 0.16),
                 min(0.78, self.launch_threshold + 0.16),
-            )
-        ]
-        # Fraction-scaled variants (tight exact-capture vs heavy decisive commit)
-        for fs in (0.80, 1.22):
-            raw_cands.append(
-                self._decode_orders(
-                    sim,
-                    enc,
-                    probs,
-                    mean_fracs,
-                    launch_threshold=self.launch_threshold,
-                    frac_scale=fs,
-                    redir_enc=redir_enc,
-                    redir_probs=redir_probs,
+            ):
+                raw_cands.append(
+                    self._decode_orders(
+                        sim, enc, probs, mean_fracs, launch_threshold=thr, redir_enc=redir_enc, redir_probs=redir_probs
+                    )
                 )
-            )
-        # Flip top-3 highest-entropy owned planets
-        entropies: List[Tuple[float, int, int]] = []
-        for i in range(n):
-            if not enc.owned_mask[i]:
-                continue
-            p_row = np.clip(probs[i], 1e-6, 1.0)
-            ent = float(-np.sum(p_row * np.log(p_row)))
-            top2 = np.argsort(-p_row)[:2]
-            alt_c = int(top2[1])
-            if p_row[alt_c] >= 0.12:
-                entropies.append((ent, i, alt_c))
-        entropies.sort(key=lambda x: -x[0])
-        for _, p_idx, alt_c in entropies[:3]:
-            raw_cands.append(
-                self._decode_orders(
-                    sim,
-                    enc,
-                    probs,
-                    mean_fracs,
-                    launch_threshold=self.launch_threshold,
-                    overrides={p_idx: alt_c},
-                    redir_enc=redir_enc,
-                    redir_probs=redir_probs,
+            for fs in (0.80, 1.22):
+                raw_cands.append(
+                    self._decode_orders(
+                        sim,
+                        enc,
+                        probs,
+                        mean_fracs,
+                        launch_threshold=self.launch_threshold,
+                        frac_scale=fs,
+                        redir_enc=redir_enc,
+                        redir_probs=redir_probs,
+                    )
                 )
-            )
+            entropies: List[Tuple[float, int, int]] = []
+            for i in range(n):
+                if not enc.owned_mask[i]:
+                    continue
+                p_row = np.clip(probs[i], 1e-6, 1.0)
+                ent = float(-np.sum(p_row * np.log(p_row)))
+                top2 = np.argsort(-p_row)[:2]
+                alt_c = int(top2[1])
+                if p_row[alt_c] >= 0.12:
+                    entropies.append((ent, i, alt_c))
+            entropies.sort(key=lambda x: -x[0])
+            for _, p_idx, alt_c in entropies[:3]:
+                raw_cands.append(
+                    self._decode_orders(
+                        sim,
+                        enc,
+                        probs,
+                        mean_fracs,
+                        launch_threshold=self.launch_threshold,
+                        overrides={p_idx: alt_c},
+                        redir_enc=redir_enc,
+                        redir_probs=redir_probs,
+                    )
+                )
 
-        # Neural-guided multi-target fan-out candidates (evaluated by reactive rollout alongside single-target)
+        # Neural-guided ROI multi-target fan-out proposals (evaluated alongside neural candidates)
         base_redirs = [o for o in raw_cands[0] if isinstance(o, RedirOrder)]
         fan_cons = self._build_fanout_plan(
             sim, enc, probs, max_targets_per_planet=3, reserve_ratio=0.25, base_redirs=base_redirs
@@ -1168,7 +1551,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                 raw_cands.append(base_sends + list(smart_redirs))
                 raw_cands.append(base_sends)
 
-        # Deduplicate candidates preserving order (candidates[0] is always base 8x D4 pure policy)
+        # Deduplicate preserving order (candidates[0] is always the base pure policy)
         seen = set()
         candidates: List[List[Order]] = []
         for plan in raw_cands:
@@ -1180,59 +1563,78 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         if len(candidates) <= 1 or time.perf_counter() >= deadline - 0.015:
             return (candidates[0] if candidates else []), candidates, [root_val], root_val
 
-        # Predict opponent's immediate tick-0 response (1x fast forward pass)
+        # Predict opponent's immediate tick-0 response (1x fast forward pass, opponent-adaptive)
         opp = 2 if player == 1 else 1
         opp_enc = extract_galcon_features(sim, opp, feature_version=self.feature_version)
         opp_orders: List[Order] = []
         if opp_enc.planet_ids and np.any(opp_enc.owned_mask):
-            op, of, _ = self.predict_probs_and_value(opp_enc, use_d4_tta=False)
-            opp_orders = self._decode_orders(
-                sim, opp_enc, op, of, launch_threshold=self.launch_threshold, include_redirects=False
-            )
+            op, of, _, _, oms_p, oms_f = self._predict_all(opp_enc, use_d4_tta=False)
+            opp_orders = self._predict_opponent_reply(sim, opp_enc, op, of, oms_p, oms_f)
 
-        mid_step = max(2, self.rollout_horizon // 2) if self.reactive_mid_ply else self.rollout_horizon
+        # Build ply schedule (e.g. num_plies=2, horizon=12 -> [6, 12]; num_plies=3, horizon=15 -> [5, 10, 15])
+        ply_steps = [
+            max(1, int(round(self.rollout_horizon * (k + 1) / self.num_plies)))
+            for k in range(self.num_plies)
+        ]
+        ply_steps[-1] = self.rollout_horizon
+
         eval_cands: List[List[Order]] = []
         rolls: List[GalconSim] = []
 
-        # Ply 1: step each candidate to mid_step
+        # Ply 1: step each candidate to ply_steps[0]
         for idx, plan in enumerate(candidates):
             if idx > 0 and time.perf_counter() >= deadline - 0.025:
                 break
             roll = sim.clone()
             roll.step({player: plan, opp: opp_orders})
-            for _ in range(1, mid_step):
+            for _ in range(1, ply_steps[0]):
                 if roll.done:
                     break
                 roll.step({})
             eval_cands.append(plan)
             rolls.append(roll)
 
-        # Ply 2 (Reactive Mid-Rollout): ONE batched forward pass for both player & opp on all live rollouts
-        if self.reactive_mid_ply and mid_step < self.rollout_horizon and time.perf_counter() < deadline - 0.015:
+        # Subsequent reactive plies (Ply 2 .. num_plies): ONE batched forward pass per ply
+        for p_idx in range(1, len(ply_steps)):
+            prev_t = ply_steps[p_idx - 1]
+            next_t = ply_steps[p_idx]
+            if next_t <= prev_t or time.perf_counter() >= deadline - 0.015:
+                break
             live_indices = [i for i, r in enumerate(rolls) if not r.done]
-            if live_indices:
-                mid_encs: List[EncodedGalconState] = []
-                for i in live_indices:
-                    mid_encs.append(extract_galcon_features(rolls[i], player, feature_version=self.feature_version))
-                    mid_encs.append(extract_galcon_features(rolls[i], opp, feature_version=self.feature_version))
-                m_probs, m_fracs, _ = self._batch_forward_policy_and_val(mid_encs)
-                for k_idx, r_idx in enumerate(live_indices):
-                    r = rolls[r_idx]
-                    p_enc = mid_encs[2 * k_idx]
-                    o_enc = mid_encs[2 * k_idx + 1]
+            if not live_indices:
+                break
+            mid_encs: List[EncodedGalconState] = []
+            for i in live_indices:
+                mid_encs.append(extract_galcon_features(rolls[i], player, feature_version=self.feature_version))
+                mid_encs.append(extract_galcon_features(rolls[i], opp, feature_version=self.feature_version))
+            m_probs, m_fracs, _, m_msp, m_msf = self._batch_forward_policy_and_val(mid_encs)
+            for k_idx, r_idx in enumerate(live_indices):
+                r = rolls[r_idx]
+                p_enc = mid_encs[2 * k_idx]
+                o_enc = mid_encs[2 * k_idx + 1]
+                if using_ms and m_msp is not None and m_msf is not None:
+                    p_ord = self._decode_multi_send_orders(
+                        r, p_enc, m_msp[2 * k_idx], m_msf[2 * k_idx],
+                        threshold=self.multi_send_threshold, include_redirects=False,
+                    )
+                else:
                     p_ord = self._decode_orders(
                         r, p_enc, m_probs[2 * k_idx], m_fracs[2 * k_idx],
                         launch_threshold=self.launch_threshold, include_redirects=False,
                     )
-                    o_ord = self._decode_orders(
-                        r, o_enc, m_probs[2 * k_idx + 1], m_fracs[2 * k_idx + 1],
-                        launch_threshold=self.launch_threshold, include_redirects=False,
-                    )
-                    r.step({player: p_ord, opp: o_ord})
-                    for _ in range(mid_step + 1, self.rollout_horizon):
-                        if r.done:
-                            break
-                        r.step({})
+                o_ord = self._predict_opponent_reply(
+                    r,
+                    o_enc,
+                    m_probs[2 * k_idx + 1],
+                    m_fracs[2 * k_idx + 1],
+                    m_msp[2 * k_idx + 1] if m_msp is not None else None,
+                    m_msf[2 * k_idx + 1] if m_msf is not None else None,
+                )
+                r.step({player: p_ord, opp: o_ord})
+                for _ in range(prev_t + 1, next_t):
+                    if r.done:
+                        break
+                    r.step({})
 
         # Leaf evaluation: ONE batched forward pass across all non-terminal leaves
         h_vals: List[float] = []
@@ -1258,7 +1660,6 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
             else:
                 sc = self.neural_value_weight * nn_map[i] + (1.0 - self.neural_value_weight) * h_vals[i]
             scores.append(sc)
-            # Small prior-trust margin on candidates[0] (base 8x D4 pure policy) prevents noisy overrides
             eff_sc = sc + (self.prior_bonus if i == 0 else 0.0)
             if eff_sc > best_score:
                 best_score = eff_sc
