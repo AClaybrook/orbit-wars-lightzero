@@ -251,3 +251,109 @@ def test_gbots_wire_protocol_roundtrip(tmp_path: Path):
     lines2 = [l for l in out2.getvalue().splitlines() if l]
     assert lines2.count("/TOCK") == 2
     assert any(l.startswith("/SEND ") for l in lines2)
+
+
+def test_galcon_gen3_reactive_search_and_large_asymmetric_arena(tmp_path: Path):
+    sim = GalconSim.create(
+        seed=31415, num_planets=26, width=560.0, height=340.0, max_ticks=220, symmetric=False
+    )
+    assert len(sim.planets) >= 22
+    enc = extract_galcon_features(sim, player=1, feature_version=2)
+    n = len(enc.planet_ids)
+    assert n == len(sim.planets)
+    assert enc.planet_feats.shape == (n, GALCON_PLANET_DIM_V2)
+    assert enc.edge_feats.shape == (n, n, GALCON_EDGE_DIM_V2)
+    assert np.isfinite(enc.planet_feats).all()
+
+    pad = pad_galcon_state(enc)
+    assert pad["pad_mask"].sum() == n
+
+    model = build_galcon_gen2_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
+    ckpt = tmp_path / "galcon_gen3_test.pt"
+    torch.save(
+        {"model_config": model.config, "model_state_dict": model.state_dict(), "has_trained_redir": True},
+        ckpt,
+    )
+    s_ag = GalconSearchTransformerAgent(
+        ckpt,
+        launch_threshold=0.10,
+        rollout_horizon=8,
+        time_budget_sec=0.25,
+        neural_value_weight=0.85,
+        reactive_mid_ply=True,
+        prior_bonus=0.025,
+    )
+    best_plan, cands, scores, best_sc = s_ag.act_with_search_info(sim, 1)
+    assert isinstance(best_plan, list)
+    assert len(cands) == len(scores) >= 2
+    assert -1.0 <= best_sc <= 1.0
+
+
+def test_galcon_lua_bridge_mock_bot(tmp_path: Path):
+    import shutil
+
+    if shutil.which("lua5.3") is None and shutil.which("lua") is None:
+        return
+
+    from galcon.lua_bridge import GalconLuaBotBridge
+
+    mock_lua = tmp_path / "mock_galcon_bot.lua"
+    mock_lua.write_text(
+        """
+local tick_count = 0
+function reset_bot()
+    tick_count = 0
+end
+function bot_act(user)
+    tick_count = tick_count + 1
+    local mine = g2.search("planet owner:" .. user)
+    local all = g2.search("planet")
+    if #mine > 0 then
+        local src = mine[1]
+        local best = nil
+        local best_d = 1e9
+        for _, p in ipairs(all) do
+            if p.owner_n ~= user.n then
+                local d = g2.distance(src, p)
+                if d < best_d then
+                    best_d = d
+                    best = p
+                end
+            end
+        end
+        if best ~= nil and src.ships_value >= 10 then
+            src:fleet_send(50, best)
+        end
+    end
+    local fleets = g2.search("fleet owner:" .. user)
+    if #fleets > 0 and #all >= 3 then
+        for _, fl in ipairs(fleets) do
+            for _, p in ipairs(all) do
+                if p.n ~= fl.fleet_target and p.owner_n ~= user.n then
+                    fl:fleet_redirect(p)
+                    break
+                end
+            end
+        end
+    end
+end
+""",
+        encoding="utf-8",
+    )
+
+    bridge = GalconLuaBotBridge(mock_lua)
+    try:
+        sim = GalconSim.create(seed=101, num_planets=10, width=280.0, height=180.0)
+        o0 = bridge.act(sim, 1)
+        assert any(isinstance(o, SendOrder) and o.src_id == 1 for o in o0)
+        sim.step({1: o0})
+        assert len(sim.fleets) >= 1
+        o1 = bridge.act(sim, 1)
+        assert any(isinstance(o, RedirOrder) for o in o1)
+        # Verify reset triggers cleanly when starting a new game at tick 0
+        sim2 = GalconSim.create(seed=102, num_planets=10, width=280.0, height=180.0)
+        o2 = bridge.act(sim2, 2)
+        assert any(isinstance(o, SendOrder) and o.src_id == 2 for o in o2)
+    finally:
+        bridge.close()
+

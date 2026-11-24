@@ -913,7 +913,17 @@ class GalconTransformerAgent:
 
 
 class GalconSearchTransformerAgent(GalconTransformerAgent):
-    """Fast batched value-guided lookahead search over ``GalconTransformerAgent`` in ``GalconSim``."""
+    """Gen 3 Batched Reactive-Opponent Neural Search over ``GalconTransformerAgent`` in ``GalconSim``.
+
+    Evaluates 8-10 policy-proposed candidate plans using a 2-ply reactive neural rollout:
+    - Tick 0: applies each candidate plan against the opponent's neural response.
+    - Mid-rollout (``rollout_horizon // 2``): batches all live rollouts into ONE forward pass
+      for BOTH ``player`` and ``opp`` so both sides react dynamically (counter-rushes, defenses,
+      follow-up captures) instead of sitting idle.
+    - Leaf (``rollout_horizon``): evaluates all leaves in ONE batched forward pass with
+      calibrated ``neural_value_weight=0.85`` and a ``+0.025`` prior-trust margin on the base
+      8x D4 pure policy so Search only overrides Pure when finding a genuinely superior line.
+    """
 
     def __init__(
         self,
@@ -923,8 +933,10 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         redir_threshold: float = 0.55,
         use_d4_tta: bool = True,
         rollout_horizon: int = 12,
-        time_budget_sec: float = 0.15,
-        neural_value_weight: float = 0.60,
+        time_budget_sec: float = 0.18,
+        neural_value_weight: float = 0.85,
+        reactive_mid_ply: bool = True,
+        prior_bonus: float = 0.025,
         device: str = "cpu",
     ) -> None:
         super().__init__(
@@ -937,6 +949,34 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         self.rollout_horizon = max(4, int(rollout_horizon))
         self.time_budget_sec = float(time_budget_sec)
         self.neural_value_weight = float(neural_value_weight)
+        self.reactive_mid_ply = bool(reactive_mid_ply)
+        self.prior_bonus = float(prior_bonus)
+
+    @torch.no_grad()
+    def _batch_forward_policy_and_val(
+        self, encs: Sequence[EncodedGalconState]
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Run ONE batched 1x forward pass over a list of same-N encoded states."""
+        k = len(encs)
+        if k == 0:
+            return np.zeros((0, 0, 1), dtype=np.float32), np.zeros((0, 0, 0), dtype=np.float32), np.zeros((0,), dtype=np.float32)
+        n = len(encs[0].planet_ids)
+        pf_b = np.stack([e.planet_feats for e in encs], axis=0)
+        tf_b = np.stack([e.timeline_feats for e in encs], axis=0)
+        ef_b = np.stack([e.edge_feats for e in encs], axis=0)
+        le_b = np.stack([e.legal_edges for e in encs], axis=0)
+        pm_b = np.ones((k, n), dtype=bool)
+        logits, fracs, vals = self.model(
+            torch.from_numpy(pf_b).to(self.device),
+            torch.from_numpy(tf_b).to(self.device),
+            torch.from_numpy(ef_b).to(self.device),
+            torch.from_numpy(pm_b).to(self.device),
+        )
+        le_t = torch.from_numpy(le_b).to(self.device)
+        mask = torch.cat([torch.ones((k, n, 1), dtype=torch.bool, device=self.device), le_t], dim=-1)
+        logits = logits.masked_fill(~mask, -1e9)
+        probs = F.softmax(logits, dim=-1).cpu().numpy()
+        return probs, fracs.cpu().numpy(), vals.cpu().numpy()
 
     @torch.no_grad()
     def _batch_evaluate_leaves(self, leaf_encs: Sequence[EncodedGalconState]) -> np.ndarray:
@@ -957,13 +997,84 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         )
         return vals.cpu().numpy()
 
+    def _build_fanout_plan(
+        self,
+        sim: GalconSim,
+        enc: EncodedGalconState,
+        probs: np.ndarray,
+        *,
+        max_targets_per_planet: int = 4,
+        reserve_ratio: float = 0.15,
+        base_redirs: Sequence[Order] = (),
+    ) -> List[Order]:
+        """Build a neural-prior + ROI guided multi-target fan-out plan for surplus-rich planets."""
+        n = len(enc.planet_ids)
+        futures = enc.futures or [
+            project_planet_future(sim, p.id, enc.player, horizon=GALCON_TIMELINE_HORIZON) for p in enc.planets
+        ]
+        claimed_targets = set()
+        orders: List[Order] = []
+        for i in range(n):
+            if not enc.owned_mask[i] or not np.any(enc.legal_edges[i]):
+                continue
+            src = enc.planets[i]
+            safe = float(enc.safe_surplus[i])
+            reserve = max(5.0, float(src.ships) * reserve_ratio)
+            budget = min(safe, float(src.ships) - reserve)
+            if budget < 14.0:
+                continue
+
+            scored: List[Tuple[float, int, float]] = []
+            for j in range(n):
+                if j == i or not enc.legal_edges[i, j] or j in claimed_targets:
+                    continue
+                dst = enc.planets[j]
+                if dst.owner == enc.player:
+                    continue
+                eta = sim.planet_eta_ticks(src, dst)
+                t_idx = min(GALCON_TIMELINE_HORIZON - 1, max(0, eta - 1))
+                _, _, po, ps = futures[j]
+                if po[t_idx] > 0:
+                    continue  # Already scheduled to be ours
+                extra = 0.0 if dst.owner == 0 else (dst.production / PRODUCTION_DIVISOR) * 0.25 * max(0, eta - GALCON_TIMELINE_HORIZON)
+                need = math.ceil(float(ps[t_idx]) + extra) + 2.0
+                if need <= 0.0 or need > budget:
+                    continue
+                roi = (dst.production / max(1.0, PRODUCTION_DIVISOR)) * 20.0 / max(4.0, need + 0.55 * eta)
+                if dst.owner != 0:
+                    roi *= 1.35
+                p_prior = float(probs[i, 1 + j])
+                sc = (0.35 + p_prior * 3.0) * roi
+                scored.append((sc, j, need))
+
+            if len(scored) < 2:
+                continue
+            scored.sort(key=lambda x: -x[0])
+            rem = float(src.ships)
+            rem_budget = budget
+            sent_count = 0
+            for _, j, need in scored:
+                if sent_count >= max_targets_per_planet or rem_budget < need or rem < 2.0:
+                    continue
+                pct = max(1, min(100, int(math.ceil(100.0 * need / max(1.0, rem)))))
+                actual = math.floor(rem * (pct / 100.0) + 1e-9)
+                if actual < 1 or actual > rem_budget + 2.0:
+                    continue
+                orders.append(SendOrder(enc.planet_ids[i], enc.planet_ids[j], pct))
+                claimed_targets.add(j)
+                rem = max(0.0, rem - actual)
+                rem_budget = max(0.0, rem_budget - actual)
+                sent_count += 1
+        orders.extend(base_redirs)
+        return orders
+
     @torch.no_grad()
     def act_with_search_info(
         self,
         sim: GalconSim,
         player: int,
     ) -> Tuple[List[Order], List[List[Order]], List[float], float]:
-        """Run batched lookahead search and return ``(best_plan, candidates, scores, best_score)``."""
+        """Run batched reactive lookahead search and return ``(best_plan, candidates, scores, best_score)``."""
         t0 = time.perf_counter()
         deadline = t0 + self.time_budget_sec
         enc = extract_galcon_features(sim, player, feature_version=self.feature_version)
@@ -1028,6 +1139,19 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                 )
             )
 
+        # Neural-guided multi-target fan-out candidates (evaluated by reactive rollout alongside single-target)
+        base_redirs = [o for o in raw_cands[0] if isinstance(o, RedirOrder)]
+        fan_cons = self._build_fanout_plan(
+            sim, enc, probs, max_targets_per_planet=3, reserve_ratio=0.25, base_redirs=base_redirs
+        )
+        if fan_cons:
+            raw_cands.append(fan_cons)
+        fan_agg = self._build_fanout_plan(
+            sim, enc, probs, max_targets_per_planet=5, reserve_ratio=0.10, base_redirs=base_redirs
+        )
+        if fan_agg:
+            raw_cands.append(fan_agg)
+
         # Defensive Hold-All / rush-guard candidate early or when threatened
         any_threat = any(
             enc.planets[i].owner == player and enc.safe_surplus[i] < enc.planets[i].ships * 0.5
@@ -1044,7 +1168,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                 raw_cands.append(base_sends + list(smart_redirs))
                 raw_cands.append(base_sends)
 
-        # Deduplicate candidates preserving order
+        # Deduplicate candidates preserving order (candidates[0] is always base 8x D4 pure policy)
         seen = set()
         candidates: List[List[Order]] = []
         for plan in raw_cands:
@@ -1056,7 +1180,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         if len(candidates) <= 1 or time.perf_counter() >= deadline - 0.015:
             return (candidates[0] if candidates else []), candidates, [root_val], root_val
 
-        # Predict opponent's immediate 1-step response (1x fast forward pass)
+        # Predict opponent's immediate tick-0 response (1x fast forward pass)
         opp = 2 if player == 1 else 1
         opp_enc = extract_galcon_features(sim, opp, feature_version=self.feature_version)
         opp_orders: List[Order] = []
@@ -1066,27 +1190,60 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                 sim, opp_enc, op, of, launch_threshold=self.launch_threshold, include_redirects=False
             )
 
-        # Roll all candidates forward, then evaluate all non-terminal leaves in a SINGLE batched NN call
-        h_vals: List[float] = []
-        done_flags: List[bool] = []
-        leaf_encs: List[EncodedGalconState] = []
-        leaf_pos: List[int] = []
+        mid_step = max(2, self.rollout_horizon // 2) if self.reactive_mid_ply else self.rollout_horizon
         eval_cands: List[List[Order]] = []
+        rolls: List[GalconSim] = []
 
+        # Ply 1: step each candidate to mid_step
         for idx, plan in enumerate(candidates):
-            if idx > 0 and time.perf_counter() >= deadline - 0.012:
+            if idx > 0 and time.perf_counter() >= deadline - 0.025:
                 break
             roll = sim.clone()
             roll.step({player: plan, opp: opp_orders})
-            for _ in range(1, self.rollout_horizon):
+            for _ in range(1, mid_step):
                 if roll.done:
                     break
                 roll.step({})
             eval_cands.append(plan)
+            rolls.append(roll)
+
+        # Ply 2 (Reactive Mid-Rollout): ONE batched forward pass for both player & opp on all live rollouts
+        if self.reactive_mid_ply and mid_step < self.rollout_horizon and time.perf_counter() < deadline - 0.015:
+            live_indices = [i for i, r in enumerate(rolls) if not r.done]
+            if live_indices:
+                mid_encs: List[EncodedGalconState] = []
+                for i in live_indices:
+                    mid_encs.append(extract_galcon_features(rolls[i], player, feature_version=self.feature_version))
+                    mid_encs.append(extract_galcon_features(rolls[i], opp, feature_version=self.feature_version))
+                m_probs, m_fracs, _ = self._batch_forward_policy_and_val(mid_encs)
+                for k_idx, r_idx in enumerate(live_indices):
+                    r = rolls[r_idx]
+                    p_enc = mid_encs[2 * k_idx]
+                    o_enc = mid_encs[2 * k_idx + 1]
+                    p_ord = self._decode_orders(
+                        r, p_enc, m_probs[2 * k_idx], m_fracs[2 * k_idx],
+                        launch_threshold=self.launch_threshold, include_redirects=False,
+                    )
+                    o_ord = self._decode_orders(
+                        r, o_enc, m_probs[2 * k_idx + 1], m_fracs[2 * k_idx + 1],
+                        launch_threshold=self.launch_threshold, include_redirects=False,
+                    )
+                    r.step({player: p_ord, opp: o_ord})
+                    for _ in range(mid_step + 1, self.rollout_horizon):
+                        if r.done:
+                            break
+                        r.step({})
+
+        # Leaf evaluation: ONE batched forward pass across all non-terminal leaves
+        h_vals: List[float] = []
+        done_flags: List[bool] = []
+        leaf_encs: List[EncodedGalconState] = []
+        leaf_pos: List[int] = []
+        for idx, roll in enumerate(rolls):
             h_vals.append(evaluate_galcon_state(roll, player))
             done_flags.append(roll.done)
             if not roll.done:
-                leaf_pos.append(len(eval_cands) - 1)
+                leaf_pos.append(idx)
                 leaf_encs.append(extract_galcon_features(roll, player, feature_version=self.feature_version))
 
         nn_vals = self._batch_evaluate_leaves(leaf_encs)
@@ -1101,11 +1258,13 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
             else:
                 sc = self.neural_value_weight * nn_map[i] + (1.0 - self.neural_value_weight) * h_vals[i]
             scores.append(sc)
-            if sc > best_score:
-                best_score = sc
+            # Small prior-trust margin on candidates[0] (base 8x D4 pure policy) prevents noisy overrides
+            eff_sc = sc + (self.prior_bonus if i == 0 else 0.0)
+            if eff_sc > best_score:
+                best_score = eff_sc
                 best_idx = i
 
-        return eval_cands[best_idx], eval_cands, scores, best_score
+        return eval_cands[best_idx], eval_cands, scores, scores[best_idx]
 
     @torch.no_grad()
     def act(self, sim: GalconSim, player: int) -> List[Order]:

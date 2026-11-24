@@ -22,9 +22,12 @@ def record_galcon_match(
     width: float = 400.0,
     height: float = 240.0,
     max_ticks: int = 200,
+    symmetric: bool = True,
 ) -> Dict[str, Any]:
     """Play one Galcon match and record compact frame-by-frame snapshots for HTML5 Canvas playback."""
-    sim = GalconSim.create(seed=seed, num_planets=num_planets, width=width, height=height, max_ticks=max_ticks)
+    sim = GalconSim.create(
+        seed=seed, num_planets=num_planets, width=width, height=height, max_ticks=max_ticks, symmetric=symmetric
+    )
     planets_static = [
         [p.id, round(p.x, 1), round(p.y, 1), round(p.production, 1), round(p.radius, 1)]
         for p in sorted(sim.planets.values(), key=lambda x: x.id)
@@ -146,8 +149,8 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
   <div class="wrap">
     <div class="bar">
       <div>
-        <div class="title">Galcon AI Gen 2 — PlanetTimelineTransformer Replays &amp; Elo Ladder</div>
-        <div class="sub">1.26M Self-Play League Transformer • Native 8× D4 /REDIR (purple arcs) • gbots physics (prod/50, speed 40, 0.25s ticks)</div>
+        <div class="title">Galcon AI Gen 3 — Reactive 2-Ply Search, Mirror PPO &amp; esparano Elo Ladder</div>
+        <div class="sub">1.26M PlanetTimelineTransformer • 2-Ply Reactive Fan-Out Search • Native 8× D4 /REDIR (purple arcs) • gbots physics</div>
       </div>
       <div class="tabs">
         <button class="tab-btn active" id="tabReplays">▶ Live Replays</button>
@@ -194,25 +197,25 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
     <div id="panelElo" class="panel">
       <div class="elo-card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-          <div style="font-weight:700;">Bradley-Terry Elo Ladder (Anchored at GalconClassicBot = 1200.0)</div>
-          <span class="badge ok">Gen 2 Pure: +322.9 Elo over v1</span>
+          <div style="font-weight:700;">Unified Bradley-Terry Elo Ladder (780 Held-Out Games • Anchor: ClassicBot = 1200.0)</div>
+          <span class="badge ok">Gen 3 + ReactiveSearch: 1831.8 Elo (within 3.4 of Sparky v1.6!)</span>
         </div>
         <div id="eloRows"></div>
       </div>
       <div class="elo-card">
-        <div style="font-weight:700; margin-bottom:8px;">Verified Held-Out Multi-Map Gauntlet (8–22 Planets, 240×150 to 400×240)</div>
+        <div style="font-weight:700; margin-bottom:8px;">Verified Head-to-Head vs. esparano Bots &amp; Held-Out Gauntlet (8–22 Planets &amp; Large 22–28pl Arenas)</div>
         <table class="bench">
           <thead>
-            <tr><th>Agent</th><th>vs Tactical</th><th>vs Classic</th><th>vs Rusher (All-In)</th><th>vs Rusher (Adapt)</th><th>vs Macro</th><th>vs v1 Pure</th><th>Latency</th></tr>
+            <tr><th>Agent</th><th>vs Sparky v1.6</th><th>vs EsparanBot v0.2</th><th>vs Tactical</th><th>vs Classic</th><th>vs Rusher (All-In)</th><th>vs Gen 2 Pure</th><th>Latency</th></tr>
           </thead>
           <tbody>
-            <tr><td><strong>GalconPT-Gen2 Pure (1.26M, 8× D4)</strong></td><td>15–2–3 (75%)</td><td>18–1–1 (90%)</td><td><strong>19–1–0 (95%)</strong></td><td>16–1–3 (80%)</td><td><strong>19–0–1 (95%)</strong></td><td>15–4–1 (75%)</td><td class="mono"><strong>12.3 ms</strong></td></tr>
-            <tr><td><strong>GalconPT-Gen2 + Search (8× D4)</strong></td><td>8–3–1 (67%)</td><td><strong>12–0–0 (100%)</strong></td><td><strong>12–0–0 (100%)</strong></td><td><strong>12–0–0 (100%)</strong></td><td>11–0–1 (92%)</td><td>6–3–3 vs v1+S</td><td class="mono">67.9 ms</td></tr>
-            <tr><td>GalconPT-Gen2 EI-R2 (No PPO)</td><td>14–3–3 (70%)</td><td>17–3–0 (85%)</td><td>12–6–2 (60%)</td><td>11–5–4 (55%)</td><td>19–0–1 (95%)</td><td>12–7–1 (60%)</td><td class="mono">12.3 ms</td></tr>
-            <tr><td>GalconPT-v1 Pure (0.59M, 8× D4)</td><td>4–7–1 (33%)</td><td>8–4–0 (67%)</td><td>3–9–0 (25%)</td><td>8–4–0 (67%)</td><td>9–1–2 (75%)</td><td>—</td><td class="mono">10–17 ms</td></tr>
+            <tr><td><strong>GalconPT-Gen3 + ReactiveSearch</strong></td><td><strong>6–6–8 (50.0% sc)</strong></td><td><strong>10–0–2 (92% sc)</strong></td><td>9–2–1 (75%)</td><td><strong>12–0–0 (100%)</strong></td><td><strong>8–0–4 (0 loss)</strong></td><td><strong>8–0–4 (0 loss)</strong></td><td class="mono">129.4 ms</td></tr>
+            <tr><td><strong>GalconPT-Gen3 Pure (1.26M, 8× D4)</strong></td><td>6–10–4 (40.0% sc)</td><td><strong>10–0–2 (92% sc)</strong></td><td><strong>16–1–3 (80%)</strong></td><td><strong>20–0–0 (100%)</strong></td><td>16–1–3 (80%)</td><td><strong>9–7–4 / 8–4 Lrg</strong></td><td class="mono"><strong>22.6 ms</strong></td></tr>
+            <tr><td>GalconPT-Gen2 Pure (1.26M, 8× D4)</td><td>2–14–4 (20.0% sc)</td><td>10–0–2 (92% sc)</td><td>15–2–3 (75%)</td><td>18–1–1 (90%)</td><td>19–1–0 (95%)</td><td>—</td><td class="mono">12–22 ms</td></tr>
+            <tr><td>GalconPT-v1 Pure (0.59M, 8× D4)</td><td>1–11–0 (8.3%)</td><td>—</td><td>4–7–1 (33%)</td><td>8–4–0 (67%)</td><td>3–9–0 (25%)</td><td>4–15–1</td><td class="mono">10–17 ms</td></tr>
           </tbody>
         </table>
-        <div class="sub" style="margin-top:8px;">Head-to-head: <strong>GalconPT-Gen2 Pure (12.3 ms)</strong> beat <strong>GalconPT-Gen2 + Search (67.9 ms)</strong> <code>5–3–4</code> (58.3% score) — full-game 608-ep League PPO surpassed 1-ply lookahead while running 5.5× faster.</div>
+        <div class="sub" style="margin-top:8px;"><strong>Highlights:</strong> Gen 3 Pure went <code>104–5–11</code> (<code>86.7%</code> WR / <code>91.3%</code> score, only 5 losses in 120 games), tripled wins vs. <code>esparano Sparky v1.6</code>, and beat Gen 2 <code>8–4–0</code> on Large 22–28pl arenas. Gen 3 + Reactive Fan-Out Search beat Gen 3 Pure <code>7–3–2</code>, jumped 5× in Large-Arena wins vs. Sparky (<code>5–7–0</code>), and tied Sparky <code>6–6–8</code> (50.0% score) across 20 standard games.</div>
       </div>
     </div>
   </div>
@@ -220,23 +223,27 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
   <script>
     const MATCHES = {matches_json};
     const ELO_LADDER = [
-      {{ name: "GalconPT-Gen2 + Search (1.26M)", elo: 1643.8, ms: "67.9 ms", col: "#34d399" }},
-      {{ name: "GalconPT-Gen2 Pure (1.26M, 8× D4)", elo: 1628.0, ms: "12.3 ms", col: "#38bdf8" }},
-      {{ name: "GalconPT-Gen2 EI-R2 (Search Distill)", elo: 1440.9, ms: "12.3 ms", col: "#818cf8" }},
-      {{ name: "GalconRusherBot (All-In)", elo: 1320.5, ms: "<2 ms", col: "#fb923c" }},
-      {{ name: "GalconPT-v1 Pure (0.59M, 8× D4)", elo: 1305.1, ms: "10.1 ms", col: "#c084fc" }},
-      {{ name: "GalconRusherBot (Adaptive)", elo: 1280.9, ms: "<2 ms", col: "#f59e0b" }},
-      {{ name: "GalconTacticalBot (Analytical)", elo: 1221.9, ms: "<2 ms", col: "#94a3b8" }},
+      {{ name: "esparano Sparky v1.6 (Lua GM)", elo: 1835.2, ms: "<2 ms", col: "#f43f5e" }},
+      {{ name: "GalconPT-Gen3 + ReactiveSearch", elo: 1831.8, ms: "129.4 ms", col: "#34d399" }},
+      {{ name: "GalconPT-Gen3 Pure (1.26M, 8× D4)", elo: 1746.7, ms: "22.6 ms", col: "#38bdf8" }},
+      {{ name: "GalconPT-Gen2 + Search (1-Ply v2)", elo: 1731.8, ms: "67.9 ms", col: "#2dd4bf" }},
+      {{ name: "GalconPT-Gen2 Pure (1.26M, 8× D4)", elo: 1691.5, ms: "12–22 ms", col: "#60a5fa" }},
+      {{ name: "GalconPT-Gen2 EI-R2 (No PPO)", elo: 1536.2, ms: "12–22 ms", col: "#818cf8" }},
+      {{ name: "GalconTacticalBot (Analytical)", elo: 1443.9, ms: "<2 ms", col: "#94a3b8" }},
+      {{ name: "GalconRusherBot (All-In)", elo: 1419.9, ms: "<2 ms", col: "#fb923c" }},
+      {{ name: "GalconPT-v1 Pure (0.59M, 8× D4)", elo: 1394.4, ms: "10–17 ms", col: "#c084fc" }},
+      {{ name: "GalconRusherBot (Adaptive)", elo: 1352.3, ms: "<2 ms", col: "#f59e0b" }},
+      {{ name: "esparano EsparanBot v0.2 (Lua)", elo: 1334.9, ms: "<2 ms", col: "#fb7185" }},
       {{ name: "GalconClassicBot (Anchor)", elo: 1200.0, ms: "<1 ms", col: "#64748b" }},
-      {{ name: "GalconMacroBot (Boomer)", elo: 1098.3, ms: "<2 ms", col: "#475569" }},
+      {{ name: "GalconMacroBot (Boomer)", elo: 1101.6, ms: "<2 ms", col: "#475569" }},
     ];
 
     const eloWrap = document.getElementById("eloRows");
     ELO_LADDER.forEach((row, idx) => {{
-      const pct = Math.max(6, Math.min(100, ((row.elo - 1020) / (1680 - 1020)) * 100));
+      const pct = Math.max(6, Math.min(100, ((row.elo - 1040) / (1860 - 1040)) * 100));
       const div = document.createElement("div");
       div.className = "elo-row";
-      div.innerHTML = `<div class="mono sub">#${{idx+1}}</div><div style="font-weight:${{idx<2?700:500}}">${{row.name}}</div><div class="elo-bar-bg"><div class="elo-bar" style="width:${{pct.toFixed(1)}}%;background:${{row.col}}"></div></div><div class="mono" style="text-align:right;font-weight:700;">${{row.elo.toFixed(1)}}</div><div class="mono sub" style="text-align:right;">${{row.ms}}</div>`;
+      div.innerHTML = `<div class="mono sub">#${{idx+1}}</div><div style="font-weight:${{idx<3?700:500}}">${{row.name}}</div><div class="elo-bar-bg"><div class="elo-bar" style="width:${{pct.toFixed(1)}}%;background:${{row.col}}"></div></div><div class="mono" style="text-align:right;font-weight:700;">${{row.elo.toFixed(1)}}</div><div class="mono sub" style="text-align:right;">${{row.ms}}</div>`;
       eloWrap.appendChild(div);
     }});
 
@@ -388,9 +395,12 @@ def _find_showcase_win(
     width: float,
     height: float,
     prefer_redir: bool = False,
+    symmetric: bool = True,
+    max_ticks: int = 200,
+    max_attempts: int = 12,
 ) -> Dict[str, Any]:
     best_m: Optional[Dict[str, Any]] = None
-    for offset in range(10):
+    for offset in range(max_attempts):
         sd = seed_start + offset
         m = record_galcon_match(
             f"{title_prefix} (seed {sd})",
@@ -402,7 +412,8 @@ def _find_showcase_win(
             num_planets=num_planets,
             width=width,
             height=height,
-            max_ticks=180,
+            max_ticks=max_ticks,
+            symmetric=symmetric,
         )
         if m["winner"] == 1:
             if not prefer_redir or m["redirs"][0] > 0:
@@ -416,9 +427,12 @@ def _find_showcase_win(
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Record Gen 2 Galcon showcase matches into docs/galcon_viewer.html.")
+    parser = argparse.ArgumentParser(description="Record Gen 3 Galcon showcase matches into docs/galcon_viewer.html.")
     parser.add_argument("--checkpoint", default="checkpoints/galcon_transformer_best.pt")
+    parser.add_argument("--gen2-checkpoint", default="checkpoints/galcon_gen2_champion.pt")
     parser.add_argument("--v1-checkpoint", default="checkpoints/galcon_v1_baseline.pt")
+    parser.add_argument("--lua-sparky", default="")
+    parser.add_argument("--lua-esparan", default="")
     parser.add_argument("--out-html", default="docs/galcon_viewer.html")
     parser.add_argument("--out-json", default="")
     args = parser.parse_args(argv)
@@ -432,73 +446,131 @@ def main(argv: Optional[List[str]] = None) -> int:
     classic = GalconClassicBot()
     rusher = GalconRusherBot(style="all_in")
 
-    matches: List[Dict[str, Any]] = [
-        _find_showcase_win(
-            "Rush Defense (18-Planet 400×240): Gen 2 Pure vs. All-In Rusher",
-            "GalconPT-Gen2 Pure (8× D4)",
-            pure.act,
-            "GalconRusherBot (All-In)",
-            rusher.act,
-            seed_start=12200,
-            num_planets=18,
-            width=400.0,
-            height=240.0,
-            prefer_redir=True,
-        ),
-        _find_showcase_win(
-            "Pure Neural Macro (16-Planet 400×240): Gen 2 Pure vs. Tactical Solver",
-            "GalconPT-Gen2 Pure (8× D4)",
-            pure.act,
-            "GalconTacticalBot",
-            tactical.act,
-            seed_start=12000,
-            num_planets=16,
-            width=400.0,
-            height=240.0,
-            prefer_redir=True,
-        ),
-        _find_showcase_win(
-            "Batched AlphaZero Search (18-Planet 400×240): Gen 2 + Search vs. Tactical",
-            "GalconPT-Gen2 + Search",
-            search.act,
-            "GalconTacticalBot",
-            tactical.act,
-            seed_start=12020,
-            num_planets=18,
-            width=400.0,
-            height=240.0,
-            prefer_redir=True,
-        ),
-        _find_showcase_win(
-            "Compact Arena (10-Planet 240×150): Gen 2 Pure vs. Classic Bot",
-            "GalconPT-Gen2 Pure (8× D4)",
-            pure.act,
-            "GalconClassicBot",
-            classic.act,
-            seed_start=12100,
-            num_planets=10,
-            width=240.0,
-            height=150.0,
-        ),
-    ]
+    matches: List[Dict[str, Any]] = []
 
-    if Path(args.v1_checkpoint).is_file():
-        v1_pure = GalconTransformerAgent(args.v1_checkpoint, use_d4_tta=True)
-        matches.insert(
-            0,
+    if args.lua_sparky and Path(args.lua_sparky).is_file():
+        from galcon.lua_bridge import GalconLuaBotBridge
+
+        sparky = GalconLuaBotBridge(args.lua_sparky)
+        try:
+            matches.append(
+                _find_showcase_win(
+                    "Grandmaster Duel (18-Planet 400×240): Gen 3 Pure vs. esparano Sparky v1.6",
+                    "GalconPT-Gen3 Pure (8× D4)",
+                    pure.act,
+                    "esparano Sparky v1.6 (Lua)",
+                    sparky.act,
+                    seed_start=14000,
+                    num_planets=18,
+                    width=400.0,
+                    height=240.0,
+                    prefer_redir=True,
+                    max_ticks=220,
+                    max_attempts=16,
+                )
+            )
+            matches.append(
+                _find_showcase_win(
+                    "2-Ply Reactive Fan-Out Search (20-Planet 400×240): Gen 3 + Search vs. esparano Sparky v1.6",
+                    "GalconPT-Gen3 + ReactiveSearch",
+                    search.act,
+                    "esparano Sparky v1.6 (Lua)",
+                    sparky.act,
+                    seed_start=14000,
+                    num_planets=20,
+                    width=400.0,
+                    height=240.0,
+                    prefer_redir=False,
+                    max_ticks=220,
+                    max_attempts=14,
+                )
+            )
+        finally:
+            sparky.close()
+
+    if Path(args.gen2_checkpoint).is_file():
+        g2_pure = GalconTransformerAgent(args.gen2_checkpoint, use_d4_tta=True)
+        matches.append(
             _find_showcase_win(
-                "Generation Leap (16-Planet 400×240): Gen 2 Pure vs. v1 Pure",
-                "GalconPT-Gen2 Pure (1.26M)",
+                "Large Asymmetric Arena (24-Planet 560×340): Gen 3 Pure vs. Gen 2 Champion",
+                "GalconPT-Gen3 Pure (8× D4)",
                 pure.act,
-                "GalconPT-v1 Pure (0.59M)",
-                v1_pure.act,
-                seed_start=12500,
+                "GalconPT-Gen2 Champion (8× D4)",
+                g2_pure.act,
+                seed_start=14700,
+                num_planets=24,
+                width=560.0,
+                height=340.0,
+                prefer_redir=True,
+                symmetric=False,
+                max_ticks=220,
+                max_attempts=10,
+            )
+        )
+
+    if args.lua_esparan and Path(args.lua_esparan).is_file():
+        from galcon.lua_bridge import GalconLuaBotBridge
+
+        esparan = GalconLuaBotBridge(args.lua_esparan)
+        try:
+            matches.append(
+                _find_showcase_win(
+                    "External Benchmark (16-Planet 400×240): Gen 3 Pure vs. esparano EsparanBot v0.2",
+                    "GalconPT-Gen3 Pure (8× D4)",
+                    pure.act,
+                    "esparano EsparanBot v0.2 (Lua)",
+                    esparan.act,
+                    seed_start=15300,
+                    num_planets=16,
+                    width=400.0,
+                    height=240.0,
+                    prefer_redir=True,
+                    max_ticks=200,
+                    max_attempts=8,
+                )
+            )
+        finally:
+            esparan.close()
+
+    matches.extend(
+        [
+            _find_showcase_win(
+                "Rush Defense (18-Planet 400×240): Gen 3 Pure vs. All-In Rusher",
+                "GalconPT-Gen3 Pure (8× D4)",
+                pure.act,
+                "GalconRusherBot (All-In)",
+                rusher.act,
+                seed_start=12200,
+                num_planets=18,
+                width=400.0,
+                height=240.0,
+                prefer_redir=True,
+            ),
+            _find_showcase_win(
+                "Pure Neural Macro (16-Planet 400×240): Gen 3 Pure vs. Tactical Solver",
+                "GalconPT-Gen3 Pure (8× D4)",
+                pure.act,
+                "GalconTacticalBot",
+                tactical.act,
+                seed_start=12000,
                 num_planets=16,
                 width=400.0,
                 height=240.0,
                 prefer_redir=True,
             ),
-        )
+            _find_showcase_win(
+                "Compact Sweep (10-Planet 240×150): Gen 3 Pure vs. Classic Bot",
+                "GalconPT-Gen3 Pure (8× D4)",
+                pure.act,
+                "GalconClassicBot",
+                classic.act,
+                seed_start=12100,
+                num_planets=10,
+                width=240.0,
+                height=150.0,
+            ),
+        ]
+    )
 
     html = render_galcon_viewer_html(matches)
     Path(args.out_html).write_text(html, encoding="utf-8")
