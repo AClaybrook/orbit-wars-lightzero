@@ -92,7 +92,7 @@ void extract_galcon_features_c(
         if (idx_p < 0 || idx_p >= n) continue;
         double dx = xs[idx_p] - fl_x[f];
         double dy = ys[idx_p] - fl_y[f];
-        double dist = dmax(0.0, hypot(dx, dy) - rs[idx_p]);
+        double dist = dmax(0.0, sqrt(dx * dx + dy * dy) - rs[idx_p] - 6.0);
         int eta = (int)ceil((dist - 1e-9) / step_dist);
         if (eta < 1) eta = 1;
         int t_i = eta - 1;
@@ -172,7 +172,9 @@ void extract_galcon_features_c(
             if (i == j) {
                 etas[i * n + j] = 0.0f;
             } else {
-                double d = dmax(0.0, hypot(xs[j] - xs[i], ys[j] - ys[i]) - rs[i] - rs[j]);
+                double dx_ij = xs[j] - xs[i];
+                double dy_ij = ys[j] - ys[i];
+                double d = dmax(0.0, sqrt(dx_ij * dx_ij + dy_ij * dy_ij) - rs[i] - rs[j] - 12.0);
                 double e = ceil((d - 1e-9) / step_dist);
                 if (e < 1.0) e = 1.0;
                 etas[i * n + j] = (float)e;

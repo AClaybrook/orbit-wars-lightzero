@@ -35,6 +35,14 @@ ARRIVAL_EPS = 1e-9
 ITEMS_MAX = 4096
 ITEMS_RESERVED = 16
 BASE_ITEM_USERS = 3  # neutral + P1 + P2
+DEFAULT_PHYSICS_SUBSTEPS = 5  # 20 Hz physics at tick_dt=0.25s (sub_dt=0.05s, sub_step_dist=2.0u)
+SHIP_SEP_STIFFNESS = 1.0
+SHIP_SEP_MAX_DISP = 2.5  # per-ship substep cap (= 1.25 * sub_step_dist at 20 Hz)
+ANTIPODE_DOT_THRESHOLD = -0.995
+ANTIPODE_ESCAPE_TANGENT = 0.05
+_GOLDEN_ANGLE = 2.399963229728653  # pi * (3 - sqrt(5))
+_SPAWN_SPIRAL_STEP = 0.05
+_EPS_DIST2 = 1e-12
 
 
 @dataclass
@@ -59,10 +67,26 @@ class Fleet:
     target: int
     radius: float = SHIP_RADIUS
     num_units: int = 1
+    units: Optional[List[List[float]]] = None
 
     @property
     def ships_per_unit(self) -> float:
         return self.ships / max(1, self.num_units)
+
+
+def _materialize_fleet_units(cx: float, cy: float, count: int) -> List[List[float]]:
+    """Build deterministic golden-angle micro-spiral unit coordinates centered at ``(cx, cy)``."""
+    k = max(1, int(count))
+    cx_f = float(cx)
+    cy_f = float(cy)
+    if k == 1:
+        return [[cx_f, cy_f]]
+    units: List[List[float]] = []
+    for j in range(k):
+        rj = _SPAWN_SPIRAL_STEP * math.sqrt(float(j))
+        ang = _GOLDEN_ANGLE * float(j)
+        units.append([cx_f + rj * math.cos(ang), cy_f + rj * math.sin(ang)])
+    return units
 
 
 def physical_ship_count(
@@ -558,25 +582,34 @@ class GalconSim:
         tick: int = 0,
         next_fleet_id: int = 1000,
         allow_redirect: bool = True,
+        physics_substeps: int = DEFAULT_PHYSICS_SUBSTEPS,
     ) -> None:
         self.planets: Dict[int, Planet] = {
             p.id: Planet(p.id, p.owner, float(p.ships), float(p.x), float(p.y), float(p.production), float(p.radius))
             for p in planets
         }
-        self.fleets: Dict[int, Fleet] = {
-            f.id: Fleet(
+        self.fleets: Dict[int, Fleet] = {}
+        for f in fleets:
+            fx = float(f.x)
+            fy = float(f.y)
+            if f.units:
+                units = [[float(u[0]), float(u[1])] for u in f.units]
+                num_units = len(units)
+            else:
+                num_units = max(1, int(f.num_units))
+                units = _materialize_fleet_units(fx, fy, num_units)
+            self.fleets[f.id] = Fleet(
                 f.id,
                 f.owner,
                 float(f.ships),
-                float(f.x),
-                float(f.y),
+                fx,
+                fy,
                 f.source,
                 f.target,
                 float(f.radius),
-                int(f.num_units),
+                num_units,
+                units,
             )
-            for f in fleets
-        }
         self.width = float(width)
         self.height = float(height)
         self.fleet_speed = float(fleet_speed)
@@ -585,6 +618,7 @@ class GalconSim:
         self.tick = int(tick)
         self.next_fleet_id = int(next_fleet_id)
         self.allow_redirect = bool(allow_redirect)
+        self.physics_substeps = max(1, int(physics_substeps))
         self.done = False
         self._winner = 0
 
@@ -601,6 +635,7 @@ class GalconSim:
         max_ticks: int = DEFAULT_MAX_TICKS,
         symmetric: bool = True,
         allow_redirect: bool = True,
+        physics_substeps: int = DEFAULT_PHYSICS_SUBSTEPS,
     ) -> "GalconSim":
         planets = generate_galcon_map(
             seed=seed, num_planets=num_planets, width=width, height=height, symmetric=symmetric
@@ -613,6 +648,7 @@ class GalconSim:
             tick_dt=tick_dt,
             max_ticks=max_ticks,
             allow_redirect=allow_redirect,
+            physics_substeps=physics_substeps,
         )
 
     def clone(self) -> "GalconSim":
@@ -627,6 +663,7 @@ class GalconSim:
             tick=self.tick,
             next_fleet_id=self.next_fleet_id,
             allow_redirect=self.allow_redirect,
+            physics_substeps=self.physics_substeps,
         )
         sim.done = self.done
         sim._winner = self._winner
@@ -638,23 +675,417 @@ class GalconSim:
             BASE_ITEM_USERS
             + len(self.planets)
             + len(self.fleets)
-            + sum(max(1, f.num_units) for f in self.fleets.values())
+            + sum(len(f.units) if f.units is not None else max(1, f.num_units) for f in self.fleets.values())
         )
 
     def eta_ticks(self, x1: float, y1: float, dst: Planet) -> int:
-        """Exact arrival ticks from ``(x1, y1)`` to ``dst`` boundary."""
-        dist = max(0.0, math.hypot(dst.x - x1, dst.y - y1) - dst.radius)
+        """Exact unobstructed arrival ticks from ``(x1, y1)`` to ``dst`` touch-to-land boundary."""
+        dx = dst.x - x1
+        dy = dst.y - y1
+        dist = max(0.0, math.sqrt(dx * dx + dy * dy) - dst.radius - SHIP_RADIUS)
         step_dist = self.fleet_speed * self.tick_dt
         return max(1, int(math.ceil((dist - ARRIVAL_EPS) / max(1e-6, step_dist))))
 
     def planet_eta_ticks(self, src: Planet, dst: Planet) -> int:
-        """Exact arrival ticks for a fleet launched from ``src`` edge to ``dst`` edge."""
-        dist = max(0.0, math.hypot(dst.x - src.x, dst.y - src.y) - src.radius - dst.radius)
+        """Exact unobstructed arrival ticks for a fleet launched from ``src`` edge to ``dst`` edge."""
+        dx = dst.x - src.x
+        dy = dst.y - src.y
+        dist = max(0.0, math.sqrt(dx * dx + dy * dy) - src.radius - dst.radius - 2.0 * SHIP_RADIUS)
         step_dist = self.fleet_speed * self.tick_dt
         return max(1, int(math.ceil((dist - ARRIVAL_EPS) / max(1e-6, step_dist))))
 
+    def _step_physics_python(self) -> None:
+        """Advance production, physical ship separation, movement, planet pushout, and gradual combat."""
+        planet_ids = sorted(self.planets.keys())
+        planets = [self.planets[pid] for pid in planet_ids]
+        n_planets = len(planets)
+        if n_planets <= 0:
+            return
+
+        substeps = max(1, int(self.physics_substeps))
+        sub_dt = self.tick_dt / float(substeps)
+        sub_step_dist = self.fleet_speed * sub_dt
+        ship_radius = SHIP_RADIUS
+        min_sep = 2.0 * ship_radius
+        min_sep2 = min_sep * min_sep
+        sep_k = SHIP_SEP_STIFFNESS
+        half_k = 0.5 * sep_k
+        max_sep_push = SHIP_SEP_MAX_DISP
+        cap2 = max_sep_push * max_sep_push
+        esc_eps = ANTIPODE_ESCAPE_TANGENT
+        antipode_dot = ANTIPODE_DOT_THRESHOLD
+        eps_dist2 = _EPS_DIST2
+        golden_angle = _GOLDEN_ANGLE
+        tie_eps = TIE_EPS
+
+        _sqrt = math.sqrt
+        _cos = math.cos
+        _sin = math.sin
+
+        p_x = [p.x for p in planets]
+        p_y = [p.y for p in planets]
+        p_min_r = [p.radius + ship_radius for p in planets]
+        p_min_r2 = [mr * mr for mr in p_min_r]
+        p_land_r = [mr + ARRIVAL_EPS for mr in p_min_r]
+        p_land_r2_guard = [(lr + 1e-6) * (lr + 1e-6) for lr in p_land_r]
+        p_prod_sub = [(p.production / PRODUCTION_DIVISOR) * sub_dt for p in planets]
+        max_mr = max(p_min_r)
+
+        fleets = list(self.fleets.values())
+        n_fleets = len(fleets)
+
+        if n_fleets == 0:
+            for _s in range(substeps):
+                for i in range(n_planets):
+                    p = planets[i]
+                    if p.owner > 0:
+                        p.ships += p_prod_sub[i]
+            return
+
+        id_to_idx = {p.id: i for i, p in enumerate(planets)}
+        fl_ux: List[List[float]] = []
+        fl_uy: List[List[float]] = []
+        fl_alive: List[List[bool]] = []
+        fl_alive_cnt: List[int] = []
+        fl_tgt_idx: List[int] = []
+        fl_spu: List[float] = []
+        fl_owner: List[int] = []
+
+        for fl in fleets:
+            if not fl.units:
+                fl.units = _materialize_fleet_units(fl.x, fl.y, fl.num_units)
+            m = len(fl.units)
+            fl.num_units = m
+            fl_ux.append([u[0] for u in fl.units])
+            fl_uy.append([u[1] for u in fl.units])
+            fl_alive.append([True] * m)
+            fl_alive_cnt.append(m)
+            fl_tgt_idx.append(id_to_idx.get(fl.target, -1))
+            fl_spu.append(fl.ships_per_unit)
+            fl_owner.append(fl.owner)
+
+        for _s in range(substeps):
+            # 1. Production on owned planets
+            for i in range(n_planets):
+                p = planets[i]
+                if p.owner > 0:
+                    p.ships += p_prod_sub[i]
+
+            # 2. Same-fleet ship-ship circle separation (Gauss-Seidel + per-ship substep cap)
+            if sep_k > 0.0:
+                for fi in range(n_fleets):
+                    alive_c = fl_alive_cnt[fi]
+                    if alive_c <= 1:
+                        continue
+                    ux = fl_ux[fi]
+                    uy = fl_uy[fi]
+                    m = len(ux)
+                    all_alive = alive_c == m
+                    if max_sep_push > 0.0:
+                        ox = ux[:]
+                        oy = uy[:]
+                    if all_alive:
+                        for a in range(m):
+                            ax = ux[a]
+                            ay = uy[a]
+                            for b in range(a + 1, m):
+                                dx = ux[b] - ax
+                                dy = uy[b] - ay
+                                d2 = dx * dx + dy * dy
+                                if d2 < min_sep2:
+                                    if d2 > eps_dist2:
+                                        dist = _sqrt(d2)
+                                        nx = dx / dist
+                                        ny = dy / dist
+                                    else:
+                                        dist = 0.0
+                                        ang = golden_angle * float(a * 31 + b + 1)
+                                        nx = _cos(ang)
+                                        ny = _sin(ang)
+                                    push = half_k * (min_sep - dist)
+                                    px_d = nx * push
+                                    py_d = ny * push
+                                    ax -= px_d
+                                    ay -= py_d
+                                    ux[b] += px_d
+                                    uy[b] += py_d
+                            ux[a] = ax
+                            uy[a] = ay
+                        if max_sep_push > 0.0:
+                            for u in range(m):
+                                dx = ux[u] - ox[u]
+                                dy = uy[u] - oy[u]
+                                d2 = dx * dx + dy * dy
+                                if d2 > cap2:
+                                    sc = max_sep_push / _sqrt(d2)
+                                    ux[u] = ox[u] + dx * sc
+                                    uy[u] = oy[u] + dy * sc
+                    else:
+                        alive = fl_alive[fi]
+                        for a in range(m):
+                            if not alive[a]:
+                                continue
+                            ax = ux[a]
+                            ay = uy[a]
+                            for b in range(a + 1, m):
+                                if not alive[b]:
+                                    continue
+                                dx = ux[b] - ax
+                                dy = uy[b] - ay
+                                d2 = dx * dx + dy * dy
+                                if d2 < min_sep2:
+                                    if d2 > eps_dist2:
+                                        dist = _sqrt(d2)
+                                        nx = dx / dist
+                                        ny = dy / dist
+                                    else:
+                                        dist = 0.0
+                                        ang = golden_angle * float(a * 31 + b + 1)
+                                        nx = _cos(ang)
+                                        ny = _sin(ang)
+                                    push = half_k * (min_sep - dist)
+                                    px_d = nx * push
+                                    py_d = ny * push
+                                    ax -= px_d
+                                    ay -= py_d
+                                    ux[b] += px_d
+                                    uy[b] += py_d
+                            ux[a] = ax
+                            uy[a] = ay
+                        if max_sep_push > 0.0:
+                            for u in range(m):
+                                if not alive[u]:
+                                    continue
+                                dx = ux[u] - ox[u]
+                                dy = uy[u] - oy[u]
+                                d2 = dx * dx + dy * dy
+                                if d2 > cap2:
+                                    sc = max_sep_push / _sqrt(d2)
+                                    ux[u] = ox[u] + dx * sc
+                                    uy[u] = oy[u] + dy * sc
+
+            # 3. Move toward target + 4. Planet collider pushout + 5a. Touch-to-land
+            arrivals: Dict[int, Dict[int, float]] = {}
+            for fi in range(n_fleets):
+                alive_c = fl_alive_cnt[fi]
+                if alive_c <= 0:
+                    continue
+                tgt = fl_tgt_idx[fi]
+                if tgt < 0:
+                    fl_alive_cnt[fi] = 0
+                    continue
+                dst = planets[tgt]
+                tx = p_x[tgt]
+                ty = p_y[tgt]
+                ux = fl_ux[fi]
+                uy = fl_uy[fi]
+                alive = fl_alive[fi]
+                m = len(ux)
+                all_alive = alive_c == m
+
+                # 3. Move toward target + track exact fleet AABB
+                min_x = 1e300
+                max_x = -1e300
+                min_y = 1e300
+                max_y = -1e300
+                for u in range(m):
+                    if not all_alive and not alive[u]:
+                        continue
+                    x = ux[u]
+                    y = uy[u]
+                    dx = tx - x
+                    dy = ty - y
+                    dist = _sqrt(dx * dx + dy * dy)
+                    if dist <= sub_step_dist:
+                        x = tx
+                        y = ty
+                    elif dist > 0.0:
+                        x += (dx / dist) * sub_step_dist
+                        y += (dy / dist) * sub_step_dist
+                    ux[u] = x
+                    uy[u] = y
+                    if x < min_x:
+                        min_x = x
+                    if x > max_x:
+                        max_x = x
+                    if y < min_y:
+                        min_y = y
+                    if y > max_y:
+                        max_y = y
+
+                # Zero-margin AABB broadphase for planet obstacle colliders
+                any_exact_hit = False
+                for pi in range(n_planets):
+                    if pi == tgt:
+                        continue
+                    mr = p_min_r[pi]
+                    px_i = p_x[pi]
+                    py_i = p_y[pi]
+                    if px_i + mr >= min_x and px_i - mr <= max_x and py_i + mr >= min_y and py_i - mr <= max_y:
+                        any_exact_hit = True
+                        break
+
+                # 4. Planet collider radial pushout (padded candidate list preserves exactness)
+                if any_exact_hit:
+                    near_planets: List[int] = []
+                    pad_min_x = min_x - max_mr
+                    pad_max_x = max_x + max_mr
+                    pad_min_y = min_y - max_mr
+                    pad_max_y = max_y + max_mr
+                    for pi in range(n_planets):
+                        if pi == tgt:
+                            continue
+                        mr = p_min_r[pi]
+                        px_i = p_x[pi]
+                        py_i = p_y[pi]
+                        if (
+                            px_i + mr >= pad_min_x
+                            and px_i - mr <= pad_max_x
+                            and py_i + mr >= pad_min_y
+                            and py_i - mr <= pad_max_y
+                        ):
+                            near_planets.append(pi)
+                    for u in range(m):
+                        if not all_alive and not alive[u]:
+                            continue
+                        x = ux[u]
+                        y = uy[u]
+                        for pi in near_planets:
+                            px_i = p_x[pi]
+                            py_i = p_y[pi]
+                            dx = x - px_i
+                            dy = y - py_i
+                            d2 = dx * dx + dy * dy
+                            if d2 < p_min_r2[pi]:
+                                mr = p_min_r[pi]
+                                if d2 > eps_dist2:
+                                    dist = _sqrt(d2)
+                                    nx = dx / dist
+                                    ny = dy / dist
+                                    if esc_eps > 0.0:
+                                        tdx = tx - px_i
+                                        tdy = ty - py_i
+                                        td = _sqrt(tdx * tdx + tdy * tdy)
+                                        if td > 1e-6:
+                                            tnx = tdx / td
+                                            tny = tdy / td
+                                            if nx * tnx + ny * tny < antipode_dot:
+                                                cross = tnx * ny - tny * nx
+                                                if abs(cross) > 1e-9:
+                                                    sign = 1.0 if cross > 0.0 else -1.0
+                                                else:
+                                                    sign = 1.0 if (u & 1) == 0 else -1.0
+                                                nx += (-tny) * sign * esc_eps
+                                                ny += tnx * sign * esc_eps
+                                                nn = _sqrt(nx * nx + ny * ny)
+                                                nx /= nn
+                                                ny /= nn
+                                    x = px_i + nx * mr
+                                    y = py_i + ny * mr
+                                else:
+                                    tdx = tx - px_i
+                                    tdy = ty - py_i
+                                    td2 = tdx * tdx + tdy * tdy
+                                    if td2 > eps_dist2:
+                                        td = _sqrt(td2)
+                                        x = px_i + (tdx / td) * mr
+                                        y = py_i + (tdy / td) * mr
+                                    else:
+                                        x = px_i + mr
+                                        y = py_i
+                        ux[u] = x
+                        uy[u] = y
+
+                # 5a. Touch-to-land check
+                lr = p_land_r[tgt]
+                lr2_g = p_land_r2_guard[tgt]
+                spu = fl_spu[fi]
+                own = fl_owner[fi]
+                alive_left = alive_c
+                for u in range(m):
+                    if not all_alive and not alive[u]:
+                        continue
+                    dx = tx - ux[u]
+                    dy = ty - uy[u]
+                    d2 = dx * dx + dy * dy
+                    if d2 <= lr2_g and _sqrt(d2) <= lr:
+                        alive[u] = False
+                        alive_left -= 1
+                        forces = arrivals.get(tgt)
+                        if forces is None:
+                            forces = {}
+                            if dst.ships > 0.0:
+                                forces[dst.owner] = dst.ships
+                            arrivals[tgt] = forces
+                        forces[own] = forces.get(own, 0.0) + spu
+                fl_alive_cnt[fi] = alive_left
+
+            # 5b. Resolve gradual combat on planets with arrivals
+            for pi, forces in arrivals.items():
+                p = planets[pi]
+                n_forces = len(forces)
+                if n_forces == 1:
+                    only_o, only_v = next(iter(forces.items()))
+                    p.owner = only_o
+                    p.ships = only_v
+                elif n_forces >= 2:
+                    top_v = -1.0
+                    sec_v = -1.0
+                    top_o = p.owner
+                    for o, v in forces.items():
+                        if v > top_v:
+                            sec_v = top_v
+                            top_v = v
+                            top_o = o
+                        elif v > sec_v:
+                            sec_v = v
+                    if abs(top_v - sec_v) <= tie_eps:
+                        p.ships = 0.0
+                    else:
+                        p.owner = top_o
+                        p.ships = top_v - sec_v
+
+        # 6. Compact surviving units & update fleet summaries
+        for fi in range(n_fleets):
+            fl = fleets[fi]
+            alive_c = fl_alive_cnt[fi]
+            if alive_c <= 0:
+                del self.fleets[fl.id]
+                continue
+            ux = fl_ux[fi]
+            uy = fl_uy[fi]
+            m = len(ux)
+            if alive_c == m:
+                new_ux = ux
+                new_uy = uy
+            else:
+                alive = fl_alive[fi]
+                new_ux = [ux[u] for u in range(m) if alive[u]]
+                new_uy = [uy[u] for u in range(m) if alive[u]]
+            kept = len(new_ux)
+            sum_x = 0.0
+            sum_y = 0.0
+            for u in range(kept):
+                sum_x += new_ux[u]
+                sum_y += new_uy[u]
+            cx = sum_x / float(kept)
+            cy = sum_y / float(kept)
+            max_d2 = 0.0
+            for u in range(kept):
+                ddx = new_ux[u] - cx
+                ddy = new_uy[u] - cy
+                dd2 = ddx * ddx + ddy * ddy
+                if dd2 > max_d2:
+                    max_d2 = dd2
+            fl.units = [[new_ux[u], new_uy[u]] for u in range(kept)]
+            fl.num_units = kept
+            fl.ships = float(kept) * fl_spu[fi]
+            fl.x = cx
+            fl.y = cy
+            fl.radius = _sqrt(max_d2) + ship_radius
+
     def step(self, orders_by_player: Dict[int, Sequence[Order]]) -> None:
-        """Advance the Galcon world by one tick (orders -> production -> movement -> combat)."""
+        """Advance the Galcon world by one tick (orders -> 20 Hz substeps of production, movement, collisions, combat)."""
         if self.done:
             return
 
@@ -677,20 +1108,48 @@ class GalconSim:
                     src.ships = max(0.0, src.ships - send_ships)
                     dx = dst.x - src.x
                     dy = dst.y - src.y
-                    d = max(1e-6, math.hypot(dx, dy))
-                    spawn_x = src.x + (dx / d) * min(src.radius, d)
-                    spawn_y = src.y + (dy / d) * min(src.radius, d)
+                    d = max(1e-6, math.sqrt(dx * dx + dy * dy))
+                    spawn_r = src.radius + SHIP_RADIUS
+                    sx = src.x + (dx / d) * spawn_r
+                    sy = src.y + (dy / d) * spawn_r
+                    if parts == 1:
+                        units = [[sx, sy]]
+                        cx, cy, fl_radius = sx, sy, SHIP_RADIUS
+                    else:
+                        units = []
+                        sum_x = 0.0
+                        sum_y = 0.0
+                        for j in range(parts):
+                            rj = _SPAWN_SPIRAL_STEP * math.sqrt(float(j))
+                            ang = _GOLDEN_ANGLE * float(j)
+                            ux_j = sx + rj * math.cos(ang)
+                            uy_j = sy + rj * math.sin(ang)
+                            units.append([ux_j, uy_j])
+                            sum_x += ux_j
+                            sum_y += uy_j
+                        cx = sum_x / float(parts)
+                        cy = sum_y / float(parts)
+                        max_d2 = 0.0
+                        for u in units:
+                            ddx = u[0] - cx
+                            ddy = u[1] - cy
+                            dd2 = ddx * ddx + ddy * ddy
+                            if dd2 > max_d2:
+                                max_d2 = dd2
+                        fl_radius = math.sqrt(max_d2) + SHIP_RADIUS
                     fid = self.next_fleet_id
                     self.next_fleet_id += 1
                     self.fleets[fid] = Fleet(
                         id=fid,
                         owner=pid,
                         ships=send_ships,
-                        x=spawn_x,
-                        y=spawn_y,
+                        x=cx,
+                        y=cy,
                         source=src.id,
                         target=dst.id,
+                        radius=fl_radius,
                         num_units=parts,
+                        units=units,
                     )
                 elif isinstance(order, RedirOrder) and self.allow_redirect:
                     fl = self.fleets.get(order.fleet_id)
@@ -698,48 +1157,8 @@ class GalconSim:
                     if fl is not None and dst is not None and fl.owner == pid and fl.target != dst.id:
                         fl.target = dst.id
 
-        # 2. Ship production on owned planets
-        for p in self.planets.values():
-            if p.owner > 0:
-                p.ships += (p.production / PRODUCTION_DIVISOR) * self.tick_dt
-
-        # 3. Fleet movement & arrival collection
-        step_dist = self.fleet_speed * self.tick_dt
-        arrivals: Dict[int, List[Fleet]] = {}
-        for fid in list(self.fleets.keys()):
-            fl = self.fleets[fid]
-            dst = self.planets.get(fl.target)
-            if dst is None:
-                del self.fleets[fid]
-                continue
-            dx = dst.x - fl.x
-            dy = dst.y - fl.y
-            dist = math.hypot(dx, dy)
-            if dist <= dst.radius + step_dist + ARRIVAL_EPS:
-                arrivals.setdefault(dst.id, []).append(fl)
-                del self.fleets[fid]
-            else:
-                fl.x += (dx / dist) * step_dist
-                fl.y += (dy / dist) * step_dist
-
-        # 4. Resolve simultaneous arrivals at each planet
-        for pid_planet, incoming in arrivals.items():
-            p = self.planets[pid_planet]
-            forces: Dict[int, float] = {}
-            if p.ships > 0.0:
-                forces[p.owner] = forces.get(p.owner, 0.0) + p.ships
-            for fl in incoming:
-                forces[fl.owner] = forces.get(fl.owner, 0.0) + fl.ships
-
-            ranked = sorted(forces.items(), key=lambda kv: (-kv[1], kv[0] != p.owner))
-            if len(ranked) == 1:
-                p.owner, p.ships = ranked[0][0], ranked[0][1]
-            elif abs(ranked[0][1] - ranked[1][1]) <= TIE_EPS:
-                # Exact tie (within float epsilon): planet keeps owner with 0 ships (neutral stays neutral)
-                p.ships = 0.0
-            else:
-                p.owner = ranked[0][0]
-                p.ships = ranked[0][1] - ranked[1][1]
+        # 2. Advance physical ship & planet dynamics across physics_substeps
+        self._step_physics_python()
 
         self.tick += 1
         self._check_terminal()
@@ -863,7 +1282,9 @@ def project_all_planet_futures(
         if idx_p is None:
             continue
         dst = planets[idx_p]
-        dist = max(0.0, math.hypot(dst.x - fl.x, dst.y - fl.y) - dst.radius)
+        dx = dst.x - fl.x
+        dy = dst.y - fl.y
+        dist = max(0.0, math.sqrt(dx * dx + dy * dy) - dst.radius - SHIP_RADIUS)
         eta = max(1, int(math.ceil((dist - ARRIVAL_EPS) / step_dist)))
         t_i = eta - 1
         if 0 <= t_i < horizon:

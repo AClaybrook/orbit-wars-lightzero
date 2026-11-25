@@ -32,6 +32,7 @@ from galcon.gen5_model import GalconGen5Transformer, build_galcon_gen5_transform
 from galcon.sim import (
     ARRIVAL_EPS,
     PRODUCTION_DIVISOR,
+    SHIP_RADIUS,
     GalconSim,
     Order,
     Planet,
@@ -263,7 +264,7 @@ def extract_galcon_features(
     step_dist = max(1e-6, sim.fleet_speed * sim.tick_dt)
     dx = xs64[None, :] - xs64[:, None]
     dy = ys64[None, :] - ys64[:, None]
-    dist = np.maximum(0.0, np.hypot(dx, dy) - rs64[:, None] - rs64[None, :])
+    dist = np.maximum(0.0, np.sqrt(dx * dx + dy * dy) - rs64[:, None] - rs64[None, :] - 2.0 * SHIP_RADIUS)
     etas = np.maximum(1.0, np.ceil((dist - ARRIVAL_EPS) / step_dist)).astype(np.float32)
     np.fill_diagonal(etas, 0.0)
 
@@ -467,7 +468,9 @@ def extract_galcon_redir_features(sim: GalconSim, enc: EncodedGalconState) -> En
     fsh = np.fromiter((fl.ships for fl in my_fleets), dtype=np.float32, count=f_cnt)
 
     step_dist = max(1e-6, sim.fleet_speed * sim.tick_dt)
-    dist = np.maximum(0.0, np.hypot(px[None, :] - fx[:, None], py[None, :] - fy[:, None]) - pr[None, :])
+    dx_f = px[None, :] - fx[:, None]
+    dy_f = py[None, :] - fy[:, None]
+    dist = np.maximum(0.0, np.sqrt(dx_f * dx_f + dy_f * dy_f) - pr[None, :] - SHIP_RADIUS)
     eta_mat = np.maximum(1.0, np.ceil((dist - ARRIVAL_EPS) / step_dist)).astype(np.float32)  # (F, N)
     t_mat = np.clip(eta_mat.astype(np.int64) - 1, 0, GALCON_TIMELINE_HORIZON - 1)  # (F, N)
     j_grid = np.broadcast_to(np.arange(n)[None, :], (f_cnt, n))

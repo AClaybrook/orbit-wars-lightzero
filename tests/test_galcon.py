@@ -61,7 +61,8 @@ def test_galcon_tactical_bot_beats_classic_baseline():
     tactical = GalconTacticalBot()
     classic = GalconClassicBot()
     wins = 0
-    for s in range(16):
+    num_games = 48
+    for s in range(num_games):
         sim = GalconSim.create(seed=100 + s, max_ticks=200)
         t_pid = 1 if (s % 2 == 0) else 2
         c_pid = 2 if t_pid == 1 else 1
@@ -72,7 +73,7 @@ def test_galcon_tactical_bot_beats_classic_baseline():
                 sim.step({})
         if sim.winner() == t_pid:
             wins += 1
-    assert wins >= 10, f"Expected GalconTacticalBot to dominate GalconClassicBot, got {wins}/16"
+    assert wins >= 30, f"Expected GalconTacticalBot to dominate GalconClassicBot, got {wins}/{num_games}"
 
 
 def test_galcon_sparring_suite_rusher_and_macro():
@@ -1402,6 +1403,7 @@ def test_galcon_sim_epsilon_tie_and_arrival_tolerance():
     import math
     from galcon.sim import (
         ARRIVAL_EPS,
+        SHIP_RADIUS,
         TIE_EPS,
         Fleet,
         GalconSim,
@@ -1416,10 +1418,26 @@ def test_galcon_sim_epsilon_tie_and_arrival_tolerance():
 
     step_dist = 40.0 * 0.25  # 10.0 units/tick
     p1 = Planet(id=1, owner=1, ships=50.0, x=0.0, y=50.0, production=100.0, radius=12.0)
-    # Defender with IEEE-754 drift ships=4.999999999999984 and 0 production, placed at radius + step_dist + 7e-15
-    p2 = Planet(id=2, owner=2, ships=4.999999999999984, x=12.0 + step_dist + 7e-15, y=0.0, production=0.0, radius=12.0)
-    # Pairwise planet boundary jitter: center-to-center = r1 + r3 + step_dist + 7e-15
-    p3 = Planet(id=3, owner=2, ships=50.0, x=12.0 + 12.0 + step_dist + 7e-15, y=50.0, production=100.0, radius=12.0)
+    # Defender with IEEE-754 drift ships=4.999999999999984 and 0 production, placed at radius + SHIP_RADIUS + step_dist + 7e-15
+    p2 = Planet(
+        id=2,
+        owner=2,
+        ships=4.999999999999984,
+        x=12.0 + SHIP_RADIUS + step_dist + 7e-15,
+        y=0.0,
+        production=0.0,
+        radius=12.0,
+    )
+    # Pairwise planet boundary jitter: center-to-center = r1 + r3 + 2 * SHIP_RADIUS + step_dist + 7e-15
+    p3 = Planet(
+        id=3,
+        owner=2,
+        ships=50.0,
+        x=12.0 + 12.0 + 2.0 * SHIP_RADIUS + step_dist + 7e-15,
+        y=50.0,
+        production=100.0,
+        radius=12.0,
+    )
     # Neutral defender with exact same IEEE-754 drift
     p4 = Planet(id=4, owner=0, ships=4.999999999999984, x=120.0, y=0.0, production=0.0, radius=12.0)
 
@@ -1427,8 +1445,8 @@ def test_galcon_sim_epsilon_tie_and_arrival_tolerance():
     fl_neu = Fleet(id=1001, owner=1, ships=5.0, x=100.0, y=0.0, source=1, target=4)
 
     # Confirm the 7e-15 overshoot is actually representable in float64 (strictly > exact boundary)
-    assert math.hypot(p2.x - fl_atk.x, p2.y - fl_atk.y) > p2.radius + step_dist
-    assert math.hypot(p3.x - p1.x, p3.y - p1.y) > p1.radius + p3.radius + step_dist
+    assert math.hypot(p2.x - fl_atk.x, p2.y - fl_atk.y) > p2.radius + SHIP_RADIUS + step_dist
+    assert math.hypot(p3.x - p1.x, p3.y - p1.y) > p1.radius + p3.radius + 2.0 * SHIP_RADIUS + step_dist
 
     sim = GalconSim([p1, p2, p3, p4], [fl_atk, fl_neu], fleet_speed=40.0, tick_dt=0.25)
 
@@ -1493,7 +1511,7 @@ def test_galcon_sim_epsilon_tie_and_arrival_tolerance():
     assert sim.planets[4].owner == 0 and sim.planets[4].ships == 0.0
 
     # 5. Strictly above tolerance: arrival beyond ARRIVAL_EPS takes 2 ticks, and clear advantage captures
-    p_def = Planet(id=1, owner=2, ships=5.0, x=12.0 + step_dist + 1e-6, y=0.0, production=0.0, radius=12.0)
+    p_def = Planet(id=1, owner=2, ships=5.0, x=12.0 + SHIP_RADIUS + step_dist + 1e-6, y=0.0, production=0.0, radius=12.0)
     p_home = Planet(id=2, owner=1, ships=50.0, x=200.0, y=0.0, production=100.0, radius=12.0)
     fl_far = Fleet(id=2000, owner=1, ships=5.0 + 1e-6, x=0.0, y=0.0, source=2, target=1)
     sim2 = GalconSim([p_def, p_home], [fl_far], fleet_speed=40.0, tick_dt=0.25)
@@ -1711,4 +1729,236 @@ def test_galcon_sim_fractional_send_and_physical_ship_count():
     # Mutating clone does not affect original
     cfl.num_units = 99
     assert sim_frac.fleets[1000].num_units == 5
+
+
+def test_galcon_sim_physical_ships_separation_pushout_gradual_landing_and_redir():
+    """Verify physical ship circle colliders: spawn, same-fleet separation, planet pushout, gradual landing, redir, timing, and clone isolation."""
+    import math
+    from galcon.sim import (
+        ANTIPODE_DOT_THRESHOLD,
+        ANTIPODE_ESCAPE_TANGENT,
+        DEFAULT_PHYSICS_SUBSTEPS,
+        SHIP_RADIUS,
+        SHIP_SEP_MAX_DISP,
+        SHIP_SEP_STIFFNESS,
+        Fleet,
+        GalconSim,
+        Planet,
+        RedirOrder,
+        SendOrder,
+    )
+
+    # Module constants match tuned 20 Hz C++ kernel spec
+    assert DEFAULT_PHYSICS_SUBSTEPS == 5
+    assert SHIP_SEP_STIFFNESS == 1.0
+    assert SHIP_SEP_MAX_DISP == 2.5
+    assert ANTIPODE_DOT_THRESHOLD == -0.995
+    assert ANTIPODE_ESCAPE_TANGENT == 0.05
+
+    # 1. Multi-ship send spawns `parts` physical units in a tight mass at src.r + SHIP_RADIUS
+    #    and same-fleet collision smoothly separates them without launch explosion
+    p1 = Planet(id=1, owner=1, ships=100.0, x=50.0, y=120.0, production=0.0, radius=24.0)
+    p2 = Planet(id=2, owner=2, ships=500.0, x=430.0, y=120.0, production=0.0, radius=24.0)
+    # Run 1 substep per step (20 Hz) to inspect exact substep evolution
+    sim_sep = GalconSim([p1, p2], width=480.0, height=240.0, tick_dt=0.05, physics_substeps=1)
+    sim_sep.step({1: [SendOrder(1, 2, 100)]})
+    assert len(sim_sep.fleets) == 1
+    fl = next(iter(sim_sep.fleets.values()))
+    assert fl.units is not None
+    assert len(fl.units) == fl.num_units == 41
+    assert np.isclose(fl.ships, 100.0, atol=1e-12)
+    assert sim_sep.item_count() == 3 + 2 + 1 + 41
+    # Tight mass at launch: after 1 substep, radius is still compact (no explosion)
+    assert SHIP_RADIUS < fl.radius < 12.0
+    # Centroid launched from p1.x + p1.r + SHIP_RADIUS (80.0) and moved ~2.0u toward p2
+    assert 79.0 <= fl.x <= 86.0
+    for u in fl.units:
+        assert math.sqrt((u[0] - p1.x) ** 2 + (u[1] - p1.y) ** 2) >= p1.radius + SHIP_RADIUS - 1e-9
+
+    radii = [fl.radius]
+    prev_units = [u[:] for u in fl.units]
+    for _ in range(25):
+        sim_sep.step({})
+        fl = next(iter(sim_sep.fleets.values()))
+        assert fl.units is not None and len(fl.units) == 41
+        # Per-substep displacement bounded by forward move (2.0u) + SHIP_SEP_MAX_DISP (2.5u) + pushout margin
+        max_disp = max(
+            math.sqrt((u[0] - pu[0]) ** 2 + (u[1] - pu[1]) ** 2) for u, pu in zip(fl.units, prev_units)
+        )
+        assert max_disp <= 2.0 + SHIP_SEP_MAX_DISP + 1e-6
+        for u in fl.units:
+            assert math.sqrt((u[0] - p1.x) ** 2 + (u[1] - p1.y) ** 2) >= p1.radius + SHIP_RADIUS - 1e-9
+        radii.append(fl.radius)
+        prev_units = [u[:] for u in fl.units]
+    # Monotonic smooth expansion from tight launch cluster into physical circle packing
+    for i in range(1, 16):
+        assert radii[i] >= radii[i - 1] - 1e-9
+    assert radii[0] < radii[5] < radii[15] < radii[25]
+    assert 25.0 < radii[25] < 60.0
+
+    # 2. Cross-fleet ships do NOT push each other apart (same owner AND opposing owner)
+    pa = Planet(id=1, owner=1, ships=50.0, x=20.0, y=100.0, production=0.0, radius=12.0)
+    pb = Planet(id=2, owner=2, ships=500.0, x=380.0, y=100.0, production=0.0, radius=12.0)
+    f_p1a = Fleet(id=10, owner=1, ships=5.0, x=100.0, y=100.0, source=1, target=2)
+    f_p1b = Fleet(id=11, owner=1, ships=5.0, x=100.0, y=100.0, source=1, target=2)
+    f_p2 = Fleet(id=12, owner=2, ships=5.0, x=100.0, y=100.0, source=1, target=2)
+    sim_cross = GalconSim([pa, pb], [f_p1a, f_p1b, f_p2], width=400.0, height=200.0)
+    for _ in range(5):
+        sim_cross.step({})
+    u10 = sim_cross.fleets[10].units[0]
+    u11 = sim_cross.fleets[11].units[0]
+    u12 = sim_cross.fleets[12].units[0]
+    assert u10 == u11 == u12
+    assert np.isclose(u10[0], 150.0, atol=1e-9) and np.isclose(u10[1], 100.0, atol=1e-9)
+
+    # 3. Obstacle planet directly between src and dst pushes ships radially outward,
+    #    slows arrival vs unobstructed flight, and 1-ship collinear fleet escapes cleanly
+    def _run_corridor(ships: float, with_obstacle: bool):
+        pls = [
+            Planet(id=1, owner=1, ships=ships, x=50.0, y=120.0, production=0.0, radius=20.0),
+            Planet(id=2, owner=2, ships=500.0, x=350.0, y=120.0, production=0.0, radius=20.0),
+        ]
+        if with_obstacle:
+            pls.append(Planet(id=3, owner=0, ships=50.0, x=200.0, y=120.0, production=0.0, radius=24.0))
+        sim_c = GalconSim(pls, width=400.0, height=240.0, tick_dt=0.05, physics_substeps=1, max_ticks=600)
+        sim_c.step({1: [SendOrder(1, 2, 100)]})
+        min_obs_d = float("inf")
+        max_lat = 0.0
+        sub = 1
+        while sim_c.fleets and sub < 500:
+            fl_c = next(iter(sim_c.fleets.values()))
+            assert fl_c.units is not None
+            for u in fl_c.units:
+                if with_obstacle:
+                    d_obs = math.sqrt((u[0] - 200.0) ** 2 + (u[1] - 120.0) ** 2)
+                    min_obs_d = min(min_obs_d, d_obs)
+                max_lat = max(max_lat, abs(u[1] - 120.0))
+            sim_c.step({})
+            sub += 1
+        return sub, len(sim_c.fleets), min_obs_d, max_lat
+
+    # 3a. 1-ship collinear antipode escape
+    t_clear_1, rem_c1, _, _ = _run_corridor(1.0, with_obstacle=False)
+    t_obs_1, rem_o1, min_obs_1, max_lat_1 = _run_corridor(1.0, with_obstacle=True)
+    assert rem_c1 == 0 and rem_o1 == 0  # escaped cleanly without stalling
+    assert min_obs_1 >= 24.0 + SHIP_RADIUS - 1e-9
+    assert max_lat_1 > 24.0  # detoured around obstacle
+    assert t_obs_1 > t_clear_1  # slowed arrival vs unobstructed
+
+    # 3b. Multi-ship fleet around blocking planet
+    t_clear_25, rem_c25, _, _ = _run_corridor(25.0, with_obstacle=False)
+    t_obs_25, rem_o25, min_obs_25, max_lat_25 = _run_corridor(25.0, with_obstacle=True)
+    assert rem_c25 == 0 and rem_o25 == 0
+    assert min_obs_25 >= 24.0 + SHIP_RADIUS - 1e-9
+    assert max_lat_25 > 24.0
+    assert t_obs_25 > t_clear_25
+
+    # 4. Gradual landing: 100 ships (41 units) lands across multiple ticks with smooth count/ship decay
+    p_src = Planet(id=1, owner=1, ships=100.0, x=40.0, y=120.0, production=0.0, radius=24.0)
+    p_dst = Planet(id=2, owner=2, ships=200.0, x=360.0, y=120.0, production=0.0, radius=24.0)
+    sim_grad = GalconSim([p_src, p_dst], width=420.0, height=240.0)
+    sim_grad.step({1: [SendOrder(1, 2, 100)]})
+    spu = 100.0 / 41.0
+    partial_counts: list[int] = []
+    prev_units_cnt = 41
+    for _ in range(60):
+        if not sim_grad.fleets:
+            break
+        fl_g = next(iter(sim_grad.fleets.values()))
+        assert fl_g.units is not None
+        assert fl_g.num_units == len(fl_g.units)
+        assert fl_g.num_units <= prev_units_cnt
+        assert np.isclose(fl_g.ships, fl_g.num_units * spu, atol=1e-9)
+        assert np.isclose(fl_g.ships + (200.0 - sim_grad.planets[2].ships), 100.0, atol=1e-9)
+        if 0 < fl_g.num_units < 41:
+            partial_counts.append(fl_g.num_units)
+        prev_units_cnt = fl_g.num_units
+        sim_grad.step({})
+    assert len(sim_grad.fleets) == 0
+    assert np.isclose(sim_grad.planets[2].ships, 100.0, atol=1e-9)
+    assert len(partial_counts) >= 2  # spans >= 3 ticks (multiple intermediate partial-fleet ticks)
+    assert partial_counts == sorted(partial_counts, reverse=True)
+
+    # 5. RedirOrder redirects all physical ship units in the fleet together to the new target
+    r_p1 = Planet(id=1, owner=1, ships=50.0, x=40.0, y=160.0, production=0.0, radius=20.0)
+    r_p2 = Planet(id=2, owner=2, ships=200.0, x=360.0, y=160.0, production=0.0, radius=20.0)
+    r_p3 = Planet(id=3, owner=2, ships=200.0, x=200.0, y=30.0, production=0.0, radius=20.0)
+    sim_redir = GalconSim([r_p1, r_p2, r_p3], width=400.0, height=240.0)
+    sim_redir.step({1: [SendOrder(1, 2, 100)]})
+    fid_r = next(iter(sim_redir.fleets.keys()))
+    for _ in range(5):
+        sim_redir.step({})
+    fl_before = sim_redir.fleets[fid_r]
+    assert fl_before.units is not None and fl_before.num_units == 29
+    y_before = [u[1] for u in fl_before.units]
+    cy_before = fl_before.y
+
+    sim_redir.step({1: [RedirOrder(fid_r, 3)]})
+    fl_after = sim_redir.fleets[fid_r]
+    assert fl_after.target == 3
+    assert fl_after.y < cy_before - 5.0
+    assert all(u[1] < yb for u, yb in zip(fl_after.units, y_before))
+
+    for _ in range(40):
+        if not sim_redir.fleets:
+            break
+        sim_redir.step({})
+    assert len(sim_redir.fleets) == 0
+    assert np.isclose(sim_redir.planets[2].ships, 200.0, atol=1e-9)  # old target untouched
+    assert np.isclose(sim_redir.planets[3].ships, 150.0, atol=1e-9)  # all 50 ships landed on new target
+
+    # 6. Exact 1-ship touch-to-land timing (dist <= dst.r + SHIP_RADIUS)
+    t_src = Planet(id=1, owner=1, ships=1.0, x=0.0, y=100.0, production=0.0, radius=12.0)
+    # Exact 3-tick travel distance (3 * 10.0 = 30.0u) between spawn edge and touch-to-land edge
+    t_dst_exact = Planet(
+        id=2, owner=2, ships=10.0, x=12.0 + 12.0 + 2.0 * SHIP_RADIUS + 30.0, y=100.0, production=0.0, radius=12.0
+    )
+    sim_t3 = GalconSim([t_src, t_dst_exact], width=200.0, height=200.0, fleet_speed=40.0, tick_dt=0.25)
+    assert sim_t3.planet_eta_ticks(t_src, t_dst_exact) == 3
+    sim_t3.step({1: [SendOrder(1, 2, 100)]})  # tick 1: x = 18 + 10 = 28
+    assert len(sim_t3.fleets) == 1
+    sim_t3.step({})  # tick 2: x = 38
+    assert len(sim_t3.fleets) == 1
+    sim_t3.step({})  # tick 3: x = 48, dist = 18.0 == dst.r + SHIP_RADIUS -> lands!
+    assert len(sim_t3.fleets) == 0
+    assert np.isclose(sim_t3.planets[2].ships, 9.0, atol=1e-9)
+
+    t_dst_4 = Planet(
+        id=2, owner=2, ships=10.0, x=12.0 + 12.0 + 2.0 * SHIP_RADIUS + 30.0 + 1e-4, y=100.0, production=0.0, radius=12.0
+    )
+    sim_t4 = GalconSim([t_src, t_dst_4], width=200.0, height=200.0, fleet_speed=40.0, tick_dt=0.25)
+    assert sim_t4.planet_eta_ticks(t_src, t_dst_4) == 4
+    sim_t4.step({1: [SendOrder(1, 2, 100)]})
+    sim_t4.step({})
+    sim_t4.step({})
+    assert len(sim_t4.fleets) == 1  # still 1e-4 short of touch-to-land after tick 3
+    sim_t4.step({})
+    assert len(sim_t4.fleets) == 0
+    assert np.isclose(sim_t4.planets[2].ships, 9.0, atol=1e-9)
+
+    # 7. clone() deep-copies fl.units completely and preserves physics_substeps
+    sim_orig = GalconSim(
+        [
+            Planet(id=1, owner=1, ships=40.0, x=40.0, y=100.0, production=0.0, radius=20.0),
+            Planet(id=2, owner=2, ships=100.0, x=360.0, y=100.0, production=0.0, radius=20.0),
+        ],
+        width=400.0,
+        height=200.0,
+        physics_substeps=3,
+    )
+    sim_orig.step({1: [SendOrder(1, 2, 100)]})
+    fid_o = next(iter(sim_orig.fleets.keys()))
+    sim_copy = sim_orig.clone()
+    assert sim_copy.physics_substeps == 3
+    orig_units_snap = [u[:] for u in sim_orig.fleets[fid_o].units]
+    assert sim_copy.fleets[fid_o].units == orig_units_snap
+    assert sim_copy.fleets[fid_o].units is not sim_orig.fleets[fid_o].units
+    assert sim_copy.fleets[fid_o].units[0] is not sim_orig.fleets[fid_o].units[0]
+
+    sim_copy.fleets[fid_o].units[0][0] += 999.0
+    sim_copy.fleets[fid_o].units.pop()
+    sim_copy.step({})
+    assert sim_orig.fleets[fid_o].units == orig_units_snap
+    assert sim_orig.fleets[fid_o].num_units == len(orig_units_snap)
+
 
