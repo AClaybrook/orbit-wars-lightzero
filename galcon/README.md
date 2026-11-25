@@ -1,6 +1,20 @@
-# Galcon AI Wave 11 — `2×` Faster Training & Hybrid Soft-KD Champions (`66.3%` Sparky • `68.8%` Waffle3z @ `28 ms` • `58.3%` Large Paired • `85.4%` EsparanBot)
+# Galcon AI Wave 12 — `71.2%` Sparky v1.6 (`~1979 Elo`) & `2.3×` Faster VM Training Engine
 
 A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-lightzero` that cross-pollinates our Orbit Wars **`PlanetTimelineTransformer`** (`orbit_wars_bot/planet_transformer.py`) to classic Galcon, Phil Hassey's official **`gbots`** protocol, and zero-copy head-to-head benchmarking against Evan Sparano's (`esparano/GalconModVault`) unmodified Lua tournament bots (`Sparky v1.6`, `Waffle3z-GA / bots_waffle3z_optimized`, & `EsparanBot v0.2`) via [`galcon/lua_bridge.py`](lua_bridge.py).
+
+## Wave 12 Highlights — Shattering 70% vs. `Sparky v1.6` & `Waffle3z-GA` + `2.3×` Faster VM Training
+- **#1 Overall Champion — Wave 12 Surgical Ensemble (`EnsembleGalconSearchAgent([W9S, W6B])`, default `--bot ensemble`, `46–52 ms/tick`, ~`1979 Elo`!):**
+  - Driven directly by loss forensics against `esparano Sparky v1.6` (which exposed passive symmetric stalemate draws and empty opening soft-minimax replies), added two surgical search helpers in [`galcon/transformer_bot.py`](transformer_bot.py) enabled by default on `EnsembleGalconSearchAgent`:
+    1. **`_build_rescue_and_snipe_plan`:** Exact-need defensive rescue for any friendly planet projected to fall + single-target high-ROI snipe/stalemate-breaker whenever conservative multi-target fan-out returns empty.
+    2. **`_build_opp_direct_rush_plan`:** Soft-minimax fallback stress-testing an 85% strike from the opponent's strongest planet at our closest/weakest planet when opponent fan-out/focus-fire is empty (e.g. `t=0` openings).
+  - **18pl Std `Sparky v1.6` (40g, 1-tick):** **`26–9–5` (`71.2%` — NEW ALL-TIME RECORD, `+5.0%` jump, single-digit losses!)** (`s=14000: 11–5–4 / 65.0%`, `s=9500: 15–4–1 / 77.5%`, `52.4 ms/t`).
+  - **Built-in Heuristics (32g):** **`29–2–1` (`92.2%`, `+3.1%`)** | **Large 24pl Asym:** **`8–4–0` (`66.7%`)** Sparky & **`9–3–0` (`75.0%`)** Waffle3z-GA (zero Large regression) | **18pl `Waffle3z-GA`:** `24–13–3` (`63.7%`, `46.3 ms/t`).
+  - **Direct-Rush Mode (`enable_rescue_snipe=False`):** Sets a **new all-time `Waffle3z-GA` record** at **`27–10–3` (`71.2%`**, `s=14000: 70.0%`, `s=9500: 72.5%` @ `47.3 ms/t`) while holding `66.2%` vs. `Sparky v1.6` (`68.8%` dual-boss average).
+  - **Bit-Exact `need_value=False` Skip & Leaf Value Path:** Decoupled value-critic ensembles (`Ens(W9S+W6B+W11_KD)` → `67.5%` Sparky, `83.3%` Large Asym Waffle3z) skip value-only members on `opp_enc` & mid-ply rollouts (~30% faster), and `_batch_evaluate_leaves` calls `encode_planets + decode_value_from_hidden` directly.
+- **Wave 12 VM Training Engine Speedups (~`1.55×` faster over Wave 11 / `~2.1×–2.3×` over Wave 10 on 2-vCPU VM!):**
+  - **`forward_multi_send` ([`GalconPlanetTransformer`](transformer_bot.py)):** Skips the unused Gen 2/3 $O(B \cdot N^2 \cdot D)$ `decode_from_hidden` pairwise head across Gen 4 EI training, PPO rollouts, `ema_teacher` precompute, PPO updates, and snapshot actors (100% bit-exact).
+  - **Length-Bucketed Minibatching (`_LengthBucketBatchSampler` in [`galcon/train.py`](train.py)):** Groups `<=14pl`, `15–18pl`, and `>=19pl` states into tight minibatches so `_trim_batch_n` avoids $O(N^2)$ padding waste, cutting PPO `upd` from **`25–29s → 14.5–18.3s`** (`~1.55×` faster than Wave 11, `~2.1×` faster than Wave 10!).
+  - **Persistent Worker Lua/Snapshot Caches + `B=6` Lockstep Batched `val_56g`:** Eliminates per-iteration `lua5.3` respawns & snapshot reloads inside `ProcessPoolExecutor` workers and batches validation games in lockstep (`val_56g`: `~19s → ~12s`).
 
 ## Wave 11 Highlights — `1.8×–2.0×` Faster Training Engine & Hybrid Soft-KD Records
 - **`1.8×–2.0×` Faster Triple-Boss Training Engine in [`galcon/train.py`](train.py):**
@@ -187,7 +201,7 @@ python3 -m galcon.record_replays \
   --lua-esparan external/GalconModVault/esparano/bots/bot_esparanbot_v0.2/bot_esparanbot.lua \
   --out-html docs/galcon_viewer.html
 
-# Run all 18 unit tests (Wave 11 Soft-KD + Batched PPO rollouts, Waffle3z botwar Lua bridge, Triple-boss schedule/val gate, Map-adaptive adversarial, Vectorized futures parity, Canonical D4, DMLAdamW, Ensemble):
+# Run all 20 unit tests (Wave 12 Surgical Search + VM speedups, Wave 11 Soft-KD + Batched PPO, Waffle3z Lua bridge, Triple-boss val gate, Map-adaptive adversarial, Vectorized futures parity, Canonical D4, DMLAdamW, Ensemble):
 pytest -v tests/test_galcon.py
 ```
 

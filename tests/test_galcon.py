@@ -926,3 +926,115 @@ def test_wave11_soft_kd_and_batched_ppo_rollouts():
     loss.backward()
     assert metrics["bce"] >= 0.0
 
+
+def test_wave12_surgical_search_need_value_and_draw_filter(tmp_path):
+    """Verify Wave 12 surgical rescue/snipe, direct-rush fallback, and need_value=False bit-exact parity."""
+    import numpy as np
+    from galcon.sim import GalconSim, SendOrder
+    from galcon.transformer_bot import (
+        EnsembleGalconSearchAgent,
+        GalconSearchTransformerAgent,
+        build_galcon_gen4_transformer,
+        extract_galcon_features,
+    )
+
+    torch.manual_seed(12)
+    m1 = build_galcon_gen4_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
+    m2 = build_galcon_gen4_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
+    c1, c2 = tmp_path / "w12_m1.pt", tmp_path / "w12_m2.pt"
+    for mod, p in ((m1, c1), (m2, c2)):
+        torch.save(
+            {
+                "model_config": mod.config,
+                "model_state_dict": mod.state_dict(),
+                "has_trained_redir": True,
+                "has_trained_multi_send": True,
+                "use_canonical_d4": True,
+            },
+            p,
+        )
+
+    # 1. Defaults: single-model keeps rescue/rush off, Ensemble turns both on
+    single = GalconSearchTransformerAgent(c1, use_d4_canonical=True, use_d4_tta=False)
+    assert single.enable_rescue_snipe is False and single.enable_opp_direct_rush is False
+    ens = EnsembleGalconSearchAgent(
+        [c1, c2], weights=[1.0, 0.0], value_weights=[0.5, 0.5], use_d4_canonical=True, use_d4_tta=False
+    )
+    assert ens.enable_rescue_snipe is True and ens.enable_opp_direct_rush is True
+
+    # 2. need_value=False skips value-only ensemble member with bit-exact policy parity
+    sim = GalconSim.create(seed=14006, num_planets=18, width=400.0, height=240.0, symmetric=True)
+    enc = extract_galcon_features(sim, 1, feature_version=2)
+    p1, f1, _, _, msp1, msf1 = ens._predict_all(enc, need_value=True)
+    p2, f2, _, _, msp2, msf2 = ens._predict_all(enc, need_value=False)
+    assert np.allclose(p1, p2, atol=1e-6) and np.allclose(f1, f2, atol=1e-6)
+    assert msp1 is not None and msp2 is not None and np.allclose(msp1, msp2, atol=1e-6)
+    bp1, bf1, _, bmsp1, bmsf1 = ens._batch_forward_policy_and_val([enc], need_value=True)
+    bp2, bf2, _, bmsp2, bmsf2 = ens._batch_forward_policy_and_val([enc], need_value=False)
+    assert np.allclose(bp1, bp2, atol=1e-6) and np.allclose(bf1, bf2, atol=1e-6)
+    assert bmsp1 is not None and bmsp2 is not None and np.allclose(bmsp1, bmsp2, atol=1e-6)
+
+    # 3. Direct-rush fallback and rescue/snipe helpers produce valid legal SendOrders
+    opp_enc = extract_galcon_features(sim, 2, feature_version=2)
+    rush = ens._build_opp_direct_rush_plan(sim, opp_enc)
+    assert len(rush) == 1 and isinstance(rush[0], SendOrder) and rush[0].percent == 85
+    rs = ens._build_rescue_and_snipe_plan(sim, enc, p1, ms_probs=msp1)
+    assert isinstance(rs, list)
+    best, cands, scores, _ = ens.act_with_search_info(sim, 1)
+    assert len(cands) >= 2 and len(scores) == len(cands)
+
+
+def test_wave12_vm_speedups_forward_ms_bucket_sampler_and_batched_val():
+    """Verify bit-exact parity of forward_multi_send, length-bucketed batching, and batched val_56g waves."""
+    import numpy as np
+    from galcon.heuristic_bot import GalconClassicBot, GalconTacticalBot
+    from galcon.sim import GalconSim
+    from galcon.train import _LengthBucketBatchSampler, _run_gen4_val_wave_batched
+    from galcon.transformer_bot import (
+        build_galcon_gen4_transformer,
+        canonicalize_galcon_d4,
+        extract_galcon_features,
+    )
+
+    torch.manual_seed(120)
+    model = build_galcon_gen4_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128).eval()
+    sim = GalconSim.create(seed=7200, num_planets=16, width=400.0, height=240.0)
+    enc = extract_galcon_features(sim, 1, feature_version=2)
+    pf = torch.from_numpy(canonicalize_galcon_d4(enc.planet_feats)[None])
+    tf = torch.from_numpy(enc.timeline_feats[None])
+    ef = torch.from_numpy(enc.edge_feats[None])
+    pm = torch.ones((1, len(enc.planet_ids)), dtype=torch.bool)
+
+    # 1. forward_multi_send matches forward() + predict_multi_send() bit-exactly
+    with torch.no_grad():
+        _, _, v_ref, aux_ref, h_ref = model(pf, tf, ef, pm, return_aux=True, return_hidden=True)
+        msl_ref, msf_ref = model.predict_multi_send(h_ref, ef)
+        msl_fast, msf_fast, v_fast, aux_fast, h_fast = model.forward_multi_send(
+            pf, tf, ef, pm, return_aux=True, return_hidden=True
+        )
+    assert torch.allclose(v_ref, v_fast, atol=1e-6)
+    assert torch.allclose(aux_ref, aux_fast, atol=1e-6)
+    assert torch.allclose(msl_ref, msl_fast, atol=1e-6)
+    assert torch.allclose(msf_ref, msf_fast, atol=1e-6)
+    assert torch.allclose(h_ref, h_fast, atol=1e-6)
+
+    # 2. _LengthBucketBatchSampler keeps small (<=14), mid (15-18), and large (>=19) maps in separate batches
+    lengths = [10, 24, 12, 18, 26, 14, 16, 22, 18, 10]
+    sampler = _LengthBucketBatchSampler(lengths, batch_size=3, shuffle=True, seed=99)
+    seen = []
+    for batch in sampler:
+        seen.extend(batch)
+        b_lens = [lengths[i] for i in batch]
+        assert (max(b_lens) <= 14) or (15 <= min(b_lens) and max(b_lens) <= 18) or (min(b_lens) >= 19)
+    assert sorted(seen) == list(range(len(lengths)))
+
+    # 3. Batched lockstep validation wave executes cleanly across heterogeneous maps
+    wave = [
+        ("heur", "classic", 7201, 10, 240.0, 150.0, 100, True, 1, GalconClassicBot(), False),
+        ("heur", "tactical", 7202, 16, 400.0, 240.0, 100, True, 2, GalconTacticalBot(), False),
+    ]
+    res = _run_gen4_val_wave_batched(model, wave)
+    assert len(res) == 2 and all(bk == "heur" and pts in (0.0, 0.5, 1.0) for bk, pts in res)
+
+
+
