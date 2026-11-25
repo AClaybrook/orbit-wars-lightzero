@@ -1,9 +1,25 @@
-# Galcon AI Wave 14 — Replay-Pooled Single-Model Champion (`70.0%` Waffle3z, `65.0%` Sparky, `89.6%` EsparanBot @ `20 ms`)
+# Galcon AI Wave 15 — Gen 5 Edge-Gated WDL Transformer (`2.93M`: `65%` Sparky `7L` Record, `60%` Pure Waffle3z @ `10ms`)
 
-A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-lightzero` that cross-pollinates our Orbit Wars **`PlanetTimelineTransformer`** (`orbit_wars_bot/planet_transformer.py`, `1.29M` params) to classic Galcon, Phil Hassey's official **`gbots`** protocol, and zero-copy head-to-head benchmarking against Evan Sparano's (`esparano/GalconModVault`) unmodified Lua tournament bots (`Sparky v1.6`, `Waffle3z-GA / bots_waffle3z_optimized`, & `EsparanBot v0.2`) via [`galcon/lua_bridge.py`](lua_bridge.py).
+A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-lightzero` featuring both our **Gen 5 Edge-Gated Residual-Edge WDL Transformer** ([`galcon/gen5_model.py`](gen5_model.py), `2.93M` params) and our cross-pollinated **Gen 4 `PlanetTimelineTransformer`** (`1.29M` params), Phil Hassey's official **`gbots`** protocol, and zero-copy head-to-head benchmarking against Evan Sparano's (`esparano/GalconModVault`) unmodified Lua tournament bots (`Sparky v1.6`, `Waffle3z-GA / bots_waffle3z_optimized`, & `EsparanBot v0.2`) via [`galcon/lua_bridge.py`](lua_bridge.py).
+
+## Wave 15 Highlights — Gen 5 Architecture (`2.93M` Edge-Gated Residual-Edge SwiGLU + Quadratic Soft-WDL)
+- **Why We Upgraded Beyond Gen 4 (`1.29M`):** Controlled A/B ablations on `W14_KD` confirmed Gen 4's static-edge value ceiling (`3-ply h=24` dropped to `42.5%` Sparky; raising `neural_value_weight` `0.70 → 0.85` dropped `65.0% → 55.0%`).
+- **New Self-Contained Gen 5 Architecture ([`galcon/gen5_model.py`](gen5_model.py), `2.93M` params, `11.7 MB` FP32, `0` edits to `orbit_wars_bot/`):**
+  - **Edge-Conditioned Value Message Passing (`torch.bmm` AVX2) + 6-Layer Residual Pairwise Edge Track (`e_ij` refined every layer)** for 2-hop / pincer / rescue-chain coordination.
+  - **Pre-Norm SwiGLU FFN (`d_model=192, n_heads=6, n_layers=6, dim_ff=384, edge_hidden=24`)** with state-dict-compatible residual `dropout=0.08` (zero inference cost at `.eval()`).
+  - **Multi-Query 4-Token Attention Pooling + Stockfish/Lc0-Style 3-Class WDL Value Head `(P_loss, P_draw, P_win)`** with configurable **`contempt`** (`v = P_win - P_loss - c * P_draw`, defaulting to `0.30` in [`GalconSearchTransformerAgent`](transformer_bot.py)).
+  - **Calibrated Training Engine Upgrades ([`galcon/train.py`](train.py), `--arch gen5`):** Exact-mean-preserving **Quadratic Soft-WDL targets** (`t_draw = 0.65 * (1 - |v|)^2`, guaranteeing `t_win - t_loss == v` without bogus draw mass on wins), **Game-Block Held-Out Validation** (`64`-state blocks, zero tick-level leakage), calibrated `pos_weight=2.2`, `weight_decay=2.5e-3`, and composite early stopping (`val_bce + 0.15 * val_v_loss`).
+- **Gen 5 Foundation Checkpoint — [`checkpoints/galcon_gen5_w15.pt`](../checkpoints/galcon_gen5_w15.pt) (ONLY 9 Scratch Epochs on `15,017` Gen 4 Replay States — ZERO Gen 5 Self-Play Yet!):**
+  - **Pure (`10.0 ms/t`, ZERO Search!):**
+    - **`Waffle3z-GA` (40g):** **`20–12–8` (`60.0%` — NEW ALL-TIME PURE RECORD, `+7.5%` over Wave 8 Pure!)**
+    - **`Sparky v1.6` (40g):** **`13–12–15` (`51.2%` Pure — beats unmodified Sparky >50% with zero search; `s=9500: 10–5–5 / 62.5%`!)**
+  - **Single-Model Search (`c=0.30, nv=0.75`, Surgical, `33.0 ms/t`):**
+    - **`Sparky v1.6` 18pl (40g, 1t):** **`19–7–14` (`65.0%` — ALL-TIME FEWEST SPARKY LOSSES AT 7 / `82.5%` NON-LOSS RATE; `s=14000: 8–2–10`, `s=9500: 11–5–4`, balanced `65.0% / 65.0%`!)**
+    - **`Waffle3z-GA` 18pl (40g, 1t):** **`21–10–9` (`63.7%`, `s=9500: 67.5%`)** | **Large 24pl Asym:** `66.7%` Waffle3z / `41.7%` Sparky | **`EsparanBot v0.2`:** `75.0%` (`s=15300: 83.3%`) | **Heuristics:** `85.9%`.
+  - *(Note: `checkpoints/galcon_wave14_kd.pt` remains the default `--bot search` in `galcon/gbots_client.py` at `20 ms/t` while Wave 16 launches Gen 5's own self-bootstrapping AlphaZero Search-EI flywheel!)*
 
 ## Wave 14 Highlights — Replay-Pooled AlphaZero Search-EI (`10,297` States → `#1` Single-Model Champion at `20 ms/t`)
-- **#1 Single-Model All-Rounder — [`checkpoints/galcon_wave14_kd.pt`](../checkpoints/galcon_wave14_kd.pt) (new default `--bot search`, `19.9–20.0 ms/tick`, ~`1955 Elo`!):**
+- **#1 Single-Model All-Rounder — [`checkpoints/galcon_wave14_kd.pt`](../checkpoints/galcon_wave14_kd.pt) (default `--bot search`, `19.9–20.0 ms/tick`, ~`1955 Elo`!):**
   - First multi-round **Replay-Pooled AlphaZero Search-EI** wave using Wave 13's C99 fast engine + `--save-ei-npz` / `--load-ei-npz`:
     - **Round 14A:** `84` Large-heavy (`--large-map-prob 0.42`) Triple-Boss games (`5,231` states, `boss=31–16–9 / 63.4%`, `317.3s`).
     - **Round 14B:** `76` pure single-model (`21 ms`) `W13_KD` Search games (`5,066` states, `boss=29–20–3 / 58.7%`, `164.9s`).

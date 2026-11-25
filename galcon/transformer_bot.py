@@ -28,6 +28,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from galcon.fast_c import HAS_FAST_C, extract_features_fast_c
+from galcon.gen5_model import GalconGen5Transformer, build_galcon_gen5_transformer
 from galcon.sim import (
     PRODUCTION_DIVISOR,
     GalconSim,
@@ -921,6 +922,28 @@ def load_galcon_model_from_checkpoint(
     sd = ckpt["model_state_dict"]
     has_ms = bool(cfg.get("enable_multi_send", False) or any(k.startswith("ms_head.") for k in sd.keys()))
 
+    if model_cls == "GalconGen5Transformer" or any(k.startswith("val_wdl_head.") for k in sd.keys()):
+        fv = int(cfg.get("feature_version", 2))
+        model = GalconGen5Transformer(
+            planet_dim=int(cfg.get("planet_dim", GALCON_PLANET_DIM_V2)),
+            timeline_dim=int(cfg.get("timeline_dim", GALCON_TIMELINE_DIM)),
+            edge_dim=int(cfg.get("edge_dim", GALCON_EDGE_DIM_V2)),
+            redir_dim=int(cfg.get("redir_dim", GALCON_REDIR_DIM)),
+            d_model=int(cfg.get("d_model", 192)),
+            n_heads=int(cfg.get("n_heads", 6)),
+            n_layers=int(cfg.get("n_layers", 6)),
+            dim_ff=int(cfg.get("dim_ff", 384)),
+            edge_hidden=int(cfg.get("edge_hidden", 24)),
+            num_val_queries=int(cfg.get("num_val_queries", 4)),
+            feature_version=fv,
+            dropout=float(cfg.get("dropout", 0.0)),
+        ).to(device)
+        model.load_state_dict(sd)
+        model.has_trained_multi_send = bool(ckpt.get("has_trained_multi_send", True))
+        model.use_canonical_d4_trained = bool(ckpt.get("use_canonical_d4", True))
+        model.eval()
+        return model, fv, has_redir
+
     if model_cls == "GalconPlanetTransformer" or "redir_dim" in cfg or any(
         k.startswith("backbone.") for k in sd.keys()
     ):
@@ -953,8 +976,11 @@ def load_galcon_model_from_checkpoint(
     return model, fv, False
 
 
+_MULTI_SEND_MODELS = (GalconPlanetTransformer, GalconGen5Transformer)
+
+
 class GalconTransformerAgent:
-    """Fast Galcon neural agent powered by ``PlanetTimelineTransformer`` / ``GalconPlanetTransformer``."""
+    """Fast Galcon neural agent powered by ``PlanetTimelineTransformer`` / ``GalconPlanetTransformer`` / ``GalconGen5Transformer``."""
 
     def __init__(
         self,
@@ -969,6 +995,7 @@ class GalconTransformerAgent:
         enable_redirect_overlay: bool = True,
         use_native_redir: bool = True,
         use_multi_send: bool = True,
+        contempt: Optional[float] = None,
         device: str = "cpu",
     ) -> None:
         torch.set_num_threads(1)
@@ -985,6 +1012,8 @@ class GalconTransformerAgent:
         self.model, self.feature_version, self.has_trained_redir = load_galcon_model_from_checkpoint(
             checkpoint_path, device=self.device
         )
+        if contempt is not None and hasattr(self.model, "contempt"):
+            self.model.contempt = float(contempt)
         self.has_trained_multi_send = bool(getattr(self.model, "has_trained_multi_send", False))
         if use_d4_canonical is None:
             self.use_d4_canonical = bool(getattr(self.model, "use_canonical_d4_trained", False))
@@ -1047,17 +1076,21 @@ class GalconTransformerAgent:
         pm_t = torch.from_numpy(pm_b).to(self.device)
 
         want_redir = (
-            isinstance(self.model, GalconPlanetTransformer)
+            isinstance(self.model, _MULTI_SEND_MODELS)
             and redir_enc is not None
             and len(redir_enc.fleet_ids) > 0
         )
         want_ms = (
-            isinstance(self.model, GalconPlanetTransformer)
+            isinstance(self.model, _MULTI_SEND_MODELS)
             and self.model.enable_multi_send
         )
         if ms_only and want_ms:
-            h = self.model.encode_planets(pf_t, tf_t, ef_t, pm_t)
-            ms_logits, ms_fr = self.model.predict_multi_send(h, ef_t)
+            if isinstance(self.model, GalconGen5Transformer):
+                h, e_hid = self.model.encode_planets_and_edges(pf_t, tf_t, ef_t, pm_t)
+                ms_logits, ms_fr = self.model.predict_multi_send(h, ef_t, edge_hidden=e_hid)
+            else:
+                h = self.model.encode_planets(pf_t, tf_t, ef_t, pm_t)
+                ms_logits, ms_fr = self.model.predict_multi_send(h, ef_t)
             legal_t = torch.from_numpy(enc.legal_edges).to(self.device)
             ms_logits = ms_logits.masked_fill(~legal_t.unsqueeze(0), -1e9)
             ms_probs = torch.sigmoid(ms_logits).mean(dim=0).cpu().numpy()
@@ -1084,26 +1117,48 @@ class GalconTransformerAgent:
             )
 
         if want_redir or want_ms:
-            logits, fracs, vals, h = self.model(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
-            redir_probs = None
-            if want_redir and redir_enc is not None:
-                f_cnt = len(redir_enc.fleet_ids)
-                cd_t = torch.from_numpy(
-                    np.broadcast_to(redir_enc.cur_dst_idx[None], (k_b, f_cnt)).copy()
-                ).to(self.device)
-                rf_t = torch.from_numpy(
-                    np.broadcast_to(redir_enc.redir_feats[None], (k_b, f_cnt, n, GALCON_REDIR_DIM)).copy()
-                ).to(self.device)
-                r_logits = self.model.predict_redir_logits(h, cd_t, rf_t, pm_t)
-                redir_probs = F.softmax(r_logits, dim=-1).mean(dim=0).cpu().numpy()
-            ms_probs = None
-            ms_fracs = None
-            if want_ms:
-                ms_logits, ms_fr = self.model.predict_multi_send(h, ef_t)
+            if isinstance(self.model, GalconGen5Transformer):
+                h, e_hid = self.model.encode_planets_and_edges(pf_t, tf_t, ef_t, pm_t)
+                ms_logits, ms_fr = self.model.predict_multi_send(h, ef_t, edge_hidden=e_hid)
+                vals = self.model.decode_value_from_hidden(h, pm_t)
+                logits = torch.cat([torch.zeros_like(ms_logits[:, :, :1]), ms_logits], dim=-1)
+                fracs = ms_fr
                 legal_t = torch.from_numpy(enc.legal_edges).to(self.device)
-                ms_logits = ms_logits.masked_fill(~legal_t.unsqueeze(0), -1e9)
-                ms_probs = torch.sigmoid(ms_logits).mean(dim=0).cpu().numpy()
+                ms_logits_m = ms_logits.masked_fill(~legal_t.unsqueeze(0), -1e9)
+                ms_probs = torch.sigmoid(ms_logits_m).mean(dim=0).cpu().numpy()
                 ms_fracs = ms_fr.mean(dim=0).cpu().numpy()
+                redir_probs = None
+                if want_redir and redir_enc is not None:
+                    f_cnt = len(redir_enc.fleet_ids)
+                    cd_t = torch.from_numpy(
+                        np.broadcast_to(redir_enc.cur_dst_idx[None], (k_b, f_cnt)).copy()
+                    ).to(self.device)
+                    rf_t = torch.from_numpy(
+                        np.broadcast_to(redir_enc.redir_feats[None], (k_b, f_cnt, n, GALCON_REDIR_DIM)).copy()
+                    ).to(self.device)
+                    r_logits = self.model.predict_redir_logits(h, cd_t, rf_t, pm_t)
+                    redir_probs = F.softmax(r_logits, dim=-1).mean(dim=0).cpu().numpy()
+            else:
+                logits, fracs, vals, h = self.model(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
+                redir_probs = None
+                if want_redir and redir_enc is not None:
+                    f_cnt = len(redir_enc.fleet_ids)
+                    cd_t = torch.from_numpy(
+                        np.broadcast_to(redir_enc.cur_dst_idx[None], (k_b, f_cnt)).copy()
+                    ).to(self.device)
+                    rf_t = torch.from_numpy(
+                        np.broadcast_to(redir_enc.redir_feats[None], (k_b, f_cnt, n, GALCON_REDIR_DIM)).copy()
+                    ).to(self.device)
+                    r_logits = self.model.predict_redir_logits(h, cd_t, rf_t, pm_t)
+                    redir_probs = F.softmax(r_logits, dim=-1).mean(dim=0).cpu().numpy()
+                ms_probs = None
+                ms_fracs = None
+                if want_ms:
+                    ms_logits, ms_fr = self.model.predict_multi_send(h, ef_t)
+                    legal_t = torch.from_numpy(enc.legal_edges).to(self.device)
+                    ms_logits = ms_logits.masked_fill(~legal_t.unsqueeze(0), -1e9)
+                    ms_probs = torch.sigmoid(ms_logits).mean(dim=0).cpu().numpy()
+                    ms_fracs = ms_fr.mean(dim=0).cpu().numpy()
         else:
             logits, fracs, vals = self.model(pf_t, tf_t, ef_t, pm_t)
             redir_probs = None
@@ -1316,6 +1371,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         enable_rescue_snipe: bool = False,
         enable_opp_direct_rush: bool = False,
         prior_bonus: float = 0.015,
+        contempt: Optional[float] = None,
         device: str = "cpu",
     ) -> None:
         super().__init__(
@@ -1325,8 +1381,11 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
             multi_send_threshold=multi_send_threshold,
             use_d4_tta=use_d4_tta,
             use_d4_canonical=use_d4_canonical,
+            contempt=contempt,
             device=device,
         )
+        if contempt is None and isinstance(self.model, GalconGen5Transformer):
+            self.model.contempt = 0.30
         self.rollout_horizon = max(4, int(rollout_horizon))
         self.num_plies = max(1, min(3, int(num_plies))) if reactive_mid_ply else 1
         self.time_budget_sec = float(time_budget_sec)
@@ -1399,10 +1458,14 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         pm_t = torch.from_numpy(pm_b).to(self.device)
         le_t = torch.from_numpy(le_b).to(self.device)
 
-        want_ms = isinstance(self.model, GalconPlanetTransformer) and self.model.enable_multi_send
+        want_ms = isinstance(self.model, _MULTI_SEND_MODELS) and self.model.enable_multi_send
         if ms_only and want_ms:
-            h = self.model.encode_planets(pf_t, tf_t, ef_t, pm_t)
-            ms_l, ms_f = self.model.predict_multi_send(h, ef_t)
+            if isinstance(self.model, GalconGen5Transformer):
+                h, e_hid = self.model.encode_planets_and_edges(pf_t, tf_t, ef_t, pm_t)
+                ms_l, ms_f = self.model.predict_multi_send(h, ef_t, edge_hidden=e_hid)
+            else:
+                h = self.model.encode_planets(pf_t, tf_t, ef_t, pm_t)
+                ms_l, ms_f = self.model.predict_multi_send(h, ef_t)
             ms_l = ms_l.masked_fill(~le_t, -1e9)
             ms_p = torch.sigmoid(ms_l).cpu().numpy()
             ms_f_np = ms_f.cpu().numpy()
@@ -1420,8 +1483,15 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
             )
 
         if want_ms:
-            logits, fracs, vals, h = self.model(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
-            ms_l, ms_f = self.model.predict_multi_send(h, ef_t)
+            if isinstance(self.model, GalconGen5Transformer):
+                h, e_hid = self.model.encode_planets_and_edges(pf_t, tf_t, ef_t, pm_t)
+                ms_l, ms_f = self.model.predict_multi_send(h, ef_t, edge_hidden=e_hid)
+                vals = self.model.decode_value_from_hidden(h, pm_t)
+                logits = torch.cat([torch.zeros_like(ms_l[:, :, :1]), ms_l], dim=-1)
+                fracs = ms_f
+            else:
+                logits, fracs, vals, h = self.model(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
+                ms_l, ms_f = self.model.predict_multi_send(h, ef_t)
             ms_l = ms_l.masked_fill(~le_t, -1e9)
             ms_p = torch.sigmoid(ms_l).cpu().numpy()
             ms_f_np = ms_f.cpu().numpy()
@@ -1446,7 +1516,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         tf_t = torch.from_numpy(np.stack([e.timeline_feats for e in leaf_encs], axis=0)).to(self.device)
         ef_t = torch.from_numpy(np.stack([e.edge_feats for e in leaf_encs], axis=0)).to(self.device)
         pm_t = torch.ones((k, n), dtype=torch.bool, device=self.device)
-        if isinstance(self.model, GalconPlanetTransformer):
+        if isinstance(self.model, _MULTI_SEND_MODELS):
             h = self.model.encode_planets(pf_t, tf_t, ef_t, pm_t)
             vals = self.model.decode_value_from_hidden(h, pm_t)
         else:
@@ -2331,10 +2401,14 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
             vw = float(self.value_weights[idx]) if need_value else 0.0
             if w <= 0.0 and vw <= 0.0:
                 continue
-            want_ms = (w > 0.0) and isinstance(ag.model, GalconPlanetTransformer) and ag.model.enable_multi_send
+            want_ms = (w > 0.0) and isinstance(ag.model, _MULTI_SEND_MODELS) and ag.model.enable_multi_send
             if ms_only and want_ms:
-                h = ag.model.encode_planets(pf_t, tf_t, ef_t, pm_t)
-                ms_l, ms_f = ag.model.predict_multi_send(h, ef_t)
+                if isinstance(ag.model, GalconGen5Transformer):
+                    h, e_hid = ag.model.encode_planets_and_edges(pf_t, tf_t, ef_t, pm_t)
+                    ms_l, ms_f = ag.model.predict_multi_send(h, ef_t, edge_hidden=e_hid)
+                else:
+                    h = ag.model.encode_planets(pf_t, tf_t, ef_t, pm_t)
+                    ms_l, ms_f = ag.model.predict_multi_send(h, ef_t)
                 ms_l = ms_l.masked_fill(~le_t, -1e9)
                 ms_p = torch.sigmoid(ms_l).cpu().numpy()
                 ms_f_np = ms_f.cpu().numpy()
@@ -2345,8 +2419,15 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
                     v_sum += vw * ag.model.decode_value_from_hidden(h, pm_t).cpu().numpy()
                 continue
             if want_ms:
-                logits, fracs, vals, h = ag.model(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
-                ms_l, ms_f = ag.model.predict_multi_send(h, ef_t)
+                if isinstance(ag.model, GalconGen5Transformer):
+                    h, e_hid = ag.model.encode_planets_and_edges(pf_t, tf_t, ef_t, pm_t)
+                    ms_l, ms_f = ag.model.predict_multi_send(h, ef_t, edge_hidden=e_hid)
+                    vals = ag.model.decode_value_from_hidden(h, pm_t)
+                    logits = torch.cat([torch.zeros_like(ms_l[:, :, :1]), ms_l], dim=-1)
+                    fracs = ms_f
+                else:
+                    logits, fracs, vals, h = ag.model(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
+                    ms_l, ms_f = ag.model.predict_multi_send(h, ef_t)
                 ms_l = ms_l.masked_fill(~le_t, -1e9)
                 ms_p = torch.sigmoid(ms_l).cpu().numpy()
                 ms_f_np = ms_f.cpu().numpy()
@@ -2387,7 +2468,7 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
             vw = float(self.value_weights[idx])
             if vw <= 0.0:
                 continue
-            if isinstance(ag.model, GalconPlanetTransformer):
+            if isinstance(ag.model, _MULTI_SEND_MODELS):
                 h = ag.model.encode_planets(pf_t, tf_t, ef_t, pm_t)
                 vals = ag.model.decode_value_from_hidden(h, pm_t)
             else:

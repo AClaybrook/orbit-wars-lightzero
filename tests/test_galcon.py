@@ -1140,4 +1140,87 @@ def test_wave13_fast_c_canonical_d4_vectorized_redir_and_ei_cache(tmp_path):
     assert isinstance(HAS_FAST_C, bool)
 
 
+def test_wave15_gen5_edge_gated_wdl_architecture(tmp_path):
+    """Verify Gen 5 Edge-Gated Residual-Edge Transformer, WDL value head + contempt, Search agent, and WDL loss."""
+    import numpy as np
+    from galcon.gen5_model import GalconGen5Transformer, build_galcon_gen5_transformer
+    from galcon.sim import GalconSim
+    from galcon.train import _gen4_multisend_loss, _load_gen4_policy_from_ckpt
+    from galcon.transformer_bot import (
+        GalconSearchTransformerAgent,
+        GalconTransformerAgent,
+        extract_galcon_features,
+    )
+
+    torch.manual_seed(15)
+    model = build_galcon_gen5_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128, edge_hidden=16)
+    ckpt = tmp_path / "gen5_test.pt"
+    torch.save(
+        {
+            "model_config": model.config,
+            "model_state_dict": model.state_dict(),
+            "has_trained_redir": True,
+            "has_trained_multi_send": True,
+            "use_canonical_d4": True,
+        },
+        ckpt,
+    )
+
+    # 1. Loader auto-detects GalconGen5Transformer in both transformer_bot and train
+    loaded = _load_gen4_policy_from_ckpt(ckpt)
+    assert isinstance(loaded, GalconGen5Transformer)
+
+    # 2. WDL value head + contempt behavior
+    sim = GalconSim.create(seed=1501, num_planets=14, width=400.0, height=240.0, symmetric=True)
+    enc = extract_galcon_features(sim, 1, feature_version=2)
+    pf = torch.from_numpy(enc.planet_feats[None])
+    tf = torch.from_numpy(enc.timeline_feats[None])
+    ef = torch.from_numpy(enc.edge_feats[None])
+    pm = torch.ones((1, len(enc.planet_ids)), dtype=torch.bool)
+    with torch.no_grad():
+        h = loaded.encode_planets(pf, tf, ef, pm)
+        wdl_logits = loaded.decode_wdl_from_hidden(h, pm)
+        wdl_p = torch.softmax(wdl_logits, dim=-1)
+        assert wdl_p.shape == (1, 3) and abs(float(wdl_p.sum().item()) - 1.0) < 1e-5
+        v0 = float(loaded.decode_value_from_hidden(h, pm, contempt=0.0).item())
+        vc = float(loaded.decode_value_from_hidden(h, pm, contempt=0.25).item())
+        assert vc <= v0 + 1e-6  # positive contempt lowers value proportionally to P(draw)
+
+    # 3. Pure and Search agents run seamlessly on Gen 5 checkpoints (default contempt=0.30, explicit override works)
+    ag_pure = GalconTransformerAgent(ckpt, use_d4_canonical=True, use_d4_tta=False)
+    ag_search_def = GalconSearchTransformerAgent(ckpt, use_d4_canonical=True, use_d4_tta=False)
+    ag_search = GalconSearchTransformerAgent(ckpt, use_d4_canonical=True, use_d4_tta=False, contempt=0.10)
+    assert isinstance(ag_pure.model, GalconGen5Transformer)
+    assert abs(ag_search_def.model.contempt - 0.30) < 1e-6
+    assert abs(ag_search.model.contempt - 0.10) < 1e-6
+    _ = ag_pure.act(sim, 1)
+    best, cands, scores, _ = ag_search.act_with_search_info(sim, 1)
+    assert len(cands) >= 1 and len(scores) == len(cands)
+
+    # 4. Dropout config preserves 100% state_dict compatibility with dropout=0.0 models
+    m_nodrop = build_galcon_gen5_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128, edge_hidden=16, dropout=0.0)
+    m_nodrop.load_state_dict(model.state_dict())
+    m_nodrop.eval()
+    model.eval()
+    with torch.no_grad():
+        assert torch.allclose(m_nodrop.encode_planets(pf, tf, ef, pm), model.encode_planets(pf, tf, ef, pm), atol=1e-6)
+
+    # 5. Calibrated quadratic soft-WDL + Soft-KD loss backward pass works end-to-end
+    n = len(enc.planet_ids)
+    le = torch.from_numpy(enc.legal_edges[None])
+    om = torch.from_numpy(enc.owned_mask[None])
+    ms_tar = torch.zeros((1, n, n), dtype=torch.float32)
+    ms_fr = torch.zeros((1, n, n), dtype=torch.float32)
+    t_msp = torch.full((1, n, n), 0.1, dtype=torch.float32)
+    vtar = torch.tensor([0.6], dtype=torch.float32)
+    aux_o = torch.zeros((1, n), dtype=torch.long)
+    aux_s = torch.zeros((1, n), dtype=torch.float32)
+    model.train()
+    loss, metrics = _gen4_multisend_loss(
+        model, pf, tf, ef, le, om, pm, ms_tar, ms_fr, vtar, aux_o, aux_s, pos_weight=2.2, t_msp=t_msp, kd_alpha=0.40
+    )
+    assert torch.isfinite(loss) and metrics["bce"] >= 0.0 and metrics["v_loss"] >= 0.0
+    loss.backward()
+
+
 
