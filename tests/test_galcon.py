@@ -722,5 +722,144 @@ def test_wave9_map_adaptive_adversarial_and_decoupled_ensemble_value_weights(tmp
     assert abs(float(leaf_v[0]) - v1) < 1e-5
 
 
+def test_wave10_botwar_lua_bridge_and_sb_stats(tmp_path: Path):
+    import shutil
+
+    if not (shutil.which("lua5.3") or shutil.which("lua")):
+        return
+    from galcon.lua_bridge import GalconLuaBotBridge
+
+    mock_botwar = tmp_path / "mock_botwar.lua"
+    mock_botwar.write_text(
+        """
+function _sandbox_init(env)
+    function env.bots_mock_waffle(params)
+        local items = params.items
+        local user = params.user
+        -- Exercise Lua 5.3 pow shim and sb_stats() budget guard inside botwar sandbox
+        local _p = env.pow(2, 3)
+        local guard = 0
+        repeat
+            guard = guard + 1
+        until env.sb_stats() > 10 or guard > 100
+        assert(guard <= 20, "sb_stats() budget did not increment")
+
+        local my_fleets = {}
+        local my_planets = {}
+        local targets = {}
+        for k, it in pairs(items) do
+            if it.is_fleet and it.owner == user then
+                my_fleets[#my_fleets + 1] = k
+            elseif it.is_planet then
+                if it.owner == user and it.ships > 10 then
+                    my_planets[#my_planets + 1] = k
+                elseif it.owner ~= user then
+                    targets[#targets + 1] = k
+                end
+            end
+        end
+        if #my_fleets > 0 and #targets > 0 then
+            local dst = targets[1]
+            for _, tk in ipairs(targets) do
+                if items[tk].n ~= items[my_fleets[1]].target then
+                    dst = tk
+                    break
+                end
+            end
+            return { percent = 50, from = my_fleets, to = dst }
+        end
+        if #my_planets > 0 and #targets > 0 then
+            return { percent = 50, from = my_planets, to = targets[1] }
+        end
+        return nil
+    end
+end
+""",
+        encoding="utf-8",
+    )
+
+    bridge = GalconLuaBotBridge(f"{mock_botwar}::bots_mock_waffle")
+    try:
+        assert bridge.loop_fn == "bots_mock_waffle"
+        sim = GalconSim.create(seed=1010, num_planets=10, width=280.0, height=180.0)
+        o0 = bridge.act(sim, 1)
+        assert any(isinstance(o, SendOrder) and o.src_id == 1 for o in o0)
+        sim.step({1: o0})
+        assert len(sim.fleets) >= 1
+        o1 = bridge.act(sim, 1)
+        assert any(isinstance(o, RedirOrder) for o in o1)
+        # Verify clean reset on a fresh game at tick 0
+        sim2 = GalconSim.create(seed=1011, num_planets=10, width=280.0, height=180.0)
+        o2 = bridge.act(sim2, 2)
+        assert any(isinstance(o, SendOrder) and o.src_id == 2 for o in o2)
+    finally:
+        bridge.close()
 
 
+def test_wave10_triple_boss_schedule_val_gate_and_lua_spec(tmp_path: Path):
+    import random
+    from galcon.train import (
+        _build_stratified_gen4_opp_schedule,
+        _compute_gen4_val_gate,
+        _lua_spec_exists,
+        _lua_spec_label,
+        _lua_spec_resolve,
+        _should_promote_gen4_val,
+    )
+
+    # 1. path::func helper parsing
+    fake_lua = tmp_path / "mod_botwar_testing.lua"
+    fake_lua.write_text("-- mock\n", encoding="utf-8")
+    spec = f"{fake_lua}::bots_waffle3z_optimized"
+    assert _lua_spec_exists(spec)
+    assert not _lua_spec_exists(f"{tmp_path / 'missing.lua'}::bots_waffle3z_optimized")
+    assert _lua_spec_label(spec) == "bots_waffle3z_optimized"
+    assert _lua_spec_resolve(spec).endswith("::bots_waffle3z_optimized")
+
+    # 2. Triple-boss stratified schedule allocates Sparky, Waffle3z-GA, EsparanBot, snap, and heur
+    sched = _build_stratified_gen4_opp_schedule(
+        20,
+        has_lua1=True,
+        has_lua2=True,
+        has_lua3=True,
+        pool_size=4,
+        rng=random.Random(77),
+        sparky_share=0.35,
+        waffle_share=0.20,
+        esparan_share=0.10,
+    )
+    assert len(sched) == 20
+    assert sum(1 for k, _ in sched if k == "boss") == 7
+    assert sum(1 for k, _ in sched if k == "boss3") == 4
+    assert sum(1 for k, _ in sched if k == "boss2") == 2
+    assert sum(1 for k, _ in sched if k == "snap") == 4
+    assert sum(1 for k, _ in sched if k in {"tactical", "macro", "rusher", "classic"}) == 3
+
+    # 3. Triple-boss validation gate weights (0.40 spky + 0.25 waff + 0.15 esp + 0.10 anc + 0.10 heur)
+    start = _compute_gen4_val_gate(
+        {"boss": (8.0, 16), "boss3": (6.0, 12), "boss2": (6.0, 8), "anc": (4.0, 8), "heur": (10.0, 12)},
+        has_lua1=True,
+        has_lua2=True,
+        has_lua3=True,
+    )
+    assert abs(start["waff"] - 0.50) < 1e-9
+    expected_comp = 0.40 * 0.50 + 0.25 * 0.50 + 0.15 * 0.75 + 0.10 * 0.50 + 0.10 * (10.0 / 12.0)
+    assert abs(start["comp"] - expected_comp) < 1e-6
+
+    # Reject a checkpoint that drops Waffle3z heavily while farming EsparanBot + heuristics
+    regressed_waffle = _compute_gen4_val_gate(
+        {"boss": (8.0, 16), "boss3": (3.0, 12), "boss2": (8.0, 8), "anc": (8.0, 8), "heur": (12.0, 12)},
+        has_lua1=True,
+        has_lua2=True,
+        has_lua3=True,
+    )
+    assert not _should_promote_gen4_val(regressed_waffle, start, start, has_lua1=True, has_lua3=True)
+
+    # Promote genuine Sparky + Waffle3z multi-boss gain
+    improved = _compute_gen4_val_gate(
+        {"boss": (9.0, 16), "boss3": (8.0, 12), "boss2": (6.0, 8), "anc": (4.0, 8), "heur": (10.0, 12)},
+        has_lua1=True,
+        has_lua2=True,
+        has_lua3=True,
+    )
+    assert _should_promote_gen4_val(improved, start, start, has_lua1=True, has_lua3=True)

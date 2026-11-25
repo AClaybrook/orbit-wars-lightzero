@@ -2400,6 +2400,36 @@ def rl_mirror_league_ppo_gen3(
 # ---------------------------------------------------------------------------
 
 
+def _lua_spec_exists(spec: Optional[str | Path]) -> bool:
+    if spec is None:
+        return False
+    raw = str(spec).strip()
+    if not raw:
+        return False
+    path_part = raw.rsplit("::", 1)[0] if "::" in raw else raw
+    return Path(path_part).is_file()
+
+
+def _lua_spec_resolve(spec: Optional[str | Path]) -> str:
+    if not _lua_spec_exists(spec):
+        return ""
+    raw = str(spec).strip()
+    if "::" in raw:
+        path_part, fn_part = raw.rsplit("::", 1)
+        return f"{Path(path_part).resolve()}::{fn_part.strip()}"
+    return str(Path(raw).resolve())
+
+
+def _lua_spec_label(spec: Optional[str | Path]) -> str:
+    if spec is None:
+        return ""
+    raw = str(spec).strip()
+    if "::" in raw:
+        _, fn_part = raw.rsplit("::", 1)
+        return fn_part.strip() or Path(raw.rsplit("::", 1)[0]).stem
+    return Path(raw).stem
+
+
 def _gen4_ei_worker(
     ckpt_path_str: str,
     num_games: int,
@@ -2410,6 +2440,7 @@ def _gen4_ei_worker(
     lua_opp2_str: str = "",
     ckpt_path2_str: str = "",
     large_map_prob: float = 0.30,
+    lua_opp3_str: str = "",
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     torch.set_num_threads(1)
     return collect_gen4_multisend_ei_dataset(
@@ -2417,8 +2448,9 @@ def _gen4_ei_worker(
         num_games=num_games,
         seed=seed,
         rollout_horizon=rollout_horizon,
-        lua_opp_path=Path(lua_opp_str) if lua_opp_str else None,
-        lua_opp2_path=Path(lua_opp2_str) if lua_opp2_str else None,
+        lua_opp_path=lua_opp_str if lua_opp_str else None,
+        lua_opp2_path=lua_opp2_str if lua_opp2_str else None,
+        lua_opp3_path=lua_opp3_str if lua_opp3_str else None,
         ckpt_path2=Path(ckpt_path2_str) if ckpt_path2_str else None,
         large_map_prob=large_map_prob,
         filter_losing_policy=filter_losing_policy,
@@ -2432,17 +2464,19 @@ def collect_gen4_multisend_ei_dataset(
     num_games: int = 56,
     seed: int = 30000,
     rollout_horizon: int = 16,
-    lua_opp_path: Optional[Path] = None,
-    lua_opp2_path: Optional[Path] = None,
+    lua_opp_path: Optional[str | Path] = None,
+    lua_opp2_path: Optional[str | Path] = None,
+    lua_opp3_path: Optional[str | Path] = None,
     ckpt_path2: Optional[Path] = None,
     large_map_prob: float = 0.30,
     filter_losing_policy: bool = True,
     workers: int = 1,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
-    """Collect winning/drawing multi-send trajectories from our Opponent-Adaptive 2-Ply Reactive Search.
+    """Collect winning/drawing multi-send trajectories from our Opponent-Adaptive Reactive Search.
 
-    When ``ckpt_path2`` is supplied, uses ``EnsembleGalconSearchAgent([ckpt_path, ckpt_path2])`` as the
-    teacher to distill 2-model Ensemble Search strength directly into a single fast Pure student.
+    Supports up to 3 external Lua bosses (e.g. ``Sparky v1.6`` + ``EsparanBot v0.2`` + ``Waffle3z-GA`` via
+    ``path.lua::bots_waffle3z_optimized``). When ``ckpt_path2`` is supplied, uses ``EnsembleGalconSearchAgent``
+    as the teacher to distill 2-model Ensemble Search directly into a single fast student.
     """
     if workers > 1 and num_games >= 2:
         n_w = min(int(workers), int(num_games))
@@ -2450,8 +2484,9 @@ def collect_gen4_multisend_ei_dataset(
         rem = num_games % n_w
         shards = [base + (1 if i < rem else 0) for i in range(n_w)]
         t_par = time.time()
-        lua_str = str(lua_opp_path.resolve()) if (lua_opp_path is not None and lua_opp_path.is_file()) else ""
-        lua2_str = str(lua_opp2_path.resolve()) if (lua_opp2_path is not None and lua_opp2_path.is_file()) else ""
+        lua_str = _lua_spec_resolve(lua_opp_path)
+        lua2_str = _lua_spec_resolve(lua_opp2_path)
+        lua3_str = _lua_spec_resolve(lua_opp3_path)
         ckpt2_str = str(ckpt_path2.resolve()) if (ckpt_path2 is not None and ckpt_path2.is_file()) else ""
         ctx = mp.get_context("spawn")
         with ProcessPoolExecutor(max_workers=n_w, mp_context=ctx) as ex:
@@ -2467,6 +2502,7 @@ def collect_gen4_multisend_ei_dataset(
                     lua2_str,
                     ckpt2_str,
                     large_map_prob,
+                    lua3_str,
                 )
                 for idx, cnt in enumerate(shards)
             ]
@@ -2484,14 +2520,19 @@ def collect_gen4_multisend_ei_dataset(
     rng = random.Random(seed)
     lua_opp = None
     lua_opp2 = None
-    if lua_opp_path is not None and lua_opp_path.is_file():
+    lua_opp3 = None
+    if _lua_spec_exists(lua_opp_path):
         from galcon.lua_bridge import GalconLuaBotBridge
 
-        lua_opp = GalconLuaBotBridge(lua_opp_path)
-    if lua_opp2_path is not None and lua_opp2_path.is_file():
+        lua_opp = GalconLuaBotBridge(_lua_spec_resolve(lua_opp_path))
+    if _lua_spec_exists(lua_opp2_path):
         from galcon.lua_bridge import GalconLuaBotBridge
 
-        lua_opp2 = GalconLuaBotBridge(lua_opp2_path)
+        lua_opp2 = GalconLuaBotBridge(_lua_spec_resolve(lua_opp2_path))
+    if _lua_spec_exists(lua_opp3_path):
+        from galcon.lua_bridge import GalconLuaBotBridge
+
+        lua_opp3 = GalconLuaBotBridge(_lua_spec_resolve(lua_opp3_path))
 
     if ckpt_path2 is not None and ckpt_path2.is_file():
         search_ag = EnsembleGalconSearchAgent(
@@ -2532,6 +2573,7 @@ def collect_gen4_multisend_ei_dataset(
     bot_idx = 0
     boss_idx = 0
     boss2_idx = 0
+    boss3_idx = 0
 
     try:
         for g in range(num_games):
@@ -2541,7 +2583,38 @@ def collect_gen4_multisend_ei_dataset(
 
             is_selfplay = False
             is_boss = False
-            if lua_opp is not None and lua_opp2 is not None:
+            if lua_opp is not None and lua_opp2 is not None and lua_opp3 is not None:
+                slot = g % 6
+                if slot in (0, 1):
+                    is_boss = True
+                    boss_idx += 1
+                    opp_bot = lua_opp
+                    our_pid = 1 if (boss_idx % 2 == 1) else 2
+                    opp_pid = 2 if our_pid == 1 else 1
+                elif slot == 2:
+                    is_boss = True
+                    boss3_idx += 1
+                    opp_bot = lua_opp3
+                    our_pid = 1 if (boss3_idx % 2 == 1) else 2
+                    opp_pid = 2 if our_pid == 1 else 1
+                elif slot == 3:
+                    is_boss = True
+                    boss2_idx += 1
+                    opp_bot = lua_opp2
+                    our_pid = 1 if (boss2_idx % 2 == 1) else 2
+                    opp_pid = 2 if our_pid == 1 else 1
+                elif slot == 4:
+                    is_selfplay = True
+                    opp_bot = None
+                    our_pid = opp_pid = 0
+                else:
+                    opp_kind = opp_cycle[bot_idx % len(opp_cycle)]
+                    bot_idx += 1
+                    opp_bot = _make_sparring_bot(rng, opp_kind)
+                    our_pid = 1 if (bot_idx % 2 == 0) else 2
+                    opp_pid = 2 if our_pid == 1 else 1
+            elif lua_opp is not None and (lua_opp2 is not None or lua_opp3 is not None):
+                sec_boss = lua_opp3 if lua_opp3 is not None else lua_opp2
                 slot = g % 5
                 if slot in (0, 1):
                     is_boss = True
@@ -2552,7 +2625,7 @@ def collect_gen4_multisend_ei_dataset(
                 elif slot == 2:
                     is_boss = True
                     boss2_idx += 1
-                    opp_bot = lua_opp2
+                    opp_bot = sec_boss
                     our_pid = 1 if (boss2_idx % 2 == 1) else 2
                     opp_pid = 2 if our_pid == 1 else 1
                 elif slot == 3:
@@ -2689,6 +2762,8 @@ def collect_gen4_multisend_ei_dataset(
             lua_opp.close()
         if lua_opp2 is not None:
             lua_opp2.close()
+        if lua_opp3 is not None:
+            lua_opp3.close()
 
     data = {
         "planet_feats": np.stack(pf_l).astype(np.float32),
@@ -3222,6 +3297,7 @@ def _gen4_ppo_rollout_worker(args_tuple):
         pair_jobs,
         lua_opp_str,
         lua_opp2_str,
+        lua_opp3_str,
         gamma,
         gae_lam,
         frac_std,
@@ -3249,10 +3325,13 @@ def _gen4_ppo_rollout_worker(args_tuple):
 
     lua_opp = None
     lua_opp2 = None
+    lua_opp3 = None
     buf: Dict[str, List] = {
         k: [] for k in ("pf", "tf", "ef", "le", "om", "pm", "acts", "f_acts", "old_lp", "adv", "ret", "aux_o", "aux_s")
     }
-    wins = sp_wins = sp_eps = bot_wins = bot_eps = boss_wins = boss_eps = boss2_wins = boss2_eps = split_pairs = total_eps = 0
+    wins = sp_wins = sp_eps = bot_wins = bot_eps = 0
+    boss_wins = boss_eps = boss2_wins = boss2_eps = boss3_wins = boss3_eps = 0
+    split_pairs = total_eps = 0
 
     try:
         if lua_opp_str:
@@ -3263,12 +3342,17 @@ def _gen4_ppo_rollout_worker(args_tuple):
             from galcon.lua_bridge import GalconLuaBotBridge
 
             lua_opp2 = GalconLuaBotBridge(lua_opp2_str)
+        if lua_opp3_str:
+            from galcon.lua_bridge import GalconLuaBotBridge
+
+            lua_opp3 = GalconLuaBotBridge(lua_opp3_str)
 
         for map_seed, n_pl, w, h, sym, opp_kind, opp_idx in pair_jobs:
             opp_snap = snap_map[opp_idx] if opp_kind == "snap" else None
             opp_bot = None
             is_boss = False
             is_boss2 = False
+            is_boss3 = False
             if opp_kind == "boss":
                 opp_bot = lua_opp
                 is_boss = True
@@ -3277,6 +3361,13 @@ def _gen4_ppo_rollout_worker(args_tuple):
                     opp_bot = lua_opp2
                     is_boss = True
                     is_boss2 = True
+                else:
+                    opp_bot = _make_sparring_bot(w_rng, "tactical")
+            elif opp_kind == "boss3":
+                if lua_opp3 is not None:
+                    opp_bot = lua_opp3
+                    is_boss = True
+                    is_boss3 = True
                 else:
                     opp_bot = _make_sparring_bot(w_rng, "tactical")
             elif opp_kind != "snap":
@@ -3297,7 +3388,10 @@ def _gen4_ppo_rollout_worker(args_tuple):
             total_eps += 2
             won_a, won_b = ep_a[5], ep_b[5]
             wins += won_a + won_b
-            if is_boss2:
+            if is_boss3:
+                boss3_eps += 2
+                boss3_wins += won_a + won_b
+            elif is_boss2:
                 boss2_eps += 2
                 boss2_wins += won_a + won_b
             elif is_boss:
@@ -3315,9 +3409,26 @@ def _gen4_ppo_rollout_worker(args_tuple):
             lua_opp.close()
         if lua_opp2 is not None:
             lua_opp2.close()
+        if lua_opp3 is not None:
+            lua_opp3.close()
 
     arr_buf = {k: np.stack(v) for k, v in buf.items()} if buf["ret"] else {}
-    return arr_buf, wins, sp_wins, sp_eps, bot_wins, bot_eps, boss_wins, boss_eps, boss2_wins, boss2_eps, split_pairs, total_eps
+    return (
+        arr_buf,
+        wins,
+        sp_wins,
+        sp_eps,
+        bot_wins,
+        bot_eps,
+        boss_wins,
+        boss_eps,
+        boss2_wins,
+        boss2_eps,
+        boss3_wins,
+        boss3_eps,
+        split_pairs,
+        total_eps,
+    )
 
 
 def _build_stratified_gen4_opp_schedule(
@@ -3329,11 +3440,13 @@ def _build_stratified_gen4_opp_schedule(
     rng: random.Random,
     sparky_share: float = 0.42,
     esparan_share: float = 0.17,
+    has_lua3: bool = False,
+    waffle_share: float = 0.15,
 ) -> List[Tuple[str, int]]:
     """Allocate deterministic, low-variance opponent pairs per PPO iteration.
 
     Prevents RNG starvation where Sparky v1.6 could drop to 1/12 pairs in an iteration
-    while keeping EsparanBot v0.2, snapshot self-play, and built-in heuristics balanced.
+    while keeping Waffle3z-GA, EsparanBot v0.2, snapshot self-play, and heuristics balanced.
     """
     n = max(1, int(pairs_per_iter))
     heur_cycle = ["tactical", "macro", "rusher", "classic"]
@@ -3346,7 +3459,29 @@ def _build_stratified_gen4_opp_schedule(
         idx = 0 if rng.random() < 0.45 else rng.randrange(pool_size)
         return ("snap", idx)
 
-    if has_lua1 and has_lua2:
+    if has_lua1 and has_lua2 and has_lua3:
+        n_b1 = min(n, max(1, int(round(n * max(0.0, sparky_share)))))
+        n_b3 = min(max(0, n - n_b1), max(1, int(round(n * max(0.0, waffle_share)))) if waffle_share > 0 else 0)
+        n_b2 = min(max(0, n - n_b1 - n_b3), max(1, int(round(n * max(0.0, esparan_share)))) if esparan_share > 0 else 0)
+        rem = max(0, n - n_b1 - n_b2 - n_b3)
+        n_snap = int(round(rem * 0.60))
+        n_heur = max(0, rem - n_snap)
+        sched.extend([("boss", -1)] * n_b1)
+        sched.extend([("boss3", -1)] * n_b3)
+        sched.extend([("boss2", -1)] * n_b2)
+        sched.extend([_pick_snap() for _ in range(n_snap)])
+        sched.extend([(heur_cycle[i % len(heur_cycle)], -1) for i in range(n_heur)])
+    elif has_lua1 and has_lua3:
+        n_b1 = min(n, max(1, int(round(n * max(0.0, sparky_share)))))
+        n_b3 = min(max(0, n - n_b1), max(1, int(round(n * max(0.0, waffle_share)))) if waffle_share > 0 else 0)
+        rem = max(0, n - n_b1 - n_b3)
+        n_snap = int(round(rem * 0.60))
+        n_heur = max(0, rem - n_snap)
+        sched.extend([("boss", -1)] * n_b1)
+        sched.extend([("boss3", -1)] * n_b3)
+        sched.extend([_pick_snap() for _ in range(n_snap)])
+        sched.extend([(heur_cycle[i % len(heur_cycle)], -1) for i in range(n_heur)])
+    elif has_lua1 and has_lua2:
         n_b1 = min(n, max(1, int(round(n * max(0.0, sparky_share)))))
         n_b2 = min(max(0, n - n_b1), max(1, int(round(n * max(0.0, esparan_share)))) if esparan_share > 0 else 0)
         rem = max(0, n - n_b1 - n_b2)
@@ -3379,16 +3514,22 @@ def _compute_gen4_val_gate(
     *,
     has_lua1: bool,
     has_lua2: bool,
+    has_lua3: bool = False,
 ) -> Dict[str, float]:
-    """Compute raw and Sparky-weighted composite validation scores from per-bucket (score, games)."""
+    """Compute raw and multi-boss weighted composite validation scores from per-bucket (score, games)."""
     tot_sc = sum(v[0] for v in buckets.values())
     tot_g = max(1, sum(v[1] for v in buckets.values()))
     raw = tot_sc / tot_g
     spky = buckets["boss"][0] / max(1, buckets["boss"][1]) if "boss" in buckets and buckets["boss"][1] > 0 else raw
     esp = buckets["boss2"][0] / max(1, buckets["boss2"][1]) if "boss2" in buckets and buckets["boss2"][1] > 0 else raw
+    waff = buckets["boss3"][0] / max(1, buckets["boss3"][1]) if "boss3" in buckets and buckets["boss3"][1] > 0 else raw
     anc = buckets["anc"][0] / max(1, buckets["anc"][1]) if "anc" in buckets and buckets["anc"][1] > 0 else raw
     heur = buckets["heur"][0] / max(1, buckets["heur"][1]) if "heur" in buckets and buckets["heur"][1] > 0 else raw
-    if has_lua1 and has_lua2:
+    if has_lua1 and has_lua2 and has_lua3:
+        comp = 0.40 * spky + 0.25 * waff + 0.15 * esp + 0.10 * anc + 0.10 * heur
+    elif has_lua1 and has_lua3:
+        comp = 0.45 * spky + 0.25 * waff + 0.15 * anc + 0.15 * heur
+    elif has_lua1 and has_lua2:
         comp = 0.45 * spky + 0.25 * esp + 0.15 * anc + 0.15 * heur
     elif has_lua1:
         comp = 0.55 * spky + 0.20 * anc + 0.25 * heur
@@ -3398,6 +3539,7 @@ def _compute_gen4_val_gate(
         "raw": float(raw),
         "comp": float(comp),
         "spky": float(spky),
+        "waff": float(waff),
         "esp": float(esp),
         "anc": float(anc),
         "heur": float(heur),
@@ -3411,12 +3553,20 @@ def _should_promote_gen4_val(
     start: Dict[str, float],
     *,
     has_lua1: bool,
+    has_lua3: bool = False,
     sparky_slack: float = 0.032,
 ) -> bool:
-    """Strictly gate checkpoint promotion so heuristic gains cannot mask a Sparky v1.6 regression."""
+    """Strictly gate checkpoint promotion so heuristic gains cannot mask a Sparky/Waffle3z regression."""
     if has_lua1:
         floor = max(best["spky"] - sparky_slack, start["spky"] - sparky_slack)
         if cur["spky"] + 1e-9 < floor:
+            return False
+    if has_lua1 and has_lua3:
+        cur_duo = 0.60 * cur["spky"] + 0.40 * cur["waff"]
+        best_duo = 0.60 * best["spky"] + 0.40 * best["waff"]
+        start_duo = 0.60 * start["spky"] + 0.40 * start["waff"]
+        duo_floor = max(best_duo - sparky_slack, start_duo - sparky_slack)
+        if cur_duo + 1e-9 < duo_floor:
             return False
     if cur["comp"] > best["comp"] + 1e-6:
         return True
@@ -3432,8 +3582,9 @@ def rl_mirror_league_ppo_gen4(
     redir_replay: Optional[Dict[str, np.ndarray]] = None,
     anchor_ckpt_path: Optional[Path] = None,
     anchor2_ckpt_path: Optional[Path] = None,
-    lua_opp_path: Optional[Path] = None,
-    lua_opp2_path: Optional[Path] = None,
+    lua_opp_path: Optional[str | Path] = None,
+    lua_opp2_path: Optional[str | Path] = None,
+    lua_opp3_path: Optional[str | Path] = None,
     iters: int = 12,
     pairs_per_iter: int = 8,
     lr: float = 4.5e-5,
@@ -3447,6 +3598,7 @@ def rl_mirror_league_ppo_gen4(
     boss_draw_penalty: float = 0.10,
     sparky_share: float = 0.42,
     esparan_share: float = 0.17,
+    waffle_share: float = 0.15,
     large_map_prob: float = 0.30,
     max_sends_per_planet: int = 6,
     eval_every: int = 4,
@@ -3467,17 +3619,24 @@ def rl_mirror_league_ppo_gen4(
     rng = random.Random(seed)
     train_dev, use_dml = resolve_train_device(device)
 
+    has_lua1 = _lua_spec_exists(lua_opp_path)
     lua_opp = None
-    if lua_opp_path is not None and lua_opp_path.is_file():
+    if has_lua1:
         from galcon.lua_bridge import GalconLuaBotBridge
 
         lua_opp = GalconLuaBotBridge(lua_opp_path)
-    has_lua2 = lua_opp2_path is not None and lua_opp2_path.is_file()
+    has_lua2 = _lua_spec_exists(lua_opp2_path)
     lua_opp2 = None
     if has_lua2:
         from galcon.lua_bridge import GalconLuaBotBridge
 
         lua_opp2 = GalconLuaBotBridge(lua_opp2_path)
+    has_lua3 = _lua_spec_exists(lua_opp3_path)
+    lua_opp3 = None
+    if has_lua3:
+        from galcon.lua_bridge import GalconLuaBotBridge
+
+        lua_opp3 = GalconLuaBotBridge(lua_opp3_path)
 
     cpu_policy = _load_gen4_policy_from_ckpt(ckpt_path)
     policy = copy.deepcopy(cpu_policy).to(train_dev)
@@ -3524,8 +3683,8 @@ def rl_mirror_league_ppo_gen4(
     def quick_gen4_val(model_eval: GalconPlanetTransformer) -> Dict[str, float]:
         model_eval.eval()
         anchor_ref = snapshot_pool[0]
-        b_sc: Dict[str, float] = {"heur": 0.0, "anc": 0.0, "boss": 0.0, "boss2": 0.0}
-        b_cnt: Dict[str, int] = {"heur": 0, "anc": 0, "boss": 0, "boss2": 0}
+        b_sc: Dict[str, float] = {"heur": 0.0, "anc": 0.0, "boss": 0.0, "boss2": 0.0, "boss3": 0.0}
+        b_cnt: Dict[str, int] = {"heur": 0, "anc": 0, "boss": 0, "boss2": 0, "boss3": 0}
         std_opps = [
             ("heur", GalconTacticalBot(), 4),
             ("heur", GalconRusherBot(style="all_in"), 4),
@@ -3535,6 +3694,8 @@ def rl_mirror_league_ppo_gen4(
         ]
         if lua_opp2 is not None:
             std_opps.append(("boss2", lua_opp2, 8))
+        if lua_opp3 is not None:
+            std_opps.append(("boss3", lua_opp3, 8))
         for oi, (tag, ob, ng) in enumerate(std_opps):
             for k in range(ng):
                 g_rng = random.Random(39000 + oi * 100 + k)
@@ -3575,11 +3736,43 @@ def rl_mirror_league_ppo_gen4(
                 bucket = "anc" if is_nn else ("boss" if lua_opp is not None else "heur")
                 b_sc[bucket] += pts
                 b_cnt[bucket] += 1
+        if lua_opp3 is not None:
+            for k in range(2):
+                for a_p in (1, 2):
+                    b_p = 2 if a_p == 1 else 1
+                    s = GalconSim.create(
+                        seed=39700 + k, num_planets=24 + (k % 3), width=560.0, height=340.0, max_ticks=220, symmetric=(k % 2 == 0)
+                    )
+                    while not s.done:
+                        if s.tick % 2 == 0:
+                            oa = _fast_gen4_neural_act(model_eval, s, a_p)
+                            ob_act = lua_opp3.act(s, b_p)
+                            s.step({a_p: oa, b_p: ob_act})
+                        else:
+                            s.step({})
+                    w_id = s.winner()
+                    pts = 1.0 if w_id == a_p else (0.5 if w_id == 0 else 0.0)
+                    b_sc["boss3"] += pts
+                    b_cnt["boss3"] += 1
         buckets = {k: (b_sc[k], b_cnt[k]) for k in b_sc if b_cnt[k] > 0}
-        return _compute_gen4_val_gate(buckets, has_lua1=(lua_opp is not None), has_lua2=(lua_opp2 is not None))
+        return _compute_gen4_val_gate(
+            buckets, has_lua1=(lua_opp is not None), has_lua2=(lua_opp2 is not None), has_lua3=(lua_opp3 is not None)
+        )
 
     def _fmt_val(vm: Dict[str, float]) -> str:
         vg = int(round(vm["games"]))
+        if lua_opp is not None and lua_opp2 is not None and lua_opp3 is not None:
+            return (
+                f"val_{vg}g={100*vm['raw']:.1f}% "
+                f"[comp={100*vm['comp']:.1f}% | spky={100*vm['spky']:.1f}% waff={100*vm['waff']:.1f}% "
+                f"esp={100*vm['esp']:.1f}% anc={100*vm['anc']:.1f}% heur={100*vm['heur']:.1f}%]"
+            )
+        if lua_opp is not None and lua_opp3 is not None:
+            return (
+                f"val_{vg}g={100*vm['raw']:.1f}% "
+                f"[comp={100*vm['comp']:.1f}% | spky={100*vm['spky']:.1f}% waff={100*vm['waff']:.1f}% "
+                f"anc={100*vm['anc']:.1f}% heur={100*vm['heur']:.1f}%]"
+            )
         if lua_opp is not None and lua_opp2 is not None:
             return (
                 f"val_{vg}g={100*vm['raw']:.1f}% "
@@ -3614,7 +3807,12 @@ def rl_mirror_league_ppo_gen4(
             n_w = min(int(workers), int(pairs_per_iter))
             pool_exec = ProcessPoolExecutor(max_workers=n_w, mp_context=mp.get_context("spawn"))
 
-        boss_tag = f"+LuaBoss({lua_opp_path.stem}" + (f"+{lua_opp2_path.stem})" if has_lua2 else ")") if lua_opp is not None else ""
+        boss_names = [
+            _lua_spec_label(p)
+            for p, ok in ((lua_opp_path, has_lua1), (lua_opp2_path, has_lua2), (lua_opp3_path, has_lua3))
+            if ok
+        ]
+        boss_tag = f"+LuaBoss({'+'.join(boss_names)})" if boss_names else ""
         par_tag = f" x{min(int(workers), int(pairs_per_iter))}w" if use_parallel else ""
         dev_tag = " dml" if use_dml else (f" {train_dev}" if train_dev.type != "cpu" else "")
         print(
@@ -3623,8 +3821,9 @@ def rl_mirror_league_ppo_gen4(
         )
         t0 = time.time()
 
-        lua1_str = str(lua_opp_path.resolve()) if (lua_opp_path is not None and lua_opp_path.is_file()) else ""
-        lua2_str = str(lua_opp2_path.resolve()) if (lua_opp2_path is not None and lua_opp2_path.is_file()) else ""
+        lua1_str = _lua_spec_resolve(lua_opp_path)
+        lua2_str = _lua_spec_resolve(lua_opp2_path)
+        lua3_str = _lua_spec_resolve(lua_opp3_path)
 
         for it in range(1, iters + 1):
             torch.set_num_threads(1)
@@ -3634,10 +3833,12 @@ def rl_mirror_league_ppo_gen4(
                 pairs_per_iter,
                 has_lua1=(lua_opp is not None),
                 has_lua2=has_lua2,
+                has_lua3=has_lua3,
                 pool_size=len(snapshot_pool),
                 rng=rng,
                 sparky_share=sparky_share,
                 esparan_share=esparan_share,
+                waffle_share=waffle_share,
             )
             pair_jobs = []
             for k, (opp_kind, opp_idx) in enumerate(opp_sched):
@@ -3645,7 +3846,8 @@ def rl_mirror_league_ppo_gen4(
                 map_seed = seed + it * 500 + k
                 pair_jobs.append((map_seed, n_pl, w, h, sym, opp_kind, opp_idx))
 
-            wins = sp_wins = sp_eps = bot_wins = bot_eps = boss_wins = boss_eps = boss2_wins = boss2_eps = split_pairs = 0
+            wins = sp_wins = sp_eps = bot_wins = bot_eps = 0
+            boss_wins = boss_eps = boss2_wins = boss2_eps = boss3_wins = boss3_eps = split_pairs = 0
             t_roll = time.time()
             if use_parallel and pool_exec is not None and tmp_dir_ctx is not None:
                 pol_p = Path(tmp_dir_ctx.name) / "policy_cur.pt"
@@ -3659,6 +3861,7 @@ def rl_mirror_league_ppo_gen4(
                         sh,
                         lua1_str,
                         lua2_str,
+                        lua3_str,
                         gamma,
                         gae_lam,
                         frac_std,
@@ -3682,8 +3885,10 @@ def rl_mirror_league_ppo_gen4(
                     boss_eps += o[7]
                     boss2_wins += o[8]
                     boss2_eps += o[9]
-                    split_pairs += o[10]
-                    total_eps += o[11]
+                    boss3_wins += o[10]
+                    boss3_eps += o[11]
+                    split_pairs += o[12]
+                    total_eps += o[13]
                 adv_arr = merged["adv"].astype(np.float32)
                 adv_arr = (adv_arr - adv_arr.mean()) / (adv_arr.std() + 1e-6)
                 ds = TensorDataset(
@@ -3708,6 +3913,7 @@ def rl_mirror_league_ppo_gen4(
                     opp_bot = None
                     is_boss = False
                     is_boss2 = False
+                    is_boss3 = False
                     if opp_kind == "boss":
                         opp_bot = lua_opp
                         is_boss = True
@@ -3716,6 +3922,13 @@ def rl_mirror_league_ppo_gen4(
                             opp_bot = lua_opp2
                             is_boss = True
                             is_boss2 = True
+                        else:
+                            opp_bot = _make_sparring_bot(rng, "tactical")
+                    elif opp_kind == "boss3":
+                        if lua_opp3 is not None:
+                            opp_bot = lua_opp3
+                            is_boss = True
+                            is_boss3 = True
                         else:
                             opp_bot = _make_sparring_bot(rng, "tactical")
                     elif opp_kind != "snap":
@@ -3736,7 +3949,10 @@ def rl_mirror_league_ppo_gen4(
                     total_eps += 2
                     won_a, won_b = ep_a[5], ep_b[5]
                     wins += won_a + won_b
-                    if is_boss2:
+                    if is_boss3:
+                        boss3_eps += 2
+                        boss3_wins += won_a + won_b
+                    elif is_boss2:
                         boss2_eps += 2
                         boss2_wins += won_a + won_b
                     elif is_boss:
@@ -3868,16 +4084,17 @@ def rl_mirror_league_ppo_gen4(
 
             boss_str = f", boss={boss_wins}/{boss_eps}" if boss_eps > 0 else ""
             boss2_str = f", boss2={boss2_wins}/{boss2_eps}" if boss2_eps > 0 else ""
+            boss3_str = f", boss3={boss3_wins}/{boss3_eps}" if boss3_eps > 0 else ""
             log_msg = (
                 f"[Galcon Gen4 Multi-Send PPO] iter {it:2d}/{iters} (eps={total_eps}, {time.time()-t0:5.1f}s "
                 f"[roll={roll_sec:.1f}s upd={upd_sec:.1f}s]) | "
-                f"wins={wins}/{2*pairs_per_iter} (sp={sp_wins}/{sp_eps}, bots={bot_wins}/{bot_eps}{boss_str}{boss2_str}, splits={split_pairs}) | "
+                f"wins={wins}/{2*pairs_per_iter} (sp={sp_wins}/{sp_eps}, bots={bot_wins}/{bot_eps}{boss_str}{boss2_str}{boss3_str}, splits={split_pairs}) | "
                 f"states={len(ds)} | pool={len(snapshot_pool)}"
             )
             if it % eval_every == 0 or it == iters:
                 cur_val = quick_gen4_val(cpu_policy)
                 log_msg += f" | {_fmt_val(cur_val)}"
-                if _should_promote_gen4_val(cur_val, best_val, start_val, has_lua1=(lua_opp is not None)):
+                if _should_promote_gen4_val(cur_val, best_val, start_val, has_lua1=(lua_opp is not None), has_lua3=(lua_opp3 is not None)):
                     best_val = dict(cur_val)
                     best_score = float(best_val["comp"])
                     best_state = copy.deepcopy(cpu_sd)
@@ -3932,6 +4149,8 @@ def rl_mirror_league_ppo_gen4(
             lua_opp.close()
         if lua_opp2 is not None:
             lua_opp2.close()
+        if lua_opp3 is not None:
+            lua_opp3.close()
 
 
 def evaluate_matchup(
@@ -3989,9 +4208,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gen2-anchor2", default="")
     parser.add_argument("--lua-opp", default="")
     parser.add_argument("--lua-opp2", default="")
+    parser.add_argument("--lua-opp3", default="")
     parser.add_argument("--boss-draw-penalty", type=float, default=0.10)
     parser.add_argument("--sparky-share", type=float, default=0.42)
     parser.add_argument("--esparan-share", type=float, default=0.17)
+    parser.add_argument("--waffle-share", type=float, default=0.15)
     parser.add_argument("--large-map-prob", type=float, default=0.30)
     parser.add_argument("--kl-coef", type=float, default=0.030)
     parser.add_argument("--v-anchor-coef", type=float, default=0.0)
@@ -4111,14 +4332,16 @@ def main(argv: list[str] | None = None) -> int:
         resume_p = Path(args.resume) if args.resume else Path("checkpoints/galcon_transformer_best.pt")
         resume_p2 = Path(args.resume2) if args.resume2 else None
         student_p = Path(args.student_init) if args.student_init else resume_p
-        lua_p = Path(args.lua_opp) if args.lua_opp else None
-        lua_p2 = Path(args.lua_opp2) if args.lua_opp2 else None
+        lua_p = args.lua_opp or None
+        lua_p2 = args.lua_opp2 or None
+        lua_p3 = args.lua_opp3 or None
         g4_data, g4_redir = collect_gen4_multisend_ei_dataset(
             resume_p,
             num_games=args.search_games,
             seed=args.seed,
             lua_opp_path=lua_p,
             lua_opp2_path=lua_p2,
+            lua_opp3_path=lua_p3,
             ckpt_path2=resume_p2,
             large_map_prob=args.large_map_prob,
             workers=args.workers,
@@ -4148,8 +4371,9 @@ def main(argv: list[str] | None = None) -> int:
             redir_replay=redir_replay,
             anchor_ckpt_path=Path(args.gen2_anchor) if args.gen2_anchor else None,
             anchor2_ckpt_path=Path(args.gen2_anchor2) if args.gen2_anchor2 else None,
-            lua_opp_path=Path(args.lua_opp) if args.lua_opp else None,
-            lua_opp2_path=Path(args.lua_opp2) if args.lua_opp2 else None,
+            lua_opp_path=args.lua_opp or None,
+            lua_opp2_path=args.lua_opp2 or None,
+            lua_opp3_path=args.lua_opp3 or None,
             iters=args.ppo_iters,
             pairs_per_iter=args.mirror_pairs,
             lr=args.lr if args.lr > 0 else 4.5e-5,
@@ -4158,6 +4382,7 @@ def main(argv: list[str] | None = None) -> int:
             boss_draw_penalty=args.boss_draw_penalty,
             sparky_share=args.sparky_share,
             esparan_share=args.esparan_share,
+            waffle_share=args.waffle_share,
             large_map_prob=args.large_map_prob,
             eval_every=max(1, args.eval_every),
             seed=args.seed,
