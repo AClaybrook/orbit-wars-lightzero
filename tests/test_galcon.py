@@ -61,8 +61,8 @@ def test_galcon_tactical_bot_beats_classic_baseline():
     tactical = GalconTacticalBot()
     classic = GalconClassicBot()
     wins = 0
-    for s in range(6):
-        sim = GalconSim.create(seed=100 + s, num_planets=14, width=320.0, height=200.0, max_ticks=200)
+    for s in range(16):
+        sim = GalconSim.create(seed=100 + s, max_ticks=200)
         t_pid = 1 if (s % 2 == 0) else 2
         c_pid = 2 if t_pid == 1 else 1
         while not sim.done:
@@ -72,7 +72,7 @@ def test_galcon_tactical_bot_beats_classic_baseline():
                 sim.step({})
         if sim.winner() == t_pid:
             wins += 1
-    assert wins >= 4, f"Expected GalconTacticalBot to dominate GalconClassicBot, got {wins}/6"
+    assert wins >= 10, f"Expected GalconTacticalBot to dominate GalconClassicBot, got {wins}/16"
 
 
 def test_galcon_sparring_suite_rusher_and_macro():
@@ -1284,6 +1284,117 @@ def test_wave16_def_stream_opening_guard_and_1t_ei(tmp_path):
     )
     assert len(ei_data.get("val_targets", [])) >= 4
     assert np.isfinite(ei_data["val_targets"]).all()
+
+
+def test_galcon_sim_radius_defaults_and_settle_clearance():
+    import math
+    from galcon.sim import (
+        DEFAULT_MAP_HEIGHT,
+        DEFAULT_MAP_WIDTH,
+        DEFAULT_NUM_PLANETS,
+        MIN_PLANET_GAP,
+        NEUTRAL_PROD_MAX,
+        NEUTRAL_PROD_MIN,
+        NEUTRAL_SHIPS_MAX,
+        NEUTRAL_SHIPS_MIN,
+        PLANET_SETTLE_DELTA,
+        SHIP_RADIUS,
+        generate_galcon_map,
+        planet_radius_from_production,
+        settle_planets,
+    )
+
+    # 1. Exact Galcon 2 planet radius formula + lower clamping at prod <= 15
+    assert SHIP_RADIUS == 6.0
+    assert PLANET_SETTLE_DELTA == 0.5
+    assert MIN_PLANET_GAP == 12.5
+    assert DEFAULT_MAP_WIDTH == 480.0
+    assert DEFAULT_MAP_HEIGHT == 320.0
+    assert DEFAULT_NUM_PLANETS == 23
+    assert np.isclose(planet_radius_from_production(15), 12.0, atol=1e-12)
+    assert np.isclose(planet_radius_from_production(100), 24.0, atol=1e-12)
+    assert np.isclose(planet_radius_from_production(50), (50.0 * 12.0 / 5.0 + 168.0) / 17.0, atol=1e-12)
+    for low_p in (-10.0, 0.0, 5.0, 14.99, 15.0):
+        assert planet_radius_from_production(low_p) == 12.0
+
+    # 2. Default GalconSim.create() uses 480x320, 23 planets, 12.5u clearance, exact symmetry,
+    #    and exact neutral ship (0..45) / production (15..100) / radius invariants
+    for seed in range(20):
+        sim = GalconSim.create(seed=seed)
+        assert sim.width == 480.0 and sim.height == 320.0
+        plist = [sim.planets[pid] for pid in sorted(sim.planets.keys())]
+        assert len(plist) == 23
+        for p in plist:
+            assert p.radius == planet_radius_from_production(p.production)
+            assert p.radius + SHIP_RADIUS - 1e-6 <= p.x <= sim.width - p.radius - SHIP_RADIUS + 1e-6
+            assert p.radius + SHIP_RADIUS - 1e-6 <= p.y <= sim.height - p.radius - SHIP_RADIUS + 1e-6
+            if p.owner == 0:
+                assert NEUTRAL_SHIPS_MIN <= p.ships <= NEUTRAL_SHIPS_MAX
+                assert NEUTRAL_PROD_MIN <= p.production <= NEUTRAL_PROD_MAX
+        for i in range(len(plist)):
+            for j in range(i + 1, len(plist)):
+                dist = math.hypot(plist[i].x - plist[j].x, plist[i].y - plist[j].y)
+                assert dist >= plist[i].radius + plist[j].radius + MIN_PLANET_GAP - 1e-6
+
+        # Exact 180-degree rotational symmetry (homes + neutral pairs) & pinned center planet
+        for k in range(len(plist) // 2):
+            pa, pb = plist[2 * k], plist[2 * k + 1]
+            assert np.isclose(pa.x + pb.x, sim.width, atol=1e-6)
+            assert np.isclose(pa.y + pb.y, sim.height, atol=1e-6)
+            assert pa.production == pb.production and pa.ships == pb.ships and pa.radius == pb.radius
+        pc = plist[-1]
+        assert np.isclose(pc.x, sim.width * 0.5, atol=1e-6)
+        assert np.isclose(pc.y, sim.height * 0.5, atol=1e-6)
+        assert pc.owner == 0
+
+    # Asymmetric maps also obey neutral ship (0..45), prod (15..100), radius, and 12.5u clearance
+    for seed in range(5):
+        asym = generate_galcon_map(seed=seed, num_planets=23, width=480.0, height=320.0, symmetric=False)
+        assert len(asym) == 23
+        for p in asym:
+            assert p.radius == planet_radius_from_production(p.production)
+            if p.owner == 0:
+                assert 0.0 <= p.ships <= 45.0
+                assert 15.0 <= p.production <= 100.0
+        for i in range(len(asym)):
+            for j in range(i + 1, len(asym)):
+                dist = math.hypot(asym[i].x - asym[j].x, asym[i].y - asym[j].y)
+                assert dist >= asym[i].radius + asym[j].radius + MIN_PLANET_GAP - 1e-6
+
+    # 3. No early-break shortfall on 400x240, 18pl symmetric (including seed=204 which previously placed only 16)
+    for seed in (0, 1, 2, 42, 204):
+        sim18 = GalconSim.create(seed=seed, num_planets=18, width=400.0, height=240.0, symmetric=True)
+        assert len(sim18.planets) == 18
+        plist = [sim18.planets[pid] for pid in sorted(sim18.planets.keys())]
+        for i in range(len(plist)):
+            for j in range(i + 1, len(plist)):
+                dist = math.hypot(plist[i].x - plist[j].x, plist[i].y - plist[j].y)
+                assert dist >= plist[i].radius + plist[j].radius + MIN_PLANET_GAP - 1e-6
+
+    # 4. settle_planets directly resolves synthetic overlaps while preserving 180-deg symmetry & center pin
+    w, h = 480.0, 320.0
+    r_home = planet_radius_from_production(100.0)
+    r_mid = planet_radius_from_production(60.0)
+    r_ctr = planet_radius_from_production(50.0)
+    overlapping = [
+        Planet(1, 1, 100.0, 230.0, 155.0, 100.0, r_home),
+        Planet(2, 2, 100.0, w - 230.0, h - 155.0, 100.0, r_home),
+        Planet(3, 0, 20.0, 235.0, 160.0, 60.0, r_mid),
+        Planet(4, 0, 20.0, w - 235.0, h - 160.0, 60.0, r_mid),
+        Planet(5, 0, 25.0, w * 0.5, h * 0.5, 50.0, r_ctr),
+    ]
+    settled = settle_planets(overlapping, w, h, min_gap=MIN_PLANET_GAP, symmetric=True, max_iters=30)
+    assert settled is True
+    assert np.isclose(overlapping[0].x + overlapping[1].x, w, atol=1e-6)
+    assert np.isclose(overlapping[0].y + overlapping[1].y, h, atol=1e-6)
+    assert np.isclose(overlapping[2].x + overlapping[3].x, w, atol=1e-6)
+    assert np.isclose(overlapping[2].y + overlapping[3].y, h, atol=1e-6)
+    assert np.isclose(overlapping[4].x, w * 0.5, atol=1e-6)
+    assert np.isclose(overlapping[4].y, h * 0.5, atol=1e-6)
+    for i in range(len(overlapping)):
+        for j in range(i + 1, len(overlapping)):
+            dist = math.hypot(overlapping[i].x - overlapping[j].x, overlapping[i].y - overlapping[j].y)
+            assert dist >= overlapping[i].radius + overlapping[j].radius + MIN_PLANET_GAP - 1e-6
 
 
 

@@ -20,6 +20,16 @@ PRODUCTION_DIVISOR = 50.0  # production=100 => 2.0 ships/sec (120 ships/min)
 DEFAULT_FLEET_SPEED = 40.0
 DEFAULT_TICK_DT = 0.25
 DEFAULT_MAX_TICKS = 240  # 60 seconds at 4 ticks/sec
+SHIP_RADIUS = 6.0
+PLANET_SETTLE_DELTA = 0.5
+MIN_PLANET_GAP = 2.0 * SHIP_RADIUS + PLANET_SETTLE_DELTA  # 12.5
+DEFAULT_MAP_WIDTH = 480.0
+DEFAULT_MAP_HEIGHT = 320.0
+DEFAULT_NUM_PLANETS = 23
+NEUTRAL_SHIPS_MIN = 0
+NEUTRAL_SHIPS_MAX = 45
+NEUTRAL_PROD_MIN = 15
+NEUTRAL_PROD_MAX = 100
 
 
 @dataclass
@@ -42,7 +52,7 @@ class Fleet:
     y: float
     source: int
     target: int
-    radius: float = 6.0
+    radius: float = SHIP_RADIUS
 
 
 @dataclass(frozen=True)
@@ -62,99 +72,432 @@ Order = Union[SendOrder, RedirOrder]
 
 
 def planet_radius_from_production(production: float) -> float:
-    """Classic Galcon planet radius scaled smoothly with production (15..100 -> ~14..28)."""
-    return 11.5 + 0.165 * float(production)
+    """Exact Galcon 2 planet radius from production (15..100 -> 12.0..24.0, clamped below 15).
+
+    Note: Galcon 3 uses ``(production + 50.0) * 16.0 / 100.0``; we stick with the
+    Galcon 2 formula ``max(12.0, (production * 12.0 / 5.0 + 168.0) / 17.0)`` for now.
+    """
+    return max(12.0, (float(production) * 12.0 / 5.0 + 168.0) / 17.0)
+
+
+def _axis_bounds(radius: float, span: float) -> Tuple[float, float]:
+    """Legal symmetric ``[lo, hi]`` planet-center bounds along one map axis."""
+    margin = float(radius) + SHIP_RADIUS
+    if span - 2.0 * margin >= 0.0:
+        return margin, span - margin
+    fallback = float(radius) + 2.0
+    if span - 2.0 * fallback >= 0.0:
+        return fallback, span - fallback
+    mid = span * 0.5
+    return mid, mid
+
+
+def _clone_planets(planets: Sequence[Planet]) -> List[Planet]:
+    return [
+        Planet(p.id, p.owner, float(p.ships), float(p.x), float(p.y), float(p.production), float(p.radius))
+        for p in planets
+    ]
+
+
+def _planets_clearance_ok(
+    planets: Sequence[Planet],
+    min_gap: float = MIN_PLANET_GAP,
+    tol: float = 1e-6,
+) -> bool:
+    n = len(planets)
+    for i in range(n):
+        pi = planets[i]
+        for j in range(i + 1, n):
+            pj = planets[j]
+            if math.hypot(pi.x - pj.x, pi.y - pj.y) < pi.radius + pj.radius + min_gap - tol:
+                return False
+    return True
+
+
+def settle_planets(
+    planets: Sequence[Planet],
+    width: float,
+    height: float,
+    min_gap: float = MIN_PLANET_GAP,
+    symmetric: bool = True,
+    max_iters: int = 30,
+) -> bool:
+    """Iteratively push overlapping / too-close planets apart to enforce ``min_gap`` clearance.
+
+    Matches Galcon 2's ``planets_settle`` and ``origin/galcon-test2``'s relaxation loop:
+    - Keeps every planet within ``[r + SHIP_RADIUS, span - r - SHIP_RADIUS]`` (falling back to
+      ``[r + 2.0, span - r - 2.0]`` only if the map is too small for the full margin).
+    - When ``symmetric=True``, preserves exact 180-degree rotational symmetry
+      (``x_a + x_b == width``, ``y_a + y_b == height``) for symmetric pairs and pins any odd
+      center planet at ``(width / 2, height / 2)``.
+
+    Mutates ``planets`` in place and returns ``True`` if all pairs satisfy clearance.
+    """
+    n = len(planets)
+    if n == 0:
+        return True
+    width = float(width)
+    height = float(height)
+    cx, cy = width * 0.5, height * 0.5
+    min_gap = float(min_gap)
+
+    pairs: List[Tuple[int, int]] = []
+    center_indices: List[int] = []
+    free_indices: List[int] = []
+
+    if symmetric:
+        used = [False] * n
+        for i in range(0, n - 1, 2):
+            pa, pb = planets[i], planets[i + 1]
+            if (
+                abs((pa.x + pb.x) - width) <= 1e-3
+                and abs((pa.y + pb.y) - height) <= 1e-3
+                and abs(pa.radius - pb.radius) <= 1e-3
+            ):
+                pairs.append((i, i + 1))
+                used[i] = used[i + 1] = True
+        for i in range(n):
+            if used[i]:
+                continue
+            pa = planets[i]
+            for j in range(i + 1, n):
+                if used[j]:
+                    continue
+                pb = planets[j]
+                if (
+                    abs((pa.x + pb.x) - width) <= 1e-3
+                    and abs((pa.y + pb.y) - height) <= 1e-3
+                    and abs(pa.radius - pb.radius) <= 1e-3
+                ):
+                    pairs.append((i, j))
+                    used[i] = used[j] = True
+                    break
+        for i in range(n):
+            if used[i]:
+                continue
+            p = planets[i]
+            if abs(p.x - cx) <= 1e-3 and abs(p.y - cy) <= 1e-3:
+                center_indices.append(i)
+            else:
+                free_indices.append(i)
+    else:
+        free_indices = list(range(n))
+
+    center_set = set(center_indices)
+
+    # Snap bounds and exact 180-degree symmetry before iterating
+    for i in center_indices:
+        planets[i].x = cx
+        planets[i].y = cy
+    for a, b in pairs:
+        pa, pb = planets[a], planets[b]
+        lo_x, hi_x = _axis_bounds(pa.radius, width)
+        lo_y, hi_y = _axis_bounds(pa.radius, height)
+        pa.x = max(lo_x, min(hi_x, float(pa.x)))
+        pa.y = max(lo_y, min(hi_y, float(pa.y)))
+        pb.x = width - pa.x
+        pb.y = height - pa.y
+    for i in free_indices:
+        pi = planets[i]
+        lo_x, hi_x = _axis_bounds(pi.radius, width)
+        lo_y, hi_y = _axis_bounds(pi.radius, height)
+        pi.x = max(lo_x, min(hi_x, float(pi.x)))
+        pi.y = max(lo_y, min(hi_y, float(pi.y)))
+
+    eps_tol = 1e-7
+    nudge_eps = 1e-3
+    max_step = max(min_gap, 0.25 * min(width, height))
+
+    def _repulsion_for(idx: int, it: int) -> Tuple[float, float, bool]:
+        pi = planets[idx]
+        dx_total = 0.0
+        dy_total = 0.0
+        hit = False
+        for j in range(n):
+            if j == idx:
+                continue
+            pj = planets[j]
+            dx = pi.x - pj.x
+            dy = pi.y - pj.y
+            dist = math.hypot(dx, dy)
+            min_dist = pi.radius + pj.radius + min_gap
+            if dist < min_dist - eps_tol:
+                overlap = min_dist - dist
+                if dist < 1e-6:
+                    angle = idx * 2.399963229728653 + j * 0.7319 + it * 1.13
+                    ux, uy = math.cos(angle), math.sin(angle)
+                else:
+                    ux = dx / dist
+                    uy = dy / dist
+                frac = 1.0 if j in center_set else 0.5
+                step = frac * overlap + nudge_eps
+                dx_total += ux * step
+                dy_total += uy * step
+                hit = True
+        mag = math.hypot(dx_total, dy_total)
+        if mag > max_step:
+            scale = max_step / mag
+            dx_total *= scale
+            dy_total *= scale
+        return dx_total, dy_total, hit
+
+    for it in range(max(1, int(max_iters))):
+        moved = False
+        pair_disp: List[Tuple[float, float]] = []
+        free_disp: List[Tuple[float, float]] = []
+
+        for a, b in pairs:
+            dxa, dya, ha = _repulsion_for(a, it)
+            if free_indices:
+                dxb, dyb, hb = _repulsion_for(b, it)
+                dx = 0.5 * (dxa - dxb)
+                dy = 0.5 * (dya - dyb)
+                if ha or hb:
+                    moved = True
+            else:
+                dx, dy = dxa, dya
+                if ha:
+                    moved = True
+            pair_disp.append((dx, dy))
+
+        for idx in free_indices:
+            dx, dy, hit = _repulsion_for(idx, it)
+            if hit:
+                moved = True
+            free_disp.append((dx, dy))
+
+        if not moved:
+            return _planets_clearance_ok(planets, min_gap=min_gap)
+
+        for (a, b), (dx, dy) in zip(pairs, pair_disp):
+            if dx == 0.0 and dy == 0.0:
+                continue
+            pa, pb = planets[a], planets[b]
+            lo_x, hi_x = _axis_bounds(pa.radius, width)
+            lo_y, hi_y = _axis_bounds(pa.radius, height)
+            pa.x = max(lo_x, min(hi_x, pa.x + dx))
+            pa.y = max(lo_y, min(hi_y, pa.y + dy))
+            pb.x = width - pa.x
+            pb.y = height - pa.y
+
+        for idx, (dx, dy) in zip(free_indices, free_disp):
+            if dx == 0.0 and dy == 0.0:
+                continue
+            pi = planets[idx]
+            lo_x, hi_x = _axis_bounds(pi.radius, width)
+            lo_y, hi_y = _axis_bounds(pi.radius, height)
+            pi.x = max(lo_x, min(hi_x, pi.x + dx))
+            pi.y = max(lo_y, min(hi_y, pi.y + dy))
+
+    return _planets_clearance_ok(planets, min_gap=min_gap)
 
 
 def generate_galcon_map(
     *,
     seed: int = 42,
-    num_planets: int = 18,
-    width: float = 400.0,
-    height: float = 240.0,
+    num_planets: int = DEFAULT_NUM_PLANETS,
+    width: float = DEFAULT_MAP_WIDTH,
+    height: float = DEFAULT_MAP_HEIGHT,
     home_ships: float = 100.0,
     home_prod: float = 100.0,
     symmetric: bool = True,
 ) -> List[Planet]:
     """Generate a balanced 2P Galcon map (180-degree rotationally symmetric by default)."""
     rng = random.Random(seed)
+    width = float(width)
+    height = float(height)
     cx, cy = width * 0.5, height * 0.5
-    margin = 34.0
+    min_gap = MIN_PLANET_GAP
     home_r = planet_radius_from_production(home_prod)
 
-    # Place P1 and P2 homes symmetrically on an outer ellipse
-    angle = rng.uniform(0.0, 2.0 * math.pi)
-    rx = max(20.0, (width * 0.5 - margin) * rng.uniform(0.70, 0.90))
-    ry = max(20.0, (height * 0.5 - margin) * rng.uniform(0.70, 0.90))
-    hx = cx + rx * math.cos(angle)
-    hy = cy + ry * math.sin(angle)
+    # Place P1 and P2 homes symmetrically on an outer ellipse within legal map bounds
+    h_min_x, _ = _axis_bounds(home_r, width)
+    h_min_y, _ = _axis_bounds(home_r, height)
+    rx_max = max(0.0, cx - h_min_x)
+    ry_max = max(0.0, cy - h_min_y)
+    min_home_center_dist = home_r + 0.5 * min_gap
 
-    planets: List[Planet] = [
-        Planet(id=1, owner=1, ships=float(home_ships), x=hx, y=hy, production=float(home_prod), radius=home_r),
-        Planet(
-            id=2,
-            owner=2,
-            ships=float(home_ships),
-            x=width - hx,
-            y=height - hy,
-            production=float(home_prod),
-            radius=home_r,
-        ),
-    ]
+    hx, hy = cx, cy
+    placed_home = False
+    for _ in range(64):
+        angle = rng.uniform(0.0, 2.0 * math.pi)
+        rx = rx_max * rng.uniform(0.70, 0.90)
+        ry = ry_max * rng.uniform(0.70, 0.90)
+        dx = rx * math.cos(angle)
+        dy = ry * math.sin(angle)
+        d_center = math.hypot(dx, dy)
+        if 1e-6 < d_center < min_home_center_dist:
+            scale = min_home_center_dist / d_center
+            cand_dx = dx * scale
+            cand_dy = dy * scale
+            if abs(cand_dx) <= rx_max + 1e-9 and abs(cand_dy) <= ry_max + 1e-9:
+                dx, dy = cand_dx, cand_dy
+                d_center = math.hypot(dx, dy)
+        if d_center >= min_home_center_dist - 1e-9:
+            hx = cx + max(-rx_max, min(rx_max, dx))
+            hy = cy + max(-ry_max, min(ry_max, dy))
+            placed_home = True
+            break
+    if not placed_home:
+        if rx_max >= ry_max:
+            hx, hy = cx + rx_max, cy
+        else:
+            hx, hy = cx, cy + ry_max
 
-    min_gap = 12.0  # clearance so fleets pass cleanly between planets
-    next_id = 3
+    home1 = Planet(id=1, owner=1, ships=float(home_ships), x=hx, y=hy, production=float(home_prod), radius=home_r)
+    home2 = Planet(
+        id=2,
+        owner=2,
+        ships=float(home_ships),
+        x=width - hx,
+        y=height - hy,
+        production=float(home_prod),
+        radius=home_r,
+    )
 
-    def fits(x: float, y: float, r: float) -> bool:
-        if x - r < 8.0 or x + r > width - 8.0 or y - r < 8.0 or y + r > height - 8.0:
+    def fits(x: float, y: float, r: float, existing: Sequence[Planet]) -> bool:
+        lo_x, hi_x = _axis_bounds(r, width)
+        lo_y, hi_y = _axis_bounds(r, height)
+        if x < lo_x - 1e-9 or x > hi_x + 1e-9 or y < lo_y - 1e-9 or y > hi_y + 1e-9:
             return False
-        for p in planets:
+        for p in existing:
             if math.hypot(x - p.x, y - p.y) < r + p.radius + min_gap:
                 return False
         return True
 
-    target_neutrals = max(2, num_planets - 2)
+    target_neutrals = max(2, int(num_planets) - 2)
     if symmetric:
         pairs = target_neutrals // 2
+        pair_planets: List[Planet] = [home1, home2]
+        center_planet: Optional[Planet] = None
+
+        if target_neutrals % 2 == 1:
+            c_prod = float(rng.randint(NEUTRAL_PROD_MIN, NEUTRAL_PROD_MAX))
+            c_r = planet_radius_from_production(c_prod)
+            c_ships = float(rng.randint(NEUTRAL_SHIPS_MIN, NEUTRAL_SHIPS_MAX))
+            cand_center = Planet(id=0, owner=0, ships=c_ships, x=cx, y=cy, production=c_prod, radius=c_r)
+            if fits(cx, cy, c_r, pair_planets):
+                center_planet = cand_center
+            else:
+                trial = _clone_planets(pair_planets) + [cand_center]
+                if settle_planets(trial, width, height, min_gap=min_gap, symmetric=True, max_iters=30):
+                    pair_planets = trial[:-1]
+                    center_planet = trial[-1]
+
         for _ in range(pairs):
-            prod = float(rng.randint(15, 100))
+            prod = float(rng.randint(NEUTRAL_PROD_MIN, NEUTRAL_PROD_MAX))
             r = planet_radius_from_production(prod)
-            ships = float(rng.randint(0, 50))
+            ships = float(rng.randint(NEUTRAL_SHIPS_MIN, NEUTRAL_SHIPS_MAX))
+            lo_x, hi_x = _axis_bounds(r, width)
+            lo_y, hi_y = _axis_bounds(r, height)
+            existing = pair_planets + ([center_planet] if center_planet is not None else [])
             placed = False
-            for _attempt in range(120):
-                x = rng.uniform(r + 10.0, width - r - 10.0)
-                y = rng.uniform(r + 10.0, height - r - 10.0)
+            best_margin = -1e18
+            best_xy: Optional[Tuple[float, float]] = None
+
+            for _attempt in range(160):
+                x = rng.uniform(lo_x, hi_x)
+                y = rng.uniform(lo_y, hi_y)
                 mx, my = width - x, height - y
-                if math.hypot(x - mx, y - my) < 2.0 * r + min_gap:
-                    continue
-                if fits(x, y, r) and fits(mx, my, r):
-                    planets.append(Planet(id=next_id, owner=0, ships=ships, x=x, y=y, production=prod, radius=r))
-                    next_id += 1
-                    planets.append(Planet(id=next_id, owner=0, ships=ships, x=mx, y=my, production=prod, radius=r))
-                    next_id += 1
+                min_clear = math.hypot(x - mx, y - my) - (2.0 * r + min_gap)
+                if min_clear > best_margin or min_clear >= 0.0:
+                    for p in existing:
+                        c1 = math.hypot(x - p.x, y - p.y) - (r + p.radius + min_gap)
+                        if c1 < min_clear:
+                            min_clear = c1
+                            if min_clear < best_margin and min_clear < 0.0:
+                                break
+                        c2 = math.hypot(mx - p.x, my - p.y) - (r + p.radius + min_gap)
+                        if c2 < min_clear:
+                            min_clear = c2
+                            if min_clear < best_margin and min_clear < 0.0:
+                                break
+                    if min_clear >= 0.0:
+                        pair_planets.append(Planet(id=0, owner=0, ships=ships, x=x, y=y, production=prod, radius=r))
+                        pair_planets.append(Planet(id=0, owner=0, ships=ships, x=mx, y=my, production=prod, radius=r))
+                        placed = True
+                        break
+                    if min_clear > best_margin:
+                        best_margin = min_clear
+                        best_xy = (x, y)
+
+            if not placed and best_xy is not None:
+                bx, by = best_xy
+                trial_pairs = _clone_planets(pair_planets)
+                trial_pairs.append(Planet(id=0, owner=0, ships=ships, x=bx, y=by, production=prod, radius=r))
+                trial_pairs.append(
+                    Planet(id=0, owner=0, ships=ships, x=width - bx, y=height - by, production=prod, radius=r)
+                )
+                trial = trial_pairs + (_clone_planets([center_planet]) if center_planet is not None else [])
+                if settle_planets(trial, width, height, min_gap=min_gap, symmetric=True, max_iters=30):
+                    if center_planet is not None:
+                        pair_planets = trial[:-1]
+                        center_planet = trial[-1]
+                    else:
+                        pair_planets = trial
+                    placed = True
+            if not placed:
+                continue
+
+        planets: List[Planet] = list(pair_planets)
+        if center_planet is not None:
+            planets.append(center_planet)
+    else:
+        planets = [home1, home2]
+        for _ in range(target_neutrals):
+            prod = float(rng.randint(NEUTRAL_PROD_MIN, NEUTRAL_PROD_MAX))
+            r = planet_radius_from_production(prod)
+            ships = float(rng.randint(NEUTRAL_SHIPS_MIN, NEUTRAL_SHIPS_MAX))
+            lo_x, hi_x = _axis_bounds(r, width)
+            lo_y, hi_y = _axis_bounds(r, height)
+            placed = False
+            best_margin = -1e18
+            best_xy = None
+
+            for _attempt in range(160):
+                x = rng.uniform(lo_x, hi_x)
+                y = rng.uniform(lo_y, hi_y)
+                min_clear = 1e18
+                for p in planets:
+                    c1 = math.hypot(x - p.x, y - p.y) - (r + p.radius + min_gap)
+                    if c1 < min_clear:
+                        min_clear = c1
+                        if min_clear < best_margin and min_clear < 0.0:
+                            break
+                if min_clear >= 0.0:
+                    planets.append(Planet(id=0, owner=0, ships=ships, x=x, y=y, production=prod, radius=r))
                     placed = True
                     break
+                if min_clear > best_margin:
+                    best_margin = min_clear
+                    best_xy = (x, y)
+
+            if not placed and best_xy is not None:
+                bx, by = best_xy
+                trial = _clone_planets(planets)
+                trial.append(Planet(id=0, owner=0, ships=ships, x=bx, y=by, production=prod, radius=r))
+                if settle_planets(trial, width, height, min_gap=min_gap, symmetric=False, max_iters=30):
+                    planets = trial
+                    placed = True
             if not placed:
+                continue
+
+    settle_planets(planets, width, height, min_gap=min_gap, symmetric=symmetric, max_iters=30)
+    while len(planets) > 2 and not _planets_clearance_ok(planets, min_gap=min_gap):
+        if symmetric:
+            if len(planets) % 2 == 1:
+                planets.pop()
+            elif len(planets) >= 4:
+                planets.pop()
+                planets.pop()
+            else:
                 break
-        if target_neutrals % 2 == 1:
-            prod = float(rng.randint(35, 95))
-            r = planet_radius_from_production(prod)
-            if fits(cx, cy, r):
-                planets.append(
-                    Planet(id=next_id, owner=0, ships=float(rng.randint(10, 45)), x=cx, y=cy, production=prod, radius=r)
-                )
-    else:
-        for _ in range(target_neutrals):
-            prod = float(rng.randint(15, 100))
-            r = planet_radius_from_production(prod)
-            ships = float(rng.randint(0, 50))
-            for _attempt in range(120):
-                x = rng.uniform(r + 10.0, width - r - 10.0)
-                y = rng.uniform(r + 10.0, height - r - 10.0)
-                if fits(x, y, r):
-                    planets.append(Planet(id=next_id, owner=0, ships=ships, x=x, y=y, production=prod, radius=r))
-                    next_id += 1
-                    break
+        else:
+            planets.pop()
+        settle_planets(planets, width, height, min_gap=min_gap, symmetric=symmetric, max_iters=30)
+
+    for idx, p in enumerate(planets, start=1):
+        p.id = idx
 
     return planets
 
@@ -167,8 +510,8 @@ class GalconSim:
         planets: Sequence[Planet],
         fleets: Sequence[Fleet] = (),
         *,
-        width: float = 400.0,
-        height: float = 240.0,
+        width: float = DEFAULT_MAP_WIDTH,
+        height: float = DEFAULT_MAP_HEIGHT,
         fleet_speed: float = DEFAULT_FLEET_SPEED,
         tick_dt: float = DEFAULT_TICK_DT,
         max_ticks: int = DEFAULT_MAX_TICKS,
@@ -200,9 +543,9 @@ class GalconSim:
         cls,
         *,
         seed: int = 42,
-        num_planets: int = 18,
-        width: float = 400.0,
-        height: float = 240.0,
+        num_planets: int = DEFAULT_NUM_PLANETS,
+        width: float = DEFAULT_MAP_WIDTH,
+        height: float = DEFAULT_MAP_HEIGHT,
         fleet_speed: float = DEFAULT_FLEET_SPEED,
         tick_dt: float = DEFAULT_TICK_DT,
         max_ticks: int = DEFAULT_MAX_TICKS,
