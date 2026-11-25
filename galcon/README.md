@@ -1,6 +1,18 @@
-# Galcon AI Wave 13 — C99 Fast Engine (`5.3ms` Pure / `21ms` Search) & `W13_KD` Single-Model Records
+# Galcon AI Wave 14 — Replay-Pooled Single-Model Champion (`70.0%` Waffle3z, `65.0%` Sparky, `89.6%` EsparanBot @ `20 ms`)
 
 A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-lightzero` that cross-pollinates our Orbit Wars **`PlanetTimelineTransformer`** (`orbit_wars_bot/planet_transformer.py`, `1.29M` params) to classic Galcon, Phil Hassey's official **`gbots`** protocol, and zero-copy head-to-head benchmarking against Evan Sparano's (`esparano/GalconModVault`) unmodified Lua tournament bots (`Sparky v1.6`, `Waffle3z-GA / bots_waffle3z_optimized`, & `EsparanBot v0.2`) via [`galcon/lua_bridge.py`](lua_bridge.py).
+
+## Wave 14 Highlights — Replay-Pooled AlphaZero Search-EI (`10,297` States → `#1` Single-Model Champion at `20 ms/t`)
+- **#1 Single-Model All-Rounder — [`checkpoints/galcon_wave14_kd.pt`](../checkpoints/galcon_wave14_kd.pt) (new default `--bot search`, `19.9–20.0 ms/tick`, ~`1955 Elo`!):**
+  - First multi-round **Replay-Pooled AlphaZero Search-EI** wave using Wave 13's C99 fast engine + `--save-ei-npz` / `--load-ei-npz`:
+    - **Round 14A:** `84` Large-heavy (`--large-map-prob 0.42`) Triple-Boss games (`5,231` states, `boss=31–16–9 / 63.4%`, `317.3s`).
+    - **Round 14B:** `76` pure single-model (`21 ms`) `W13_KD` Search games (`5,066` states, `boss=29–20–3 / 58.7%`, `164.9s`).
+    - **Pooled Distillation (`10,297` states across `160` games — `2.3×` larger than any previous wave!):** Achieved our lowest validation BCE ever (**`val_bce=0.027`**, `rec=95.3%`, `prec=72.3%`, `aux=97.0%`, `vsign=83.8%`).
+  - **18pl Std `Waffle3z-GA` (40g, 1t):** **`24–8–8` (`70.0%` — NEW ALL-TIME SINGLE-MODEL RECORD, only 8 losses! `s=9500: 77.5%` Std / `82.5%` Surgical!)** @ **`19.9 ms/t`**.
+  - **18pl Std `Sparky v1.6` (40g, 1t):** **`21–9–10` (`65.0%` — single-digit losses, perfectly balanced `s=14000: 65.0%` & `s=9500: 65.0%`)** @ **`20.0 ms/t`**.
+  - **New All-Time Single-Model Dual-Boss Average:** **`67.5%`** (**`+3.1%`** over `W9S` & `W13_KD`, matching our 2-model `Ens(W9S+W6B)` at **`2×` lower latency!**).
+  - **`EsparanBot v0.2` (24g):** **`20–1–3` (`89.6%` — NEW ALL-TIME RECORD, only 1 loss! `s=9500: 91.7%`, `s=15300: 9–0–3 / 87.5%` undefeated!)** — right at our **90%** boss mastery target!
+  - **Large 24pl Asymmetric:** **`6–6–0` (`50.0%` — doubled `W13_KD`'s `25.0%`!)** vs. `Sparky v1.6` | **`9–3–0` (`75.0%`)** vs. `Waffle3z-GA`.
 
 ## Wave 13 Highlights — Profiling-Driven C99 Engine (`5.3ms` Pure / `21ms` Search) & `W13_KD` Single-Model Records
 - **Profiling-Driven Codebase Acceleration (`0.00e+00` / `<2.4e-7` Bit-Exact Parity, `21/21` Unit Tests):**

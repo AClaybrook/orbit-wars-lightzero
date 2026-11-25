@@ -149,8 +149,8 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
   <div class="wrap">
     <div class="bar">
       <div>
-        <div class="title">Galcon AI Wave 13 — C99 Fast Engine (5.3ms Pure / 21ms Search) &amp; W13_KD Single-Model Records</div>
-        <div class="sub">1.29M PlanetTimelineTransformer • Fused C99 Feature Kernel (16.7×) + Lazy D4 (~80×) + ms_only Search • W13_KD Single-Model 70.0% s14k Sparky &amp; 83.3% Large Waffle3z • Unmodified Sparky v1.6, Waffle3z-GA &amp; EsparanBot v0.2</div>
+        <div class="title">Galcon AI Wave 14 — Replay-Pooled 20ms Single-Model Champion (70% Waffle3z • 65% Sparky • 89.6% Esparan)</div>
+        <div class="sub">1.29M PlanetTimelineTransformer • 10,297 Replay-Pooled Soft-KD States (160 Games) • C99 Fast Engine (5.3ms Pure / 20ms Search) • Unmodified Sparky v1.6, Waffle3z-GA &amp; EsparanBot v0.2</div>
       </div>
       <div class="tabs">
         <button class="tab-btn active" id="tabReplays">▶ Live Replays</button>
@@ -198,7 +198,7 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
       <div class="elo-card">
         <div style="display:flex; flex-wrap:wrap; gap:8px; justify-content:space-between; align-items:center; margin-bottom:10px;">
           <div style="font-weight:700;">Galcon Elo Ladder (Anchored: ClassicBot = 1200.0 • Sparky v1.6 = 1821.4 • Waffle3z-GA ≈ 1745)</div>
-          <span class="badge ok">#1 Ens: ~1979 Elo (71.2% Spky) • #1 1-Mod: W13_KD (70.0% s14k Spky • 83.3% Large Waff @ 21–24ms)</span>
+          <span class="badge ok">#1 Ens: ~1979 Elo (71.2% Spky) • #1 1-Mod: W14_KD (~1955 Elo: 65% Spky • 70% Waff • 89.6% Esp @ 20ms!)</span>
         </div>
         <div id="eloRows"></div>
       </div>
@@ -207,21 +207,21 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
         <div id="bossBars" style="display:grid; gap:10px; margin-bottom:14px;"></div>
         <table class="bench">
           <thead>
-            <tr><th>Agent</th><th>Sparky v1.6 18pl (40g, 1t)</th><th>Waffle3z-GA 18pl (40g, 1t)</th><th>Large 22–28pl (Asym / Pair Spky)</th><th>EsparanBot / Heur</th><th>Latency (W13 VM)</th></tr>
+            <tr><th>Agent</th><th>Sparky v1.6 18pl (40g, 1t)</th><th>Waffle3z-GA 18pl (40g, 1t)</th><th>Large 22–28pl (Asym / Pair Spky)</th><th>EsparanBot / Heur</th><th>Latency (W13/14 VM)</th></tr>
           </thead>
           <tbody>
             <tr><td><strong>Wave 12 Surgical Ens (W9S+W6B)</strong> <span class="badge ok">#1 Sparky!</span></td><td><strong>26–9–5 (71.2% — #1!)</strong> <span class="sub">s14k:65% s9.5k:77.5%</span></td><td>24–13–3 (63.7%) <span class="sub">s14k:65% s9.5k:62.5%</span></td><td><strong>66.7%</strong> / 33.3% <span class="sub">(75% Asym Waff)</span></td><td>64.6% / <strong>92.2%</strong></td><td class="mono"><strong>35–42 ms</strong></td></tr>
+            <tr><td><strong>Wave 14 Replay-Pooled Single (W14_KD)</strong> <span class="badge ok">#1 1-Mod!</span></td><td><strong>21–9–10 (65.0%, 9L!)</strong> <span class="sub">65.0% / 65.0% bal</span></td><td><strong>24–8–8 (70.0% — #1 1-Mod!)</strong> <span class="sub">s9.5k:77.5% / 82.5% Surg</span></td><td><strong>50.0%</strong> / 33.3% <span class="sub">(75% Asym Waff)</span></td><td><strong>89.6% (#1!)</strong> / 82.8%</td><td class="mono"><strong>19.9–20.0 ms</strong></td></tr>
             <tr><td><strong>Wave 12 Direct-Rush Ens (W9S+W6B)</strong> <span class="badge ok">#1 Waff!</span></td><td>24–11–5 (66.2%) <span class="sub">s14k:60% s9.5k:72.5%</span></td><td><strong>27–10–3 (71.2% — #1!)</strong> <span class="sub">s14k:70% s9.5k:72.5%</span></td><td><strong>66.7%</strong> / — <span class="sub">(75% Asym Waff)</span></td><td>64.6% / 89.1%</td><td class="mono"><strong>35–42 ms</strong></td></tr>
-            <tr><td><strong>Wave 13 Soft-KD Single Search (W13_KD)</strong> <span class="badge ok">#1 1-Mod!</span></td><td><strong>22–12–6 (62.5%)</strong> <span class="sub"><strong>s14k:70.0% (#1 All-Time!)</strong></span></td><td><strong>25–12–3 (66.2%)</strong> <span class="sub">67.5% Surg • s9.5k:72.5%</span></td><td>25.0% / 33.3% <span class="sub">(<strong>83.3% Asym Waff #1!</strong>)</span></td><td><strong>85.4% (#1!)</strong> / <strong>90.6%</strong></td><td class="mono"><strong>21–24 ms</strong></td></tr>
-            <tr><td><strong>Wave 9 Single Search (W9S)</strong> <span class="badge ok">#1 Spky 1-Mod</span></td><td><strong>24–11–5 (66.3%)</strong> <span class="sub">s14k:57.5% s9.5k:75%</span></td><td>23–13–4 (62.5%) <span class="sub">s14k:65% s9.5k:60%</span></td><td>50.0% / — <span class="sub">(<strong>83.3% Asym Waff</strong>)</span></td><td>83.3% / <strong>96.9%</strong></td><td class="mono"><strong>22–28 ms</strong></td></tr>
-            <tr><td><strong>Wave 11 Soft-KD Search (W11_KD)</strong> <span class="badge ok">#1 Large 1-Mod</span></td><td>21–15–4 (57.5%) <span class="sub">57.5% / 57.5% bal</span></td><td><strong>26–11–3 (68.8% — #1 1-Mod!)</strong> <span class="sub">s14k:70%</span></td><td>41.7% / <strong>58.3% (#1 All-Time!)</strong></td><td><strong>85.4% (#1!)</strong> / 84.4% <span class="sub">(92.2% Pure)</span></td><td class="mono"><strong>21–25 ms</strong></td></tr>
-            <tr><td><strong>Wave 9 Ensemble (W6B+W7p1)</strong></td><td>25–13–2 (65.0%)</td><td>24–13–3 (63.8%)</td><td><strong>66.7%</strong> / 50.0% <span class="sub">(83.3% Asym Waff)</span></td><td>83.3% / <strong>100%</strong></td><td class="mono">36–40 ms</td></tr>
+            <tr><td><strong>Wave 13 Soft-KD Single (W13_KD)</strong> <span class="badge">s14k King</span></td><td>22–12–6 (62.5%) <span class="sub"><strong>s14k:70.0% (#1 All-Time!)</strong></span></td><td>25–12–3 (66.2%) <span class="sub">67.5% Surg</span></td><td>25.0% / 33.3% <span class="sub">(<strong>83.3% Asym Waff #1!</strong>)</span></td><td>85.4% / <strong>90.6%</strong></td><td class="mono"><strong>21–24 ms</strong></td></tr>
+            <tr><td><strong>Wave 9 Single Search (W9S)</strong></td><td><strong>24–11–5 (66.3%)</strong> <span class="sub">s14k:57.5% s9.5k:75%</span></td><td>23–13–4 (62.5%) <span class="sub">s14k:65% s9.5k:60%</span></td><td>50.0% / — <span class="sub">(<strong>83.3% Asym Waff</strong>)</span></td><td>83.3% / <strong>96.9%</strong></td><td class="mono"><strong>22–28 ms</strong></td></tr>
+            <tr><td><strong>Wave 11 Soft-KD Search (W11_KD)</strong> <span class="badge ok">#1 Large Pair</span></td><td>21–15–4 (57.5%) <span class="sub">57.5% / 57.5% bal</span></td><td>26–11–3 (68.8%) <span class="sub">s14k:70%</span></td><td>41.7% / <strong>58.3% (#1 All-Time!)</strong></td><td>85.4% / 84.4% <span class="sub">(92.2% Pure)</span></td><td class="mono"><strong>21–25 ms</strong></td></tr>
             <tr><td><strong>Wave 8 Pure (5.5 ms, 0-ply!)</strong> <span class="badge ok">#1 Std Pure</span></td><td><strong>18–9–13 (61.3% Pure!)</strong></td><td><strong>18–16–6 (52.5%)</strong></td><td>— / 25.0% <span class="sub">(33.3% Pair Waff)</span></td><td><strong>79.2%</strong> / 100% Cls</td><td class="mono"><strong>5.5 ms</strong></td></tr>
             <tr><td><strong>Wave 11 Pure (6.0 ms, 0-ply!)</strong> <span class="badge ok">#1 Large Pure</span></td><td>13–14–13 (48.8%) <span class="sub">s14k:52.5%</span></td><td>10–21–9 (36.2%)</td><td>— / <strong>50.0% Pure (2× W8!)</strong></td><td>62.5% / 82.8%</td><td class="mono"><strong>6.0 ms</strong></td></tr>
             <tr><td><strong>Waffle3z-GA (bots_waffle3z_optimized)</strong></td><td>9–20–11 (36.3%)</td><td>— (Self)</td><td>16.7% / 41.7%</td><td><strong>67.5% vs Esp</strong></td><td class="mono">&lt;3 ms</td></tr>
           </tbody>
         </table>
-        <div class="sub" style="margin-top:10px;"><strong>Wave 13 Highlights:</strong> (1) <strong>Profiling-Driven C99/NumPy Engine Speedups (0.00e+00 / &lt;2.4e-7 Parity):</strong> Auto-compiled C99 feature+timeline kernel in <code>galcon/fast_c.py</code> cuts <code>extract_galcon_features</code> <code>1.69ms → 0.10ms</code> (<strong>16.7× faster</strong>), lazy 2D-centroid <code>canonicalize_galcon_d4</code> runs <strong>~80× faster</strong>, vectorized <code>extract_galcon_redir_features</code> runs <strong>3.8× faster</strong>, and <code>ms_only=True</code> skips the dead legacy pairwise head in Pure + mid-ply Search — dropping <strong>Pure latency to <code>5.3–5.7 ms/t</code></strong>, <strong>Single-Model Search to <code>21–24 ms/t</code></strong>, <strong>Ensemble Search <code>1.40×</code> faster</strong>, and <strong>PPO rollouts <code>1.48×</code> faster</strong> (plus <code>B=10</code> waves &amp; <code>--save-ei-npz</code>/<code>--load-ei-npz</code> AlphaZero replay pooling). (2) <strong><code>galcon_wave13_kd.pt</code> (Single-Model Soft-KD from Wave 12 Surgical Teacher):</strong> Sets an <strong>all-time <code>s=14000</code> Sparky v1.6 record of <code>70.0% (12–4–4)</code></strong> (<code>62.5%</code> 40g overall), <strong><code>66.2%</code> / <code>67.5%</code> Surgical vs. Waffle3z-GA</strong> (tying <code>W9S</code> for #1 single-model dual-boss avg <code>64.4%</code> at <code>21–24 ms/t</code>!), <strong>all-time record <code>83.3% (10–2–0)</code> Large 24pl Asym vs. Waffle3z-GA</strong>, <strong><code>85.4%</code> EsparanBot</strong>, and <strong><code>90.6%</code> Heuristics</strong>.</div>
+        <div class="sub" style="margin-top:10px;"><strong>Wave 14 Highlights:</strong> First multi-round <strong>Replay-Pooled AlphaZero Search-EI</strong> wave combining 84 Large-heavy Surgical teacher games (<code>5,231</code> states) + 76 pure single-model <code>W13_KD</code> games (<code>5,066</code> states) = <strong><code>10,297</code> pooled Soft-KD states</strong> (lowest <code>val_bce=0.027</code>, <code>aux=97.0%</code>). <strong><code>galcon_wave14_kd.pt</code> (new default <code>--bot search</code>, <code>19.9–20.0 ms/t</code>)</strong> sets a <strong>new #1 Single-Model Dual-Boss Avg of <code>67.5%</code></strong> (<code>+3.1%</code> over <code>W9S</code>/<code>W13_KD</code>, matching our 2-model ensemble at <code>2×</code> lower latency!): <strong><code>70.0% (24–8–8)</code> vs. Waffle3z-GA</strong> (#1 single model, only 8 losses!), <strong><code>65.0% (21–9–10)</code> vs. Sparky v1.6</strong> (only 9 losses, balanced 65%/65%!), <strong><code>89.6% (20–1–3)</code> vs. EsparanBot v0.2</strong> (#1 all-time, hitting our ~90% boss mastery target!), and <strong><code>50.0%</code> Large 24pl Asym Sparky</strong> (doubling <code>W13_KD</code>) / <code>75.0%</code> Large Waffle3z!</div>
       </div>
     </div>
   </div>
@@ -229,9 +229,10 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
   <script>
     const MATCHES = {matches_json};
     const ELO_LADDER = [
-      {{ name: "Wave 12 Surgical Ens (W9S+W6B) [Default]", elo: 1979.0, ms: "35–42 ms", col: "#10b981" }},
-      {{ name: "Wave 12 Direct-Rush Ens [71.2% Waff #1]", elo: 1955.0, ms: "35–42 ms", col: "#059669" }},
-      {{ name: "Wave 13 Soft-KD Single Search (W13_KD) [21ms]", elo: 1941.0, ms: "21–24 ms", col: "#2dd4bf" }},
+      {{ name: "Wave 12 Surgical Ens (W9S+W6B) [Default Ens]", elo: 1979.0, ms: "35–42 ms", col: "#10b981" }},
+      {{ name: "Wave 14 Replay-Pooled Single (W14_KD) [20ms #1!]", elo: 1955.0, ms: "19.9–20 ms", col: "#059669" }},
+      {{ name: "Wave 12 Direct-Rush Ens [71.2% Waff #1]", elo: 1955.0, ms: "35–42 ms", col: "#34d399" }},
+      {{ name: "Wave 13 Soft-KD Single Search (W13_KD) [s14k #1]", elo: 1941.0, ms: "21–24 ms", col: "#2dd4bf" }},
       {{ name: "Wave 9 Single Search (W9S) [66.3% Spky]", elo: 1939.0, ms: "22–28 ms", col: "#14b8a6" }},
       {{ name: "Wave 10 Ensemble (W9S+W10S) [s14k Ens]", elo: 1939.0, ms: "34–40 ms", col: "#0d9488" }},
       {{ name: "Wave 9 Ensemble (W6B+W7p1) [Large/Heur]", elo: 1929.0, ms: "36–40 ms", col: "#0f766e" }},
@@ -262,12 +263,12 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
 
     const BOSS_COMPARE = [
       {{ name: "W12 Surgical Ens", spky: 71.2, waff: 63.7, lg: 66.7, lgLbl: "Large Asym Spky" }},
+      {{ name: "W14 Replay 1-Mod (20ms)", spky: 65.0, waff: 70.0, lg: 89.6, lgLbl: "EsparanBot (#1!)" }},
       {{ name: "W12 Direct-Rush Ens", spky: 66.2, waff: 71.2, lg: 66.7, lgLbl: "Large Asym Spky" }},
       {{ name: "W13 Soft-KD (21ms)", spky: 62.5, waff: 66.2, lg: 83.3, lgLbl: "Large Asym Waff" }},
       {{ name: "W9 Single Search", spky: 66.3, waff: 62.5, lg: 50.0, lgLbl: "Large Asym Spky" }},
       {{ name: "W11 Soft-KD (21ms)", spky: 57.5, waff: 68.8, lg: 58.3, lgLbl: "Large Pair Spky" }},
       {{ name: "W8 Pure (5.5 ms)", spky: 61.3, waff: 52.5, lg: 25.0, lgLbl: "Large Pair Spky" }},
-      {{ name: "W11 Pure (6.0 ms)", spky: 48.8, waff: 36.2, lg: 50.0, lgLbl: "Large Pair Spky" }},
     ];
     const bossWrap = document.getElementById("bossBars");
     BOSS_COMPARE.forEach(r => {{
@@ -475,6 +476,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--w11-kd-checkpoint", default="checkpoints/galcon_wave11_kd.pt")
     parser.add_argument("--w11-pure-checkpoint", default="checkpoints/galcon_wave11_pure.pt")
     parser.add_argument("--w13-kd-checkpoint", default="checkpoints/galcon_wave13_kd.pt")
+    parser.add_argument("--w14-kd-checkpoint", default="checkpoints/galcon_wave14_kd.pt")
     parser.add_argument("--pure-checkpoint", default="checkpoints/galcon_wave8_pure.pt")
     parser.add_argument("--gen4-checkpoint", default="checkpoints/galcon_gen4_ppo_s2.pt")
     parser.add_argument("--gen2-checkpoint", default="checkpoints/galcon_gen2_champion.pt")
@@ -525,6 +527,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         if has_w13_kd
         else None
     )
+    has_w14_kd = bool(args.w14_kd_checkpoint and Path(args.w14_kd_checkpoint).is_file())
+    w14_kd = (
+        GalconSearchTransformerAgent(args.w14_kd_checkpoint, use_d4_canonical=True, use_d4_tta=False)
+        if has_w14_kd
+        else None
+    )
     has_ens = bool(args.checkpoint2 and Path(args.checkpoint2).is_file())
     if has_ens:
         search = EnsembleGalconSearchAgent(
@@ -533,12 +541,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         search_label = "Wave 12 Surgical Ens (W9S+W6B, 38 ms)"
     else:
         search = GalconSearchTransformerAgent(args.checkpoint, use_d4_canonical=True, use_d4_tta=False)
-        search_label = "Wave 13 Single Adaptive Search (21 ms)"
+        search_label = "Wave 14 Single Adaptive Search (20 ms)"
     w9_search_label = "Wave 9 Single Search (24 ms, 66.3%)"
     w10_search_label = "Wave 10 Single Search (22 ms, 66.3% Waff)"
     w11_kd_label = "Wave 11 Soft-KD Search (22 ms, 68.8% Waff / 58.3% Large)"
     w11_pure_label = "Wave 11 Pure (6 ms, 50.0% Large Pair!)"
     w13_kd_label = "Wave 13 Soft-KD Single Search (21 ms, 70% s14k / 83% Lg Waff)"
+    w14_kd_label = "Wave 14 Replay-Pooled Single (20 ms, 65% Spky / 70% Waff / 89.6% Esp)"
     pure_label = "Wave 8 Pure (5.5 ms, 1× MS)" if Path(pure_ckpt).name == "galcon_wave8_pure.pt" else "Wave 6B Pure (1× Canon MS)"
     tactical = GalconTacticalBot()
     classic = GalconClassicBot()
@@ -577,6 +586,25 @@ def main(argv: Optional[List[str]] = None) -> int:
                     target_winner=1,
                 )
             )
+            # 1a. Wave 14 #1 Single-Model Replay-Pooled WIN vs. Sparky v1.6 (65% Spky / 70% Waff @ 20ms!)
+            if w14_kd is not None:
+                matches.append(
+                    _find_showcase_win(
+                        f"[WIN 18pl W14 20ms #1] {w14_kd_label} vs. esparano Sparky v1.6",
+                        w14_kd_label,
+                        w14_kd.act,
+                        "esparano Sparky v1.6 (Lua)",
+                        sparky.act,
+                        seed_start=14002,
+                        num_planets=18,
+                        width=400.0,
+                        height=240.0,
+                        prefer_redir=False,
+                        max_ticks=220,
+                        max_attempts=12,
+                        target_winner=1,
+                    )
+                )
             # 1b. Wave 13 Single-Model Soft-KD WIN vs. Sparky v1.6 on s=14000 (70.0% All-Time s14k Record @ 21ms!)
             if w13_kd is not None:
                 matches.append(
