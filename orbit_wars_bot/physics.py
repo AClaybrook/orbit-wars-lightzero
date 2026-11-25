@@ -18,6 +18,8 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+import numpy as np
+
 # Official Orbit Wars constants
 BOARD_SIZE: float = 100.0
 CENTER: float = BOARD_SIZE / 2.0
@@ -226,6 +228,217 @@ def predict_all_planet_tracks(
         pos = (float(p[2]), float(p[3]))
         tracks[pid] = [pos] * (max_dt + 1)
     return tracks
+
+
+def predict_all_planet_tracks_arrays(
+    planets: Sequence[Sequence[float]],
+    max_dt: int,
+    current_step: int,
+    angular_velocity: float,
+    initial_by_id: Dict[int, Sequence[float]],
+    comet_lookup: Optional[Dict[int, Tuple[List[List[float]], int]]] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[int, List[Optional[Tuple[float, float]]]]]:
+    """Vectorized version of ``predict_all_planet_tracks`` returning dense arrays + dict.
+
+    Returns ``(tr_x, tr_y, tr_valid, tracks)`` where ``tr_x``/``tr_y`` have shape
+    ``(N, max_dt + 1)`` (``NaN`` for expired comets) and ``tr_valid`` is True iff
+    the planet is present on-board (not ``None`` and ``x >= 0``).
+    """
+    n = len(planets)
+    h1 = max_dt + 1
+    tr_x = np.full((n, h1), np.nan, dtype=np.float64)
+    tr_y = np.full((n, h1), np.nan, dtype=np.float64)
+    tracks: Dict[int, List[Optional[Tuple[float, float]]]] = {}
+    if n == 0:
+        return tr_x, tr_y, np.zeros((0, h1), dtype=bool), tracks
+
+    dts = np.arange(1, h1, dtype=np.float64)
+    ang_steps = angular_velocity * (current_step + dts - 1.0)
+
+    orb_indices: List[int] = []
+    orb_r_list: List[float] = []
+    orb_ang0_list: List[float] = []
+    orb_pids: List[int] = []
+    orb_x0: List[float] = []
+    orb_y0: List[float] = []
+
+    for i, p in enumerate(planets):
+        pid = int(p[0])
+        px, py, pr = float(p[2]), float(p[3]), float(p[4])
+        if comet_lookup is not None and pid in comet_lookup:
+            path, cur_idx = comet_lookup[pid]
+            plen = len(path)
+            tr_x[i, 0] = px
+            tr_y[i, 0] = py
+            seq: List[Optional[Tuple[float, float]]] = [(px, py)]
+            for dt in range(1, h1):
+                fidx = cur_idx + dt
+                if fidx < 0:
+                    tr_x[i, dt] = -99.0
+                    tr_y[i, dt] = -99.0
+                    seq.append((-99.0, -99.0))
+                elif fidx >= plen:
+                    seq.append(None)
+                else:
+                    pt = path[fidx]
+                    fx, fy = float(pt[0]), float(pt[1])
+                    tr_x[i, dt] = fx
+                    tr_y[i, dt] = fy
+                    seq.append((fx, fy))
+            tracks[pid] = seq
+            continue
+
+        init_p = initial_by_id.get(pid)
+        if init_p is not None:
+            dx = float(init_p[2]) - CENTER
+            dy = float(init_p[3]) - CENTER
+            orb_r = math.hypot(dx, dy)
+            if orb_r + pr < ROTATION_RADIUS_LIMIT:
+                orb_indices.append(i)
+                orb_r_list.append(orb_r)
+                orb_ang0_list.append(math.atan2(dy, dx))
+                orb_pids.append(pid)
+                orb_x0.append(px)
+                orb_y0.append(py)
+                continue
+
+        tr_x[i, :] = px
+        tr_y[i, :] = py
+        tracks[pid] = [(px, py)] * h1
+
+    if orb_indices:
+        idx_arr = np.asarray(orb_indices, dtype=np.int64)
+        r_arr = np.asarray(orb_r_list, dtype=np.float64)[:, None]
+        a0_arr = np.asarray(orb_ang0_list, dtype=np.float64)[:, None]
+        ang = a0_arr + ang_steps[None, :]
+        ox = CENTER + r_arr * np.cos(ang)
+        oy = CENTER + r_arr * np.sin(ang)
+        tr_x[idx_arr, 0] = orb_x0
+        tr_y[idx_arr, 0] = orb_y0
+        tr_x[idx_arr, 1:] = ox
+        tr_y[idx_arr, 1:] = oy
+        ox_list = ox.tolist()
+        oy_list = oy.tolist()
+        for k, pid in enumerate(orb_pids):
+            tracks[pid] = [(orb_x0[k], orb_y0[k])] + list(zip(ox_list[k], oy_list[k]))
+
+    tr_valid = (~np.isnan(tr_x)) & (tr_x >= 0.0)
+    return tr_x, tr_y, tr_valid, tracks
+
+
+def predict_fleet_arrivals_vectorized(
+    fleets: Sequence[Sequence[float]],
+    planets: Sequence[Sequence[float]],
+    tr_x: np.ndarray,
+    tr_y: np.ndarray,
+    max_horizon: int = 24,
+    max_speed: float = DEFAULT_SHIP_SPEED,
+) -> Dict[int, List[FleetArrival]]:
+    """Bit-exact 1-shot ``(F, H, N)`` vectorized swept-pair fleet arrival predictor."""
+    planet_ids = [int(p[0]) for p in planets]
+    arrivals: Dict[int, List[FleetArrival]] = {pid: [] for pid in planet_ids}
+    nf = len(fleets)
+    n = len(planets)
+    if nf == 0 or n == 0:
+        return arrivals
+
+    eff_h = min(max_horizon, int(tr_x.shape[1]) - 1)
+    if eff_h <= 0:
+        return arrivals
+
+    fl_arr = np.asarray(fleets, dtype=np.float64)
+    fids = fl_arr[:, 0].astype(np.int64)
+    fown = fl_arr[:, 1].astype(np.int64)
+    fx0 = fl_arr[:, 2]
+    fy0 = fl_arr[:, 3]
+    fang = fl_arr[:, 4]
+    fships = fl_arr[:, 6].astype(np.int64)
+    fspd = np.where(
+        fships <= 1,
+        1.0,
+        np.minimum(max_speed, 1.0 + (max_speed - 1.0) * (np.log(np.maximum(1, fships)) / _LN_1000) ** 1.5),
+    )
+
+    vx = np.cos(fang) * fspd
+    vy = np.sin(fang) * fspd
+    pr = np.asarray([float(p[4]) for p in planets], dtype=np.float64)
+    pr2 = pr * pr
+
+    t_idx = np.arange(eff_h, dtype=np.float64)
+    ox = fx0[:, None] + vx[:, None] * t_idx[None, :]
+    oy = fy0[:, None] + vy[:, None] * t_idx[None, :]
+    nx = ox + vx[:, None]
+    ny = oy + vy[:, None]
+
+    oob = (nx < 0.0) | (nx > BOARD_SIZE) | (ny < 0.0) | (ny > BOARD_SIZE)
+    l2 = vx * vx + vy * vy
+    safe_l2 = np.where(l2 > 0.0, l2, 1.0)[:, None]
+    tt = np.clip(((CENTER - ox) * vx[:, None] + (CENTER - oy) * vy[:, None]) / safe_l2, 0.0, 1.0)
+    tt = np.where((l2 > 0.0)[:, None], tt, 0.0)
+    sun_hit = ((CENTER - (ox + tt * vx[:, None])) ** 2 + (CENTER - (oy + tt * vy[:, None])) ** 2) < (
+        SUN_RADIUS * SUN_RADIUS
+    )
+    dead_after = oob | sun_hit
+
+    p_old_x = tr_x[:, :eff_h].T
+    p_old_y = tr_y[:, :eff_h].T
+    p_old_ok = (~np.isnan(p_old_x)) & (p_old_x >= 0.0)
+    p_new_x_raw = tr_x[:, 1 : eff_h + 1].T
+    p_new_y_raw = tr_y[:, 1 : eff_h + 1].T
+    p_new_none = np.isnan(p_new_x_raw)
+    p_new_x = np.where(p_new_none, p_old_x, p_new_x_raw)
+    p_new_y = np.where(p_new_none, p_old_y, p_new_y_raw)
+    p_dvx = p_new_x - p_old_x
+    p_dvy = p_new_y - p_old_y
+
+    d0x = ox[:, :, None] - p_old_x[None, :, :]
+    d0y = oy[:, :, None] - p_old_y[None, :, :]
+    cull = (fspd[:, None, None] + 4.5) + pr[None, None, :]
+    cand = p_old_ok[None, :, :] & (np.abs(d0x) <= cull) & (np.abs(d0y) <= cull)
+
+    hits = np.zeros((nf, eff_h, n), dtype=bool)
+    cf, ct, cp = np.nonzero(cand)
+    if cf.size > 0:
+        cd0x = d0x[cf, ct, cp]
+        cd0y = d0y[cf, ct, cp]
+        cdvx = vx[cf] - p_dvx[ct, cp]
+        cdvy = vy[cf] - p_dvy[ct, cp]
+        qa = cdvx * cdvx + cdvy * cdvy
+        qb = 2.0 * (cd0x * cdvx + cd0y * cdvy)
+        qc = cd0x * cd0x + cd0y * cd0y - pr2[cp]
+        disc = qb * qb - 4.0 * qa * qc
+        small_qa = qa < 1e-12
+        safe_qa = np.where(small_qa, 1.0, qa)
+        sq = np.sqrt(np.maximum(disc, 0.0))
+        t1 = (-qb - sq) / (2.0 * safe_qa)
+        t2 = (-qb + sq) / (2.0 * safe_qa)
+        chits = np.where(small_qa, qc <= 0.0, (disc >= 0.0) & (t2 >= 0.0) & (t1 <= 1.0))
+        if np.any(chits):
+            hits[cf[chits], ct[chits], cp[chits]] = True
+
+    hit_tick_any = hits.any(axis=2)
+    any_event = hit_tick_any | dead_after
+    has_event = any_event.any(axis=1)
+    first_t = any_event.argmax(axis=1)
+    for fi in np.flatnonzero(has_event):
+        t = int(first_t[fi])
+        if hit_tick_any[fi, t]:
+            pj = int(np.argmax(hits[fi, t]))
+            if not p_new_none[t, pj]:
+                arrivals[planet_ids[pj]].append(
+                    FleetArrival(
+                        fleet_id=int(fids[fi]),
+                        owner=int(fown[fi]),
+                        ships=int(fships[fi]),
+                        planet_id=planet_ids[pj],
+                        eta=t + 1,
+                    )
+                )
+
+    for pid in arrivals:
+        if len(arrivals[pid]) > 1:
+            arrivals[pid].sort(key=lambda a: a.eta)
+    return arrivals
 
 
 @dataclass(frozen=True)

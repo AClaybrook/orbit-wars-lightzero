@@ -57,6 +57,8 @@ from orbit_wars_bot.planet_transformer import (  # noqa: E402
     EncodedPlanetState,
     PlanetTimelineTransformer,
     apply_d4_planet_feats,
+    apply_d4_timeline_feats,
+    build_shared_planet_physics,
     extract_planet_features,
     pad_encoded_state,
 )
@@ -192,17 +194,23 @@ def _policy_step(
         if (k_rot != 0 or flip_x)
         else enc.planet_feats
     )
+    tf_raw = enc.timeline_feats[..., : getattr(model, "timeline_dim", 8)]
+    tf_np = (
+        apply_d4_timeline_feats(tf_raw, k_rot=k_rot, flip_x=flip_x)
+        if (k_rot != 0 or flip_x)
+        else tf_raw
+    )
     pf = torch.from_numpy(pf_np[None])
-    tf = torch.from_numpy(enc.timeline_feats[None])
+    tf = torch.from_numpy(tf_np[None])
     ef = torch.from_numpy(enc.edge_feats[None])
     pm = torch.ones((1, n), dtype=torch.bool)
+    legal = torch.from_numpy(enc.legal_edges)
 
-    logits, fracs, val = model(pf, tf, ef, pm)
+    logits, fracs, val = model(pf, tf, ef, pm, legal_edges=legal.unsqueeze(0), compute_frac=(not force_all_in))
     logits = logits[0]  # (n, n+1)
-    fracs_np = fracs[0].cpu().numpy()  # (n, n)
+    fracs_np = fracs[0].cpu().numpy() if fracs is not None else np.ones((n, n), dtype=np.float32)  # (n, n)
     v_scalar = float(val[0].item())
 
-    legal = torch.from_numpy(enc.legal_edges)
     mask = torch.cat([torch.ones((n, 1), dtype=torch.bool), legal], dim=-1)
     logits = logits.masked_fill(~mask, -1e9)
 
@@ -266,6 +274,8 @@ def collect_episode(
     sim = FastOrbitSim.from_seed(seed=seed, num_agents=num_players, max_steps=max_steps)
     hero_slot_val = int(rng.integers(0, num_players)) if hero_slot is None else int(hero_slot)
     active_opp_model = opp_model if opp_model is not None else anchor
+    feat_ver = max(int(getattr(policy, "feature_version", 1)), int(getattr(active_opp_model, "feature_version", 1)))
+    tl_dim_pol = int(getattr(policy, "timeline_dim", 8))
     k_rot, flip_x = (int(rng.integers(0, 4)), bool(rng.integers(0, 2))) if rollout_d4 else (0, False)
 
     traj_pf: List[np.ndarray] = []
@@ -290,11 +300,18 @@ def collect_episode(
         planet_snaps[int(sim.step_count)] = {int(p[0]): (int(p[1]), int(p[5])) for p in sim.planets}
         actions: List[List[List[float]]] = [[] for _ in range(num_players)]
         recorded_hero = False
+        obs_shared = sim.to_observation(player=0)
+        shared_phys = build_shared_planet_physics(obs_shared, max_speed=sim.ship_speed)
 
         for pid in range(num_players):
             if pid == hero_slot_val:
-                obs_h = sim.to_observation(player=hero_slot_val)
-                enc_h = extract_planet_features(obs_h, player=hero_slot_val, max_speed=sim.ship_speed)
+                enc_h = extract_planet_features(
+                    obs_shared,
+                    player=hero_slot_val,
+                    max_speed=sim.ship_speed,
+                    feature_version=feat_ver,
+                    shared_physics=shared_phys,
+                )
                 if np.any(enc_h.owned_mask):
                     moves_h, act_cls, old_lp, val_h = _policy_step(
                         policy,
@@ -309,10 +326,12 @@ def collect_episode(
                     actions[pid] = moves_h
                     padded = pad_encoded_state(enc_h, MAX_PLANETS)
                     pf_store = padded["planet_feats"]
+                    tf_store = padded["timeline_feats"][..., :tl_dim_pol]
                     if k_rot != 0 or flip_x:
                         pf_store = apply_d4_planet_feats(pf_store, k_rot=k_rot, flip_x=flip_x)
+                        tf_store = apply_d4_timeline_feats(tf_store, k_rot=k_rot, flip_x=flip_x)
                     traj_pf.append(pf_store)
-                    traj_tf.append(padded["timeline_feats"])
+                    traj_tf.append(tf_store)
                     traj_ef.append(padded["edge_feats"])
                     traj_le.append(padded["legal_edges"])
                     traj_om.append(padded["owned_mask"])
@@ -334,15 +353,25 @@ def collect_episode(
                     except Exception:
                         actions[pid] = heuristic_moves(sim, pid)
                 elif opponent_kind == "self":
-                    obs_o = sim.to_observation(player=pid)
-                    enc_o = extract_planet_features(obs_o, player=pid, max_speed=sim.ship_speed)
+                    enc_o = extract_planet_features(
+                        obs_shared,
+                        player=pid,
+                        max_speed=sim.ship_speed,
+                        feature_version=feat_ver,
+                        shared_physics=shared_phys,
+                    )
                     mv_o, _, _, _ = _policy_step(
                         policy, enc_o, sample=True, temperature=0.55, force_all_in=force_all_in, rng=rng
                     )
                     actions[pid] = mv_o
                 else:  # frozen anchor or historical pool snapshot
-                    obs_o = sim.to_observation(player=pid)
-                    enc_o = extract_planet_features(obs_o, player=pid, max_speed=sim.ship_speed)
+                    enc_o = extract_planet_features(
+                        obs_shared,
+                        player=pid,
+                        max_speed=sim.ship_speed,
+                        feature_version=feat_ver,
+                        shared_physics=shared_phys,
+                    )
                     opp_sample = opp_temperature > 1e-4
                     opp_temp = opp_temperature if opp_sample else 1.0
                     mv_o, _, _, _ = _policy_step(
@@ -418,9 +447,9 @@ def collect_episode(
 
     if T == 0:
         empty = {
-            "planet_feats": np.zeros((0, MAX_PLANETS, 22), np.float32),
-            "timeline_feats": np.zeros((0, MAX_PLANETS, 20, 8), np.float32),
-            "edge_feats": np.zeros((0, MAX_PLANETS, MAX_PLANETS, 12), np.float32),
+            "planet_feats": np.zeros((0, MAX_PLANETS, 22), np.float16),
+            "timeline_feats": np.zeros((0, MAX_PLANETS, 20, tl_dim_pol), np.float16),
+            "edge_feats": np.zeros((0, MAX_PLANETS, MAX_PLANETS, 12), np.float16),
             "legal_edges": np.zeros((0, MAX_PLANETS, MAX_PLANETS), bool),
             "owned_mask": np.zeros((0, MAX_PLANETS), bool),
             "pad_mask": np.zeros((0, MAX_PLANETS), bool),
@@ -464,9 +493,9 @@ def collect_episode(
         traj_av.append(av)
 
     batch = {
-        "planet_feats": np.stack(traj_pf, axis=0),
-        "timeline_feats": np.stack(traj_tf, axis=0),
-        "edge_feats": np.stack(traj_ef, axis=0),
+        "planet_feats": np.stack(traj_pf, axis=0).astype(np.float16, copy=False),
+        "timeline_feats": np.stack(traj_tf, axis=0).astype(np.float16, copy=False),
+        "edge_feats": np.stack(traj_ef, axis=0).astype(np.float16, copy=False),
         "legal_edges": np.stack(traj_le, axis=0),
         "owned_mask": np.stack(traj_om, axis=0),
         "pad_mask": np.stack(traj_pm, axis=0),
@@ -497,6 +526,389 @@ def _configure_worker_threads() -> None:
         torch.set_num_threads(1)
     except Exception:
         pass
+
+
+@torch.no_grad()
+def _batched_policy_steps(
+    model: PlanetTimelineTransformer,
+    encs: Sequence[EncodedPlanetState],
+    *,
+    k_rots: Sequence[int],
+    flip_xs: Sequence[bool],
+    sample: bool = True,
+    temperature: float = 0.85,
+    launch_threshold: float = 0.50,
+    force_all_in: bool = False,
+    rngs: Sequence[np.random.Generator],
+) -> List[Tuple[List[List[float]], np.ndarray, np.ndarray, float]]:
+    """Run one batched CPU forward pass over ``len(encs)`` active games simultaneously."""
+    b_cnt = len(encs)
+    if b_cnt == 0:
+        return []
+    tl_dim = int(getattr(model, "timeline_dim", 8))
+    max_n = max(1, max(len(e.planet_ids) for e in encs))
+    pf = np.zeros((b_cnt, max_n, 22), dtype=np.float32)
+    tf = np.zeros((b_cnt, max_n, 20, tl_dim), dtype=np.float32)
+    ef = np.zeros((b_cnt, max_n, max_n, 12), dtype=np.float32)
+    pm = np.zeros((b_cnt, max_n), dtype=bool)
+    le = np.zeros((b_cnt, max_n, max_n), dtype=bool)
+
+    for b, e in enumerate(encs):
+        n = len(e.planet_ids)
+        if n == 0:
+            continue
+        kr, fx = k_rots[b], flip_xs[b]
+        pf_b = apply_d4_planet_feats(e.planet_feats, k_rot=kr, flip_x=fx) if (kr or fx) else e.planet_feats
+        tf_raw = e.timeline_feats[..., :tl_dim]
+        tf_b = apply_d4_timeline_feats(tf_raw, k_rot=kr, flip_x=fx) if (kr or fx) else tf_raw
+        pf[b, :n] = pf_b
+        tf[b, :n] = tf_b
+        ef[b, :n, :n] = e.edge_feats
+        pm[b, :n] = True
+        le[b, :n, :n] = e.legal_edges
+
+    pf_t = torch.from_numpy(pf)
+    tf_t = torch.from_numpy(tf)
+    ef_t = torch.from_numpy(ef)
+    pm_t = torch.from_numpy(pm)
+    le_t = torch.from_numpy(le)
+
+    logits, fracs, vals = model(pf_t, tf_t, ef_t, pm_t, legal_edges=le_t, compute_frac=(not force_all_in))
+    hold_ok = torch.ones((b_cnt, max_n, 1), dtype=torch.bool)
+    mask = torch.cat([hold_ok, le_t], dim=-1)
+    logits = logits.masked_fill(~mask, -1e9)
+    logp = F.log_softmax(logits, dim=-1).numpy()
+    if sample and temperature > 1e-4:
+        sprobs = F.softmax(logits / temperature, dim=-1).numpy()
+    else:
+        sprobs = F.softmax(logits, dim=-1).numpy()
+    fracs_np = fracs.numpy() if fracs is not None else None
+    vals_np = vals.numpy()
+
+    out: List[Tuple[List[List[float]], np.ndarray, np.ndarray, float]] = []
+    for b, e in enumerate(encs):
+        n = len(e.planet_ids)
+        act_cls = np.zeros((MAX_PLANETS,), dtype=np.int64)
+        old_lp = np.zeros((MAX_PLANETS,), dtype=np.float32)
+        if n == 0 or not np.any(e.owned_mask):
+            out.append(([], act_cls, old_lp, float(vals_np[b])))
+            continue
+        exp_set = set(e.expiring_comet_indices)
+        rng_b = rngs[b]
+        for i in range(n):
+            if not e.owned_mask[i] or not np.any(e.legal_edges[i]):
+                continue
+            if sample:
+                p_row = sprobs[b, i, : n + 1].astype(np.float64)
+                if i in exp_set and p_row[1:].sum() > 1e-9:
+                    p_row[0] = 0.0
+                ps = p_row.sum()
+                if ps <= 0.0:
+                    cls = 0
+                else:
+                    p_row /= ps
+                    cls = int(np.searchsorted(np.cumsum(p_row), rng_b.random()))
+                    if cls > n:
+                        cls = n
+            else:
+                p_launch = 1.0 - float(sprobs[b, i, 0])
+                if p_launch < launch_threshold and i not in exp_set:
+                    cls = 0
+                else:
+                    cls = 1 + int(np.argmax(sprobs[b, i, 1 : n + 1]))
+            act_cls[i] = cls
+            old_lp[i] = float(logp[b, i, cls])
+        fr_b = fracs_np[b, :n, :n] if fracs_np is not None else np.ones((n, n), dtype=np.float32)
+        moves = _decode_sampled_actions(e, act_cls, fr_b, force_all_in=force_all_in)
+        out.append((moves, act_cls, old_lp, float(vals_np[b])))
+    return out
+
+
+def collect_episodes_batched_2p(
+    policy: PlanetTimelineTransformer,
+    opp_model: PlanetTimelineTransformer,
+    *,
+    specs: Sequence[Tuple[int, int]],  # list of (seed, hero_slot)
+    temperature: float = 0.80,
+    max_steps: int = 220,
+    gamma: float = 0.99,
+    gae_lambda: float = 0.95,
+    shaping_coef: float = 0.02,
+    early_reset: bool = True,
+    force_all_in: bool = False,
+    rollout_d4: bool = True,
+    future_horizon: int = 10,
+    opp_temperature: float = 0.0,
+) -> List[Tuple[Dict[str, np.ndarray], Dict[str, float]]]:
+    """Run ``len(specs)`` 2P neural-pool games in lockstep with batched forward passes + shared physics."""
+    m = len(specs)
+    if m == 0:
+        return []
+    feat_ver = max(int(getattr(policy, "feature_version", 1)), int(getattr(opp_model, "feature_version", 1)))
+    tl_dim_pol = int(getattr(policy, "timeline_dim", 8))
+
+    rngs = [np.random.default_rng(s) for s, _ in specs]
+    sims = [FastOrbitSim.from_seed(seed=s, num_agents=2, max_steps=max_steps) for s, _ in specs]
+    hero_slots = [int(sl) for _, sl in specs]
+    k_rots = [int(rngs[i].integers(0, 4)) if rollout_d4 else 0 for i in range(m)]
+    flip_xs = [bool(rngs[i].integers(0, 2)) if rollout_d4 else False for i in range(m)]
+
+    traj_pf: List[List[np.ndarray]] = [[] for _ in range(m)]
+    traj_tf: List[List[np.ndarray]] = [[] for _ in range(m)]
+    traj_ef: List[List[np.ndarray]] = [[] for _ in range(m)]
+    traj_le: List[List[np.ndarray]] = [[] for _ in range(m)]
+    traj_om: List[List[np.ndarray]] = [[] for _ in range(m)]
+    traj_pm: List[List[np.ndarray]] = [[] for _ in range(m)]
+    traj_act: List[List[np.ndarray]] = [[] for _ in range(m)]
+    traj_logp: List[List[np.ndarray]] = [[] for _ in range(m)]
+    traj_vals: List[List[float]] = [[] for _ in range(m)]
+    traj_rews: List[List[float]] = [[] for _ in range(m)]
+    traj_steps: List[List[int]] = [[] for _ in range(m)]
+    traj_pids: List[List[List[int]]] = [[] for _ in range(m)]
+    planet_snaps: List[Dict[int, Dict[int, Tuple[int, int]]]] = [{} for _ in range(m)]
+    prev_phis = [float(evaluate_state(sims[i], hero_slots[i])) for i in range(m)]
+    early_winners: List[Optional[int]] = [None] * m
+    done_flags = [sims[i].done for i in range(m)]
+
+    opp_sample = opp_temperature > 1e-4
+    opp_temp = opp_temperature if opp_sample else 1.0
+    zero_kr = [0] * m
+    zero_fx = [False] * m
+
+    while not all(done_flags):
+        active = [i for i in range(m) if not done_flags[i]]
+        h_encs: List[EncodedPlanetState] = []
+        o_encs: List[EncodedPlanetState] = []
+        h_has_owned: List[bool] = []
+        act_kr: List[int] = []
+        act_fx: List[bool] = []
+        act_rngs: List[np.random.Generator] = []
+
+        for idx in active:
+            sim = sims[idx]
+            planet_snaps[idx][int(sim.step_count)] = {int(p[0]): (int(p[1]), int(p[5])) for p in sim.planets}
+            o_sh = sim.to_observation(player=0)
+            sh_phys = build_shared_planet_physics(o_sh, max_speed=sim.ship_speed)
+            hp = hero_slots[idx]
+            eh = extract_planet_features(
+                o_sh, player=hp, max_speed=sim.ship_speed, feature_version=feat_ver, shared_physics=sh_phys
+            )
+            eo = extract_planet_features(
+                o_sh, player=1 - hp, max_speed=sim.ship_speed, feature_version=feat_ver, shared_physics=sh_phys
+            )
+            h_encs.append(eh)
+            o_encs.append(eo)
+            h_has_owned.append(bool(np.any(eh.owned_mask)))
+            act_kr.append(k_rots[idx])
+            act_fx.append(flip_xs[idx])
+            act_rngs.append(rngs[idx])
+
+        h_out = _batched_policy_steps(
+            policy,
+            h_encs,
+            k_rots=act_kr,
+            flip_xs=act_fx,
+            sample=True,
+            temperature=temperature,
+            force_all_in=force_all_in,
+            rngs=act_rngs,
+        )
+        o_out = _batched_policy_steps(
+            opp_model,
+            o_encs,
+            k_rots=zero_kr[: len(active)],
+            flip_xs=zero_fx[: len(active)],
+            sample=opp_sample,
+            temperature=opp_temp,
+            force_all_in=force_all_in,
+            rngs=act_rngs,
+        )
+
+        for k, idx in enumerate(active):
+            sim = sims[idx]
+            hp = hero_slots[idx]
+            eh = h_encs[k]
+            moves_h, act_cls, old_lp, val_h = h_out[k]
+            moves_o = o_out[k][0]
+            recorded = h_has_owned[k]
+            if recorded:
+                padded = pad_encoded_state(eh, MAX_PLANETS)
+                pf_s = padded["planet_feats"]
+                tf_s = padded["timeline_feats"][..., :tl_dim_pol]
+                kr, fx = k_rots[idx], flip_xs[idx]
+                if kr or fx:
+                    pf_s = apply_d4_planet_feats(pf_s, k_rot=kr, flip_x=fx)
+                    tf_s = apply_d4_timeline_feats(tf_s, k_rot=kr, flip_x=fx)
+                traj_pf[idx].append(pf_s)
+                traj_tf[idx].append(tf_s)
+                traj_ef[idx].append(padded["edge_feats"])
+                traj_le[idx].append(padded["legal_edges"])
+                traj_om[idx].append(padded["owned_mask"])
+                traj_pm[idx].append(padded["pad_mask"])
+                traj_act[idx].append(act_cls)
+                traj_logp[idx].append(old_lp)
+                traj_vals[idx].append(val_h)
+                traj_steps[idx].append(int(sim.step_count))
+                traj_pids[idx].append(list(eh.planet_ids))
+
+            acts = [[], []]
+            acts[hp] = moves_h if recorded else []
+            acts[1 - hp] = moves_o
+            sim.step(acts)
+            if recorded:
+                cur_phi = float(evaluate_state(sim, hp))
+                traj_rews[idx].append(shaping_coef * (gamma * cur_phi - prev_phis[idx]))
+                prev_phis[idx] = cur_phi
+
+            if sim.done:
+                done_flags[idx] = True
+            elif early_reset and sim.step_count >= 12:
+                totals = sim.scores()
+                p0_c = sim.planet_count(0)
+                p1_c = sim.planet_count(1)
+                if (p0_c > 0) ^ (p1_c > 0):
+                    sole = 0 if p0_c > 0 else 1
+                    if totals[sole] >= max(totals) and sum(totals) > 0:
+                        early_winners[idx] = sole
+                        done_flags[idx] = True
+
+    results: List[Tuple[Dict[str, np.ndarray], Dict[str, float]]] = []
+    for idx in range(m):
+        sim = sims[idx]
+        hp = hero_slots[idx]
+        planet_snaps[idx][int(sim.step_count)] = {int(p[0]): (int(p[1]), int(p[5])) for p in sim.planets}
+        totals = sim.scores()
+        if early_winners[idx] is not None:
+            win_pid = int(early_winners[idx])
+        elif sim.done:
+            win_pid = sim.winner()
+        else:
+            max_s = max(totals)
+            winners = [p_i for p_i, sc in enumerate(totals) if sc == max_s]
+            win_pid = winners[0] if len(winners) == 1 else -1
+
+        term_rew = 1.0 if win_pid == hp else (0.0 if win_pid < 0 else -1.0)
+        hero_rank = 1.0 if win_pid == hp else (1.5 if win_pid < 0 else 2.0)
+        rews = traj_rews[idx]
+        vals = traj_vals[idx]
+        if rews:
+            rews[-1] += term_rew
+
+        t_len = len(rews)
+        advs = np.zeros((t_len,), dtype=np.float32)
+        rets = np.zeros((t_len,), dtype=np.float32)
+        last_gae = 0.0
+        for t in reversed(range(t_len)):
+            next_v = 0.0 if (t == t_len - 1) else vals[t + 1]
+            delta = rews[t] + gamma * next_v - vals[t]
+            last_gae = delta + gamma * gae_lambda * last_gae
+            advs[t] = last_gae
+            rets[t] = np.clip(last_gae + vals[t], -1.2, 1.2)
+
+        stats = {
+            "win": 1.0 if win_pid == hp else 0.0,
+            "rank": hero_rank,
+            "steps": float(sim.step_count),
+            "term_rew": float(term_rew),
+            "num_players": 2.0,
+            "hero_slot": float(hp),
+        }
+        if t_len == 0:
+            empty = {
+                "planet_feats": np.zeros((0, MAX_PLANETS, 22), np.float16),
+                "timeline_feats": np.zeros((0, MAX_PLANETS, 20, tl_dim_pol), np.float16),
+                "edge_feats": np.zeros((0, MAX_PLANETS, MAX_PLANETS, 12), np.float16),
+                "legal_edges": np.zeros((0, MAX_PLANETS, MAX_PLANETS), bool),
+                "owned_mask": np.zeros((0, MAX_PLANETS), bool),
+                "pad_mask": np.zeros((0, MAX_PLANETS), bool),
+                "action_cls": np.zeros((0, MAX_PLANETS), np.int64),
+                "old_logp": np.zeros((0, MAX_PLANETS), np.float32),
+                "advantages": np.zeros((0,), np.float32),
+                "returns": np.zeros((0,), np.float32),
+                "step_ticks": np.zeros((0,), np.int32),
+                "aux_owner": np.zeros((0, MAX_PLANETS), np.int64),
+                "aux_ships": np.zeros((0, MAX_PLANETS), np.float32),
+                "aux_valid": np.zeros((0, MAX_PLANETS), bool),
+            }
+            results.append((empty, stats))
+            continue
+
+        traj_ao: List[np.ndarray] = []
+        traj_ash: List[np.ndarray] = []
+        traj_av: List[np.ndarray] = []
+        snaps = planet_snaps[idx]
+        steps_i = traj_steps[idx]
+        pids_i = traj_pids[idx]
+        for idx_t in range(t_len):
+            ao = np.full((MAX_PLANETS,), 2, dtype=np.int64)
+            ash = np.zeros((MAX_PLANETS,), dtype=np.float32)
+            av = np.zeros((MAX_PLANETS,), dtype=bool)
+            fut_map = snaps.get(steps_i[idx_t] + future_horizon)
+            if fut_map is not None:
+                for i_p, pid_val in enumerate(pids_i[idx_t]):
+                    rec = fut_map.get(int(pid_val))
+                    if rec is None:
+                        continue
+                    ow, sh = rec
+                    ao[i_p] = 0 if ow == hp else (2 if ow < 0 else 1)
+                    ash[i_p] = float(np.log1p(max(0, sh)) / 6.0)
+                    av[i_p] = True
+            traj_ao.append(ao)
+            traj_ash.append(ash)
+            traj_av.append(av)
+
+        batch = {
+            "planet_feats": np.stack(traj_pf[idx], axis=0).astype(np.float16, copy=False),
+            "timeline_feats": np.stack(traj_tf[idx], axis=0).astype(np.float16, copy=False),
+            "edge_feats": np.stack(traj_ef[idx], axis=0).astype(np.float16, copy=False),
+            "legal_edges": np.stack(traj_le[idx], axis=0),
+            "owned_mask": np.stack(traj_om[idx], axis=0),
+            "pad_mask": np.stack(traj_pm[idx], axis=0),
+            "action_cls": np.stack(traj_act[idx], axis=0),
+            "old_logp": np.stack(traj_logp[idx], axis=0),
+            "advantages": advs,
+            "returns": rets,
+            "step_ticks": np.asarray(steps_i, dtype=np.int32),
+            "aux_owner": np.stack(traj_ao, axis=0),
+            "aux_ships": np.stack(traj_ash, axis=0),
+            "aux_valid": np.stack(traj_av, axis=0),
+        }
+        results.append((batch, stats))
+    return results
+
+
+def _worker_collect_batch(
+    task: Tuple[str, int, Optional[str], List[Tuple[int, int]], float, int, float, bool, bool, bool, float]
+) -> List[Tuple[Dict[str, np.ndarray], Dict[str, float]]]:
+    """Persistent worker entry point running a batched lockstep chunk of 2P pool games."""
+    _configure_worker_threads()
+    (
+        policy_path,
+        policy_version,
+        opp_path,
+        specs,
+        temperature,
+        max_steps,
+        shaping_coef,
+        early_reset,
+        force_all_in,
+        rollout_d4,
+        opp_temperature,
+    ) = task
+    policy = _get_worker_policy(policy_path, policy_version)
+    opp_model = _get_worker_opp(opp_path)
+    return collect_episodes_batched_2p(
+        policy,
+        opp_model if opp_model is not None else policy,
+        specs=specs,
+        temperature=temperature,
+        max_steps=max_steps,
+        shaping_coef=shaping_coef,
+        early_reset=early_reset,
+        force_all_in=force_all_in,
+        rollout_d4=rollout_d4,
+        opp_temperature=opp_temperature,
+    )
 
 
 def _worker_collect_episode(
@@ -567,12 +979,20 @@ def _play_deterministic_eval_game(
     launch_threshold: float = 0.50,
 ) -> Tuple[float, float]:
     sim = FastOrbitSim.from_seed(seed=seed, num_agents=num_players, max_steps=max_steps)
+    feat_ver = max(int(getattr(policy, "feature_version", 1)), int(getattr(opp_model, "feature_version", 1)))
     last_alive = [0] * num_players
     while not sim.done:
         acts = []
+        obs_shared = sim.to_observation(player=0)
+        shared_phys = build_shared_planet_physics(obs_shared, max_speed=sim.ship_speed)
         for pid in range(num_players):
-            obs = sim.to_observation(player=pid)
-            enc = extract_planet_features(obs, player=pid, max_speed=sim.ship_speed)
+            enc = extract_planet_features(
+                obs_shared,
+                player=pid,
+                max_speed=sim.ship_speed,
+                feature_version=feat_ver,
+                shared_physics=shared_phys,
+            )
             m = policy if pid == hero_slot else opp_model
             mv, _, _, _ = _policy_step(
                 m,
@@ -844,6 +1264,44 @@ def ppo_update(
     aux_tot_acc = torch.zeros((), device=train_dev)
     n_steps = 0
 
+    # When D4 augmentation is already applied at rollout time (augment_d4=False),
+    # precompute frozen teacher & fixed-anchor log-probs once per iter instead of
+    # recomputing both 4.3M reference networks on every PPO epoch (3x -> 1x).
+    tl_dim_pol = int(getattr(policy, "timeline_dim", 8))
+    max_p_total = int(rollout["pad_mask"].shape[1])
+    want_fixed = bool(fixed_anchor is not None and anchor_kl_coef > 0.0)
+    use_ref_cache = bool((not augment_d4) and ppo_epochs > 1)
+    ref_logp_cache: Optional[torch.Tensor] = None
+    fixed_logp_cache: Optional[torch.Tensor] = None
+    if use_ref_cache:
+        ref_logp_cache = torch.zeros((n, max_p_total, max_p_total + 1), dtype=torch.float16)
+        if want_fixed:
+            fixed_logp_cache = torch.zeros((n, max_p_total, max_p_total + 1), dtype=torch.float16)
+        ref_bs = max(batch_size, 512)
+        with torch.no_grad():
+            for s in range(0, n, ref_bs):
+                e = min(n, s + ref_bs)
+                pm_c = rollout["pad_mask"][s:e]
+                cn = max(2, int(pm_c.sum(axis=1).max()))
+                pf_c = torch.from_numpy(np.ascontiguousarray(rollout["planet_feats"][s:e, :cn], dtype=np.float32)).to(train_dev)
+                tf_c = torch.from_numpy(
+                    np.ascontiguousarray(rollout["timeline_feats"][s:e, :cn, :, :tl_dim_pol], dtype=np.float32)
+                ).to(train_dev)
+                ef_c = torch.from_numpy(np.ascontiguousarray(rollout["edge_feats"][s:e, :cn, :cn], dtype=np.float32)).to(train_dev)
+                le_c = torch.from_numpy(np.ascontiguousarray(rollout["legal_edges"][s:e, :cn, :cn])).to(train_dev)
+                pm_ct = torch.from_numpy(np.ascontiguousarray(pm_c[:, :cn])).to(train_dev)
+                hold_c = torch.ones((e - s, cn, 1), dtype=torch.bool, device=train_dev)
+                mask_c = torch.cat([hold_c, le_c], dim=-1)
+
+                r_log, _, _ = anchor(pf_c, tf_c, ef_c, pm_ct, legal_edges=le_c, compute_frac=False)
+                r_lp = F.log_softmax(r_log.masked_fill(~mask_c, -1e9), dim=-1)
+                ref_logp_cache[s:e, :cn, : cn + 1] = r_lp.clamp(-30.0, 0.0).cpu().to(torch.float16)
+
+                if fixed_logp_cache is not None and fixed_anchor is not None:
+                    f_log, _, _ = fixed_anchor(pf_c, tf_c, ef_c, pm_ct, legal_edges=le_c, compute_frac=False)
+                    f_lp = F.log_softmax(f_log.masked_fill(~mask_c, -1e9), dim=-1)
+                    fixed_logp_cache[s:e, :cn, : cn + 1] = f_lp.clamp(-30.0, 0.0).cpu().to(torch.float16)
+
     for _ in range(ppo_epochs):
         perm = np.random.permutation(n)
         for start in range(0, n, batch_size):
@@ -851,11 +1309,13 @@ def ppo_update(
             pm_full = rollout["pad_mask"][idx]
             max_n = max(2, int(pm_full.sum(axis=1).max()))
 
-            pf_np = rollout["planet_feats"][idx, :max_n]
+            pf_np = np.asarray(rollout["planet_feats"][idx, :max_n], dtype=np.float32)
+            tf_np = np.asarray(rollout["timeline_feats"][idx, :max_n, :, :tl_dim_pol], dtype=np.float32)
             if augment_d4:
                 k_rot = random.randrange(4)
                 flip_x = bool(random.randrange(2))
                 pf_np = apply_d4_planet_feats(pf_np, k_rot=k_rot, flip_x=flip_x)
+                tf_np = apply_d4_timeline_feats(tf_np, k_rot=k_rot, flip_x=flip_x)
 
             le_np = np.ascontiguousarray(rollout["legal_edges"][idx, :max_n, :max_n])
             om_np = np.ascontiguousarray(rollout["owned_mask"][idx, :max_n])
@@ -865,8 +1325,8 @@ def ppo_update(
             has_aux_valid = bool(aux_v_np is not None and np.any(aux_v_np))
 
             pf = torch.from_numpy(np.ascontiguousarray(pf_np)).to(train_dev)
-            tf = torch.from_numpy(np.ascontiguousarray(rollout["timeline_feats"][idx, :max_n])).to(train_dev)
-            ef = torch.from_numpy(np.ascontiguousarray(rollout["edge_feats"][idx, :max_n, :max_n])).to(train_dev)
+            tf = torch.from_numpy(np.ascontiguousarray(tf_np)).to(train_dev)
+            ef = torch.from_numpy(np.ascontiguousarray(rollout["edge_feats"][idx, :max_n, :max_n], dtype=np.float32)).to(train_dev)
             le = torch.from_numpy(le_np).to(train_dev)
             om = torch.from_numpy(om_np).to(train_dev)
             pm = torch.from_numpy(np.ascontiguousarray(pm_full[:, :max_n])).to(train_dev)
@@ -887,30 +1347,39 @@ def ppo_update(
             aux_v = torch.from_numpy(aux_v_np).to(train_dev) if aux_v_np is not None else None
 
             if want_aux:
-                logits, _, val, aux_pred = policy(pf, tf, ef, pm, return_aux=True)
+                logits, _, val, aux_pred = policy(pf, tf, ef, pm, return_aux=True, legal_edges=le, compute_frac=False)
             else:
-                logits, _, val = policy(pf, tf, ef, pm)
+                logits, _, val = policy(pf, tf, ef, pm, legal_edges=le, compute_frac=False)
                 aux_pred = None
-
-            with torch.no_grad():
-                ref_logits, _, _ = anchor(pf, tf, ef, pm)
-                if fixed_anchor is not None and anchor_kl_coef > 0.0:
-                    fixed_logits, _, _ = fixed_anchor(pf, tf, ef, pm)
-                else:
-                    fixed_logits = None
 
             B, N, _ = logits.shape
             hold_ok = torch.ones((B, N, 1), dtype=torch.bool, device=train_dev)
             act_mask = torch.cat([hold_ok, le], dim=-1)
             logits = logits.masked_fill(~act_mask, -1e9)
-            ref_logits = ref_logits.masked_fill(~act_mask, -1e9)
+
+            if ref_logp_cache is not None:
+                ref_logp_all = ref_logp_cache[idx, :N, : N + 1].to(device=train_dev, dtype=logits.dtype)
+                fixed_logp_all = (
+                    fixed_logp_cache[idx, :N, : N + 1].to(device=train_dev, dtype=logits.dtype)
+                    if fixed_logp_cache is not None
+                    else None
+                )
+            else:
+                with torch.no_grad():
+                    ref_logits, _, _ = anchor(pf, tf, ef, pm, legal_edges=le, compute_frac=False)
+                    ref_logp_all = F.log_softmax(ref_logits.masked_fill(~act_mask, -1e9), dim=-1)
+                    if want_fixed and fixed_anchor is not None:
+                        fixed_logits, _, _ = fixed_anchor(pf, tf, ef, pm, legal_edges=le, compute_frac=False)
+                        fixed_logp_all = F.log_softmax(fixed_logits.masked_fill(~act_mask, -1e9), dim=-1)
+                    else:
+                        fixed_logp_all = None
 
             if has_valid:
                 valid_f = (om & le.any(dim=-1)).float()
                 denom = valid_f.sum().clamp_min(1.0)
                 logp_all = F.log_softmax(logits, dim=-1)
-                ref_logp_all = F.log_softmax(ref_logits, dim=-1)
                 probs_all = logp_all.exp()
+                act_mask_f = act_mask.to(logp_all.dtype)
 
                 act_oh = one_hot_no_scatter(act.clamp(0, N), N + 1, dtype=logp_all.dtype)
                 new_lp = (logp_all * act_oh).sum(dim=-1)
@@ -920,15 +1389,13 @@ def ppo_update(
                 surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv_bn
                 pol_loss = -(torch.min(surr1, surr2) * valid_f).sum() / denom
 
-                kl_per = (probs_all * (logp_all - ref_logp_all)).sum(dim=-1).clamp_min(0.0)
+                kl_per = (probs_all * (logp_all - ref_logp_all) * act_mask_f).sum(dim=-1).clamp_min(0.0)
                 kl_mean = (kl_per * valid_f).sum() / denom
-                ent_per = -(probs_all * logp_all).sum(dim=-1)
+                ent_per = -(probs_all * logp_all * act_mask_f).sum(dim=-1)
                 ent_mean = (ent_per * valid_f).sum() / denom
 
-                if fixed_logits is not None:
-                    fixed_logits = fixed_logits.masked_fill(~act_mask, -1e9)
-                    fixed_logp_all = F.log_softmax(fixed_logits, dim=-1)
-                    akl_per = (probs_all * (logp_all - fixed_logp_all)).sum(dim=-1).clamp_min(0.0)
+                if fixed_logp_all is not None:
+                    akl_per = (probs_all * (logp_all - fixed_logp_all) * act_mask_f).sum(dim=-1).clamp_min(0.0)
                     anchor_kl_mean = (akl_per * valid_f).sum() / denom
                 else:
                     anchor_kl_mean = logits.sum() * 0.0
@@ -1039,6 +1506,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fixed-anchor", default="", help="Optional separate fixed KL anchor checkpoint path.")
     parser.add_argument("--launch-threshold", type=float, default=0.50, help="Deterministic eval launch threshold.")
     parser.add_argument("--midgame-adv-weight", type=float, default=1.0, help="Policy-gradient multiplier for midgame ticks t in [25, 75].")
+    parser.add_argument("--rollout-batch", type=int, default=8, help="Lockstep batched 2P games per worker chunk (1=serial).")
+    parser.add_argument("--async-rollout", action="store_true", help="Overlap CPU rollouts for iter k+1 with GPU PPO updates for iter k.")
     parser.add_argument("--seed", type=int, default=9500)
     args = parser.parse_args(argv)
 
@@ -1128,7 +1597,7 @@ def main(argv: list[str] | None = None) -> int:
         f"[RL-League-PPO] Loaded {args.init} | dev={dev_tag} | pool={[n for n, _, _ in pinned_pool]} | "
         f"iters={args.iterations} "
         + (f"pairs={n_pairs} (2P={2*n_pairs}ep)" if use_paired else f"eps/iter={args.episodes_per_iter}")
-        + f" workers={args.workers} | lr={args.lr} clip={args.clip_eps} kl={args.kl_coef} akl={args.anchor_kl_coef} "
+        + f" workers={args.workers} rbatch={args.rollout_batch} async={args.async_rollout} | lr={args.lr} clip={args.clip_eps} kl={args.kl_coef} akl={args.anchor_kl_coef} "
         f"ema={args.teacher_ema} aux={args.aux_coef} shaping={args.shaping_coef} T={args.temperature} "
         f"oppT={args.opp_temperature} all_in={args.force_all_in} 2p_only={args.two_player_only} mid_adv={args.midgame_adv_weight}",
         flush=True,
@@ -1148,9 +1617,187 @@ def main(argv: list[str] | None = None) -> int:
         def _save_cur_policy(version: int) -> Optional[str]:
             if tmp_dir_ctx is None:
                 return None
-            p = Path(tmp_dir_ctx.name) / "policy_cur.pt"
+            p = Path(tmp_dir_ctx.name) / f"policy_cur_{version % 4}.pt"
             torch.save({"model_config": cpu_policy.config, "model_state_dict": cpu_policy.state_dict()}, p)
             return str(p)
+
+        def _submit_rollout(
+            it_idx: int,
+            pol_path_arg: Optional[str],
+            pol_ver_arg: int,
+            active_pool_arg: List[Tuple[str, str, PlanetTimelineTransformer]],
+        ):
+            """Build and submit rollout jobs (batched 2P lockstep when eligible)."""
+            if use_paired:
+                pair_specs: List[Tuple[int, str, int, Optional[str], Optional[PlanetTimelineTransformer]]] = []
+                for k in range(n_pairs):
+                    n_pl, opp_kind = league_cycle[(it_idx * n_pairs + k) % len(league_cycle)]
+                    if args.two_player_only:
+                        n_pl = 2
+                    map_seed = args.seed + it_idx * 1000 + k
+                    opp_path: Optional[str] = None
+                    opp_model: Optional[PlanetTimelineTransformer] = None
+                    if opp_kind == "pool":
+                        u = random.random()
+                        if rolling_snaps and u < 0.30:
+                            _, opp_path, opp_model = rolling_snaps[-1]
+                        elif u < 0.75:
+                            _, opp_path, opp_model = random.choice(pinned_pool)
+                        else:
+                            _, opp_path, opp_model = random.choice(active_pool_arg)
+                    pair_specs.append((n_pl, opp_kind, map_seed, opp_path, opp_model))
+
+                can_batch = (
+                    pool_exec is not None
+                    and pol_path_arg is not None
+                    and args.rollout_batch > 1
+                    and all(n_pl == 2 and ok == "pool" for n_pl, ok, _, _, _ in pair_specs)
+                )
+                if can_batch:
+                    by_opp: Dict[Optional[str], List[Tuple[int, int]]] = {}
+                    for _, _, map_seed, opp_path, _ in pair_specs:
+                        by_opp.setdefault(opp_path, []).extend([(map_seed, 0), (map_seed, 1)])
+                    chunk_sz = max(2, (int(args.rollout_batch) // 2) * 2)
+                    futs = []
+                    for opp_path, sp_list in by_opp.items():
+                        for s_i in range(0, len(sp_list), chunk_sz):
+                            chunk = sp_list[s_i : s_i + chunk_sz]
+                            futs.append(
+                                pool_exec.submit(
+                                    _worker_collect_batch,
+                                    (
+                                        pol_path_arg,
+                                        pol_ver_arg,
+                                        opp_path,
+                                        chunk,
+                                        args.temperature,
+                                        args.max_steps,
+                                        args.shaping_coef,
+                                        True,
+                                        args.force_all_in,
+                                        True,
+                                        args.opp_temperature,
+                                    ),
+                                )
+                            )
+                    return ("batched", futs)
+
+                if pool_exec is not None and pol_path_arg is not None:
+                    futs = []
+                    for n_pl, opp_kind, map_seed, opp_path, _ in pair_specs:
+                        for seat in (0, 1):
+                            futs.append(
+                                pool_exec.submit(
+                                    _worker_collect_episode,
+                                    (
+                                        pol_path_arg,
+                                        pol_ver_arg,
+                                        opp_path,
+                                        n_pl,
+                                        opp_kind,
+                                        map_seed,
+                                        seat,
+                                        args.temperature,
+                                        args.max_steps,
+                                        args.shaping_coef,
+                                        True,
+                                        args.force_all_in,
+                                        True,
+                                        args.opp_temperature,
+                                    ),
+                                )
+                            )
+                    return ("single", futs)
+
+                direct_res = []
+                for n_pl, opp_kind, map_seed, _, opp_m in pair_specs:
+                    for seat in (0, 1):
+                        direct_res.append(
+                            collect_episode(
+                                cpu_policy,
+                                opp_m if opp_m is not None else cpu_policy,
+                                num_players=n_pl,
+                                opponent_kind=opp_kind,
+                                seed=map_seed,
+                                temperature=args.temperature,
+                                max_steps=args.max_steps,
+                                shaping_coef=args.shaping_coef,
+                                early_reset=True,
+                                force_all_in=args.force_all_in,
+                                opp_model=opp_m,
+                                hero_slot=seat,
+                                rollout_d4=True,
+                                opp_temperature=args.opp_temperature,
+                            )
+                        )
+                return ("direct", direct_res)
+
+            # Non-paired rollout mode
+            futs = []
+            direct_res = []
+            for e in range(args.episodes_per_iter):
+                n_pl, opp_kind = league_cycle[(it_idx * args.episodes_per_iter + e) % len(league_cycle)]
+                ep_seed = args.seed + it_idx * 1000 + e
+                opp_path = None
+                opp_model = None
+                if opp_kind == "pool":
+                    if e % 2 == 0 or len(active_pool_arg) == 1:
+                        _, opp_path, opp_model = active_pool_arg[-1]
+                    else:
+                        _, opp_path, opp_model = random.choice(active_pool_arg)
+                if pool_exec is not None and pol_path_arg is not None:
+                    futs.append(
+                        pool_exec.submit(
+                            _worker_collect_episode,
+                            (
+                                pol_path_arg,
+                                pol_ver_arg,
+                                opp_path,
+                                n_pl,
+                                opp_kind,
+                                ep_seed,
+                                None,
+                                args.temperature,
+                                args.max_steps,
+                                args.shaping_coef,
+                                True,
+                                args.force_all_in,
+                                True,
+                                args.opp_temperature,
+                            ),
+                        )
+                    )
+                else:
+                    direct_res.append(
+                        collect_episode(
+                            cpu_policy,
+                            opp_model if opp_model is not None else cpu_policy,
+                            num_players=n_pl,
+                            opponent_kind=opp_kind,
+                            seed=ep_seed,
+                            temperature=args.temperature,
+                            max_steps=args.max_steps,
+                            shaping_coef=args.shaping_coef,
+                            early_reset=True,
+                            force_all_in=args.force_all_in,
+                            opp_model=opp_model,
+                            hero_slot=None,
+                            rollout_d4=True,
+                            opp_temperature=args.opp_temperature,
+                        )
+                    )
+            return ("single", futs) if futs else ("direct", direct_res)
+
+        def _collect_submitted(handle) -> List[Tuple[Dict[str, np.ndarray], Dict[str, float]]]:
+            mode, payload = handle
+            if mode == "batched":
+                out_list: List[Tuple[Dict[str, np.ndarray], Dict[str, float]]] = []
+                for f in payload:
+                    out_list.extend(f.result())
+                return out_list
+            if mode == "single":
+                return [f.result() for f in payload]
+            return payload
 
         # Iter 0 baseline validation gate
         pol_p0 = _save_cur_policy(0)
@@ -1174,116 +1821,21 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
 
+        pending_rollout = None
         for it in range(1, args.iterations + 1):
             torch.set_num_threads(1)
             cpu_policy.eval()
-            pol_p = _save_cur_policy(it)
             active_pool = pinned_pool + rolling_snaps
 
             t_roll = time.time()
-            tasks: List[Tuple[Any, ...]] = []
-            direct_opps: List[Optional[PlanetTimelineTransformer]] = []
-
-            if use_paired:
-                for k in range(n_pairs):
-                    n_pl, opp_kind = league_cycle[(it * n_pairs + k) % len(league_cycle)]
-                    if args.two_player_only:
-                        n_pl = 2
-                    map_seed = args.seed + it * 1000 + k
-                    opp_path: Optional[str] = None
-                    opp_model: Optional[PlanetTimelineTransformer] = None
-                    if opp_kind == "pool":
-                        u = random.random()
-                        if rolling_snaps and u < 0.30:
-                            _, opp_path, opp_model = rolling_snaps[-1]
-                        elif u < 0.75:
-                            _, opp_path, opp_model = random.choice(pinned_pool)
-                        else:
-                            _, opp_path, opp_model = random.choice(active_pool)
-
-                    for seat in (0, 1):
-                        if pool_exec is not None and pol_p is not None:
-                            tasks.append((
-                                pol_p,
-                                it,
-                                opp_path,
-                                n_pl,
-                                opp_kind,
-                                map_seed,
-                                seat,
-                                args.temperature,
-                                args.max_steps,
-                                args.shaping_coef,
-                                True,
-                                args.force_all_in,
-                                True,
-                                args.opp_temperature,
-                            ))
-                        else:
-                            direct_opps.append(opp_model)
-                            tasks.append((
-                                n_pl,
-                                opp_kind,
-                                map_seed,
-                                seat,
-                            ))
+            if pending_rollout is not None:
+                results = _collect_submitted(pending_rollout)
+                pending_rollout = None
+                pol_p = _save_cur_policy(it)
             else:
-                for e in range(args.episodes_per_iter):
-                    n_pl, opp_kind = league_cycle[(it * args.episodes_per_iter + e) % len(league_cycle)]
-                    ep_seed = args.seed + it * 1000 + e
-                    opp_path = None
-                    opp_model = None
-                    if opp_kind == "pool":
-                        if e % 2 == 0 or len(active_pool) == 1:
-                            _, opp_path, opp_model = active_pool[-1]
-                        else:
-                            _, opp_path, opp_model = random.choice(active_pool)
-                    if pool_exec is not None and pol_p is not None:
-                        tasks.append((
-                            pol_p,
-                            it,
-                            opp_path,
-                            n_pl,
-                            opp_kind,
-                            ep_seed,
-                            None,
-                            args.temperature,
-                            args.max_steps,
-                            args.shaping_coef,
-                            True,
-                            args.force_all_in,
-                            True,
-                            args.opp_temperature,
-                        ))
-                    else:
-                        direct_opps.append(opp_model)
-                        tasks.append((n_pl, opp_kind, ep_seed, None))
-
-            if pool_exec is not None and pol_p is not None:
-                results = list(pool_exec.map(_worker_collect_episode, tasks))
-            else:
-                results = []
-                for idx_t, t_info in enumerate(tasks):
-                    n_pl, opp_kind, ep_seed, seat = t_info
-                    opp_m = direct_opps[idx_t]
-                    results.append(
-                        collect_episode(
-                            cpu_policy,
-                            opp_m if opp_m is not None else cpu_policy,
-                            num_players=n_pl,
-                            opponent_kind=opp_kind,
-                            seed=ep_seed,
-                            temperature=args.temperature,
-                            max_steps=args.max_steps,
-                            shaping_coef=args.shaping_coef,
-                            early_reset=True,
-                            force_all_in=args.force_all_in,
-                            opp_model=opp_m,
-                            hero_slot=seat,
-                            rollout_d4=True,
-                            opp_temperature=args.opp_temperature,
-                        )
-                    )
+                pol_p = _save_cur_policy(it)
+                handle = _submit_rollout(it, pol_p, it, active_pool)
+                results = _collect_submitted(handle)
             roll_sec = time.time() - t_roll
 
             batches: List[Dict[str, np.ndarray]] = []
@@ -1317,8 +1869,14 @@ def main(argv: list[str] | None = None) -> int:
             keys = list(batches[0].keys())
             rollout = {k: np.concatenate([b[k] for b in batches], axis=0) for k in keys}
 
+            # Async pipelining: overlap CPU rollouts for iter it+1 with RX 6950 XT GPU update for iter it
+            will_eval = (it % args.eval_every == 0) or (it == args.iterations)
+            if args.async_rollout and pool_exec is not None and (it < args.iterations) and (not will_eval):
+                pol_p_next = _save_cur_policy(it + 1)
+                pending_rollout = _submit_rollout(it + 1, pol_p_next, it + 1, active_pool)
+
             t_upd = time.time()
-            torch.set_num_threads(max(1, int(args.train_threads)))
+            torch.set_num_threads(2 if (pending_rollout is not None) else max(1, int(args.train_threads)))
             upd = ppo_update(
                 policy,
                 teacher,

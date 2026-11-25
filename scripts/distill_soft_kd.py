@@ -27,7 +27,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Subset, TensorDataset
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOBER_DIR = REPO_ROOT / "external" / "opponents" / "simjeg_hober_malloc"
@@ -48,6 +48,7 @@ from orbit_wars_bot.planet_transformer import (
     EncodedPlanetState,
     PlanetTimelineTransformer,
     apply_d4_planet_feats,
+    apply_d4_timeline_feats,
     extract_planet_features,
     pad_encoded_state,
 )
@@ -247,7 +248,7 @@ _WORKER_CACHE: Dict[str, Any] = {}
 
 
 def _collect_soft_kd_worker(
-    task: Tuple[int, bool, Optional[str], str, int, int, int, int, int, bool, int]
+    task: Tuple[int, bool, Optional[str], str, int, int, int, int, int, bool, int, int]
 ) -> Dict[str, Any]:
     from kaggle_environments import make
 
@@ -266,6 +267,7 @@ def _collect_soft_kd_worker(
         fast_rollout_opp,
         record_opp_slot,
         max_collect_tick,
+        feature_version,
     ) = task
 
     # Instantiate full-TTA HoberSoftTeacher first so its env defaults do not overwrite
@@ -333,7 +335,7 @@ def _collect_soft_kd_worker(
             obs_t_copy = dict(obs_t)
             obs_t_copy["player"] = slot
             obs_t_copy["step"] = int(steps[t][0]["observation"].get("step", t))
-            enc = extract_planet_features(obs_t_copy, player=slot)
+            enc = extract_planet_features(obs_t_copy, player=slot, feature_version=feature_version)
             if not enc.planet_ids or not np.any(enc.owned_mask):
                 continue
 
@@ -397,12 +399,13 @@ def collect_soft_kd_dataset(
     full_boss_rollout: bool = False,
     record_opp_slot: bool = False,
     max_collect_tick: int = 0,
+    feature_version: int = 1,
 ) -> Dict[str, np.ndarray]:
     """Collect 2P games with exact Full-TTA `#2 Hober Malloc` soft probabilities + `t+10` future targets."""
     import multiprocessing as mp
 
     fast_opp = 0 if full_boss_rollout else 1
-    tasks: List[Tuple[int, bool, Optional[str], str, int, int, int, int, int, bool, int]] = []
+    tasks: List[Tuple[int, bool, Optional[str], str, int, int, int, int, int, bool, int, int]] = []
     if student_checkpoint:
         for g in range(dagger_games):
             tasks.append((
@@ -417,6 +420,7 @@ def collect_soft_kd_dataset(
                 fast_opp,
                 record_opp_slot,
                 max_collect_tick,
+                feature_version,
             ))
     for g in range(hober_games):
         tasks.append((
@@ -431,6 +435,7 @@ def collect_soft_kd_dataset(
             fast_opp,
             record_opp_slot,
             max_collect_tick,
+            feature_version,
         ))
 
     t0 = time.time()
@@ -509,6 +514,7 @@ def compute_soft_kd_loss(
     midgame_weight: float = 1.0,
     comet_weight: float = 1.0,
     hold_boost: float = 1.0,
+    launch_bce_weight: float = 0.0,
     return_tensor_metrics: bool = False,
 ) -> Tuple[torch.Tensor, Dict[str, Any]]:
     """Compute Soft-KL policy distillation + Auxiliary t+10 world-model + Value loss.
@@ -518,10 +524,11 @@ def compute_soft_kd_loss(
       - ``comet_weight``: multiplies per-board KL weight whenever comets are active.
       - ``hold_boost``: boosts KL weight on midgame decisions where teacher prefers HOLD
         (``q_hold >= 0.65``), curbing impulsive all-in garrison shuffles.
+      - ``launch_bce_weight``: explicit binary launch-vs-hold KL calibration weight.
       - ``return_tensor_metrics``: returns detached device scalar tensors without ``.item()``
         so GPU/DirectML training loops avoid mid-epoch CPU sync stalls.
     """
-    out = model(pf, tf, ef, pm, return_aux=True)
+    out = model(pf, tf, ef, pm, return_aux=True, legal_edges=le)
     if len(out) == 4:
         logits, fracs, val, aux_pred = out
     else:
@@ -574,6 +581,11 @@ def compute_soft_kd_loss(
         launch_hits_t = ((pred_cls == teacher_cls).float() * lm_f).sum()
         tgt_pred = 1 + log_p[..., 1:].argmax(dim=-1)
         tgt_hits_t = ((tgt_pred == teacher_cls).float() * lm_f).sum()
+        q_l_bin = (1.0 - q_hold) >= 0.53
+        p_l_bin = (1.0 - log_p[..., 0].exp()) >= 0.53
+        l_tp_t = ((q_l_bin & p_l_bin).float() * valid_f).sum()
+        l_fp_t = (((~q_l_bin) & p_l_bin).float() * valid_f).sum()
+        l_fn_t = ((q_l_bin & (~p_l_bin)).float() * valid_f).sum()
 
     # All-in calibration for fraction head on teacher launches (Hober Malloc always launches 100%)
     q_top_cls = q_all.argmax(dim=-1)
@@ -607,6 +619,15 @@ def compute_soft_kd_loss(
         vsign_tot_t = torch.tensor(float(B), dtype=torch.float32, device=logits.device)
 
     total = kd_loss + 0.15 * frac_loss + aux_weight * aux_loss + value_weight * val_loss
+    if launch_bce_weight > 0.0:
+        q_l = (1.0 - q_hold).clamp(1e-6, 1.0 - 1e-6)
+        p_h = log_p[..., 0].exp().clamp(1e-6, 1.0 - 1e-6)
+        p_l = (1.0 - p_h).clamp(1e-6, 1.0 - 1e-6)
+        launch_kl_per = q_l * (torch.log(q_l) - torch.log(p_l)) + (1.0 - q_l) * (torch.log(1.0 - q_l) - torch.log(p_h))
+        lw_masked = valid_f * node_board_w
+        launch_bce_loss = (launch_kl_per * lw_masked).sum() / lw_masked.sum().clamp_min(1.0)
+        total = total + float(launch_bce_weight) * launch_bce_loss
+
     if return_tensor_metrics:
         return total, {
             "loss": total.detach(),
@@ -621,6 +642,9 @@ def compute_soft_kd_loss(
             "launch_tot": launch_tot_t,
             "vsign_hits": vsign_hits_t,
             "vsign_tot": vsign_tot_t,
+            "l_tp": l_tp_t,
+            "l_fp": l_fp_t,
+            "l_fn": l_fn_t,
         }
 
     valid_cnt = float(valid_tot_t.item())
@@ -635,6 +659,9 @@ def compute_soft_kd_loss(
         "acc_launch": (float(launch_hits_t.item()) / lm_cnt) if lm_cnt > 0.0 else 0.0,
         "acc_tgt": (float(tgt_hits_t.item()) / lm_cnt) if lm_cnt > 0.0 else 0.0,
         "vsign": float(vsign_hits_t.item()) / max(1.0, float(B)),
+        "l_tp": float(l_tp_t.item()),
+        "l_fp": float(l_fp_t.item()),
+        "l_fn": float(l_fn_t.item()),
     }
 
 
@@ -653,6 +680,9 @@ def train_soft_kd(
     midgame_weight: float = 1.0,
     comet_weight: float = 1.0,
     hold_boost: float = 1.0,
+    launch_bce_weight: float = 0.0,
+    feature_version: int = 1,
+    arch_version: int = 1,
     contiguous_val: bool = False,
     seed: int = 42,
     device: str = "cpu",
@@ -678,23 +708,22 @@ def train_soft_kd(
         n_val = max(1, int(0.12 * n))
         val_idx, tr_idx = perm[:n_val], perm[n_val:]
 
-    def make_ds(idx: np.ndarray) -> TensorDataset:
-        return TensorDataset(
-            torch.from_numpy(data["planet_feats"][idx]),
-            torch.from_numpy(data["timeline_feats"][idx]),
-            torch.from_numpy(data["edge_feats"][idx]),
-            torch.from_numpy(data["legal_edges"][idx]),
-            torch.from_numpy(data["owned_mask"][idx]),
-            torch.from_numpy(data["pad_mask"][idx]),
-            torch.from_numpy(data["soft_probs"][idx]),
-            torch.from_numpy(data["val_targets"][idx]),
-            torch.from_numpy(data["aux_owner"][idx]),
-            torch.from_numpy(data["aux_ships"][idx]),
-            torch.from_numpy(data["aux_valid"][idx]),
-        )
+    full_ds = TensorDataset(
+        torch.from_numpy(data["planet_feats"]),
+        torch.from_numpy(data["timeline_feats"]),
+        torch.from_numpy(data["edge_feats"]),
+        torch.from_numpy(data["legal_edges"]),
+        torch.from_numpy(data["owned_mask"]),
+        torch.from_numpy(data["pad_mask"]),
+        torch.from_numpy(data["soft_probs"]),
+        torch.from_numpy(data["val_targets"]),
+        torch.from_numpy(data["aux_owner"]),
+        torch.from_numpy(data["aux_ships"]),
+        torch.from_numpy(data["aux_valid"]),
+    )
 
-    tr_loader = DataLoader(make_ds(tr_idx), batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(make_ds(val_idx), batch_size=batch_size, shuffle=False)
+    tr_loader = DataLoader(Subset(full_ds, tr_idx.tolist()), batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(Subset(full_ds, val_idx.tolist()), batch_size=batch_size, shuffle=False)
 
     dev_tag = "dml" if use_dml else str(train_dev)
     if resume_from and Path(resume_from).is_file():
@@ -705,21 +734,25 @@ def train_soft_kd(
         missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
         init_desc = f"Resumed {resume_from} (new aux keys={len(missing)}, unexpected={len(unexpected)})"
     else:
+        tl_dim = int(data["timeline_feats"].shape[-1])
         model = PlanetTimelineTransformer(
+            timeline_dim=tl_dim,
             d_model=d_model,
             n_heads=n_heads,
             n_layers=n_layers,
             dim_ff=dim_ff,
             use_aux_future=True,
+            feature_version=feature_version,
+            arch_version=arch_version,
         )
-        init_desc = f"Fresh init (d={d_model}, h={n_heads}, L={n_layers}, ff={dim_ff})"
+        init_desc = f"Fresh init (d={d_model}, h={n_heads}, L={n_layers}, ff={dim_ff}, fv={feature_version}, av={arch_version})"
 
     model = model.to(train_dev)
     n_params = sum(p.numel() for p in model.parameters())
     print(
         f"[SoftKD Train] {init_desc} -> {n_params/1e6:.2f}M params (device={dev_tag}) | "
         f"train={len(tr_idx)} val={len(val_idx)} | epochs={epochs} batch={batch_size} lr={lr} | "
-        f"mid_w={midgame_weight} comet_w={comet_weight} hold_b={hold_boost} launch_b={launch_boost}",
+        f"mid_w={midgame_weight} comet_w={comet_weight} hold_b={hold_boost} launch_b={launch_boost} lbce={launch_bce_weight}",
         flush=True,
     )
 
@@ -740,6 +773,9 @@ def train_soft_kd(
         "launch_tot",
         "vsign_hits",
         "vsign_tot",
+        "l_tp",
+        "l_fp",
+        "l_fn",
     )
 
     for ep in range(1, epochs + 1):
@@ -753,17 +789,19 @@ def train_soft_kd(
             )
             k_rot, flip_x = random.randrange(4), bool(random.randrange(2))
             pf_a = torch.from_numpy(apply_d4_planet_feats(pf.float().numpy(), k_rot=k_rot, flip_x=flip_x)).to(train_dev)
-            tf, ef, sp, vt, ash = (t.float().to(train_dev) for t in (tf, ef, sp, vt, ash))
+            tf_a = torch.from_numpy(apply_d4_timeline_feats(tf.float().numpy(), k_rot=k_rot, flip_x=flip_x)).to(train_dev)
+            ef, sp, vt, ash = (t.float().to(train_dev) for t in (ef, sp, vt, ash))
             le, om, pm, ao, av = (t.to(train_dev) for t in (le, om, pm, ao, av))
             opt.zero_grad(set_to_none=True)
             loss, m = compute_soft_kd_loss(
-                model, pf_a, tf, ef, le, om, pm, sp, vt, ao, ash, av,
+                model, pf_a, tf_a, ef, le, om, pm, sp, vt, ao, ash, av,
                 aux_weight=aux_weight,
                 value_weight=value_weight,
                 launch_boost=launch_boost,
                 midgame_weight=midgame_weight,
                 comet_weight=comet_weight,
                 hold_boost=hold_boost,
+                launch_bce_weight=launch_bce_weight,
                 return_tensor_metrics=True,
             )
             loss.backward()
@@ -791,6 +829,7 @@ def train_soft_kd(
                     midgame_weight=midgame_weight,
                     comet_weight=comet_weight,
                     hold_boost=hold_boost,
+                    launch_bce_weight=launch_bce_weight,
                     return_tensor_metrics=True,
                 )
                 for k in acc_keys:
@@ -809,6 +848,12 @@ def train_soft_kd(
         v_tgt = float(val_acc["tgt_hits"].item()) / launch_tot
         v_aux = float(val_acc["aux_hits"].item()) / aux_tot
         v_sign = float(val_acc["vsign_hits"].item()) / vsign_tot
+        l_tp = float(val_acc["l_tp"].item())
+        l_fp = float(val_acc["l_fp"].item())
+        l_fn = float(val_acc["l_fn"].item())
+        l_prec = l_tp / max(1.0, l_tp + l_fp)
+        l_rec = l_tp / max(1.0, l_tp + l_fn)
+        l_f1 = (2.0 * l_prec * l_rec / max(1e-9, l_prec + l_rec)) if (l_prec + l_rec) > 0.0 else 0.0
 
         if v_kl < best_kl:
             best_kl = v_kl
@@ -821,6 +866,7 @@ def train_soft_kd(
                     "val_acc_all": v_all,
                     "val_acc_launch": v_launch,
                     "val_acc_target": v_tgt,
+                    "val_l_f1": l_f1,
                     "val_aux_owner_acc": v_aux,
                     "val_sign": v_sign,
                 },
@@ -829,8 +875,8 @@ def train_soft_kd(
         print(
             f"  ep {ep:2d}/{epochs} ({time.time()-t0:5.1f}s, {time.time()-ep_t0:4.1f}s/ep) | "
             f"tr_kl={tr_kl:.3f} val_kl={v_kl:.3f} | "
-            f"val_all={100*v_all:5.1f}% val_launch={100*v_launch:5.1f}% "
-            f"val_tgt={100*v_tgt:5.1f}% aux_own={100*v_aux:5.1f}% "
+            f"val_all={100*v_all:5.1f}% l_f1={100*l_f1:5.1f}% (p={100*l_prec:4.1f}% r={100*l_rec:4.1f}%) "
+            f"val_launch={100*v_launch:5.1f}% val_tgt={100*v_tgt:5.1f}% aux_own={100*v_aux:5.1f}% "
             f"vsign={100*v_sign:5.1f}%",
             flush=True,
         )
@@ -865,6 +911,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--midgame-weight", type=float, default=2.5)
     parser.add_argument("--comet-weight", type=float, default=2.0)
     parser.add_argument("--hold-boost", type=float, default=1.25)
+    parser.add_argument("--launch-bce-weight", type=float, default=0.0)
+    parser.add_argument("--feature-version", type=int, default=1)
+    parser.add_argument("--arch-version", type=int, default=1)
     parser.add_argument("--contiguous-val", action="store_true")
     parser.add_argument("--seed", type=int, default=15000)
     parser.add_argument("--device", choices=["cpu", "dml", "cuda", "auto"], default="cpu")
@@ -898,6 +947,7 @@ def main(argv: list[str] | None = None) -> int:
             full_boss_rollout=args.full_boss_rollout,
             record_opp_slot=args.record_opp_slot,
             max_collect_tick=args.max_collect_tick,
+            feature_version=args.feature_version,
         )
         if existing is not None:
             data = {k: np.concatenate([existing[k], fresh[k]], axis=0) for k in existing}
@@ -926,6 +976,9 @@ def main(argv: list[str] | None = None) -> int:
         midgame_weight=args.midgame_weight,
         comet_weight=args.comet_weight,
         hold_boost=args.hold_boost,
+        launch_bce_weight=args.launch_bce_weight,
+        feature_version=args.feature_version,
+        arch_version=args.arch_version,
         contiguous_val=args.contiguous_val,
         seed=args.seed,
         device=args.device,
