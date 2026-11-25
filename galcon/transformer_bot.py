@@ -698,6 +698,13 @@ class GalconPlanetTransformer(nn.Module):
             x = layer(x, edge_feats, pad_mask)
         return self.backbone.final_norm(x)
 
+    def decode_value_from_hidden(self, h: torch.Tensor, pad_mask: torch.Tensor) -> torch.Tensor:
+        """Compute scalar value prediction ``(B,)`` directly from contextual planet embeddings."""
+        va = self.backbone.val_attn(h).squeeze(-1).masked_fill(~pad_mask, -1e9)
+        vw = F.softmax(va, dim=-1).unsqueeze(-1)
+        pooled = (h * vw).sum(dim=1)
+        return torch.tanh(self.backbone.val_head(pooled).squeeze(-1))
+
     def decode_from_hidden(
         self,
         h: torch.Tensor,
@@ -715,11 +722,7 @@ class GalconPlanetTransformer(nn.Module):
         target_logits = pair_out[..., 0]
         frac_preds = torch.sigmoid(pair_out[..., 1])
         action_logits = torch.cat([hold_logit, target_logits], dim=-1)
-
-        va = self.backbone.val_attn(h).squeeze(-1).masked_fill(~pad_mask, -1e9)
-        vw = F.softmax(va, dim=-1).unsqueeze(-1)
-        pooled = (h * vw).sum(dim=1)
-        value = torch.tanh(self.backbone.val_head(pooled).squeeze(-1))
+        value = self.decode_value_from_hidden(h, pad_mask)
         return action_logits, frac_preds, value
 
     def predict_multi_send(
@@ -761,6 +764,28 @@ class GalconPlanetTransformer(nn.Module):
         )  # (B, F, N, D/2)
         logits = self.redir_head(pair).squeeze(-1)  # (B, F, N)
         return logits.masked_fill(~pad_mask.unsqueeze(1), -1e9)
+
+    def forward_multi_send(
+        self,
+        planet_feats: torch.Tensor,
+        timeline_feats: torch.Tensor,
+        edge_feats: torch.Tensor,
+        pad_mask: torch.Tensor,
+        *,
+        return_aux: bool = False,
+        return_hidden: bool = False,
+    ):
+        """Fast Gen 4 multi-send forward pass skipping the unused Gen 2/3 legacy pairwise head."""
+        h = self.encode_planets(planet_feats, timeline_feats, edge_feats, pad_mask)
+        ms_logits, ms_fracs = self.predict_multi_send(h, edge_feats)
+        value = self.decode_value_from_hidden(h, pad_mask)
+        if return_aux and return_hidden:
+            return ms_logits, ms_fracs, value, self.predict_aux_future(h), h
+        if return_aux:
+            return ms_logits, ms_fracs, value, self.predict_aux_future(h)
+        if return_hidden:
+            return ms_logits, ms_fracs, value, h
+        return ms_logits, ms_fracs, value
 
     def forward(
         self,
@@ -942,6 +967,7 @@ class GalconTransformerAgent:
         redir_enc: Optional[EncodedRedirState] = None,
         use_d4_tta: Optional[bool] = None,
         use_d4_canonical: Optional[bool] = None,
+        need_value: bool = True,
     ) -> Tuple[np.ndarray, np.ndarray, float, Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
         n = len(enc.planet_ids)
         if n == 0:
@@ -1200,6 +1226,8 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         reactive_mid_ply: bool = True,
         opponent_adaptive: bool = True,
         adversarial_search: bool = True,
+        enable_rescue_snipe: bool = False,
+        enable_opp_direct_rush: bool = False,
         prior_bonus: float = 0.015,
         device: str = "cpu",
     ) -> None:
@@ -1219,6 +1247,8 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         self.reactive_mid_ply = bool(reactive_mid_ply)
         self.opponent_adaptive = bool(opponent_adaptive)
         self.adversarial_search = bool(adversarial_search)
+        self.enable_rescue_snipe = bool(enable_rescue_snipe)
+        self.enable_opp_direct_rush = bool(enable_opp_direct_rush)
         self.prior_bonus = float(prior_bonus)
         # Online opponent style tracker (reset automatically whenever sim.tick decreases)
         self._last_obs_tick = 10**9
@@ -1258,7 +1288,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
 
     @torch.no_grad()
     def _batch_forward_policy_and_val(
-        self, encs: Sequence[EncodedGalconState]
+        self, encs: Sequence[EncodedGalconState], *, need_value: bool = True
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
         """Run ONE batched 1x forward pass over a list of same-N encoded states."""
         k = len(encs)
@@ -1306,16 +1336,15 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         if k == 0:
             return np.zeros((0,), dtype=np.float32)
         n = len(leaf_encs[0].planet_ids)
-        pf_b = np.stack([self._prep_pf(e) for e in leaf_encs], axis=0)
-        tf_b = np.stack([e.timeline_feats for e in leaf_encs], axis=0)
-        ef_b = np.stack([e.edge_feats for e in leaf_encs], axis=0)
-        pm_b = np.ones((k, n), dtype=bool)
-        _, _, vals = self.model(
-            torch.from_numpy(pf_b).to(self.device),
-            torch.from_numpy(tf_b).to(self.device),
-            torch.from_numpy(ef_b).to(self.device),
-            torch.from_numpy(pm_b).to(self.device),
-        )
+        pf_t = torch.from_numpy(np.stack([self._prep_pf(e) for e in leaf_encs], axis=0)).to(self.device)
+        tf_t = torch.from_numpy(np.stack([e.timeline_feats for e in leaf_encs], axis=0)).to(self.device)
+        ef_t = torch.from_numpy(np.stack([e.edge_feats for e in leaf_encs], axis=0)).to(self.device)
+        pm_t = torch.ones((k, n), dtype=torch.bool, device=self.device)
+        if isinstance(self.model, GalconPlanetTransformer):
+            h = self.model.encode_planets(pf_t, tf_t, ef_t, pm_t)
+            vals = self.model.decode_value_from_hidden(h, pm_t)
+        else:
+            _, _, vals = self.model(pf_t, tf_t, ef_t, pm_t)
         return vals.cpu().numpy()
 
     def _build_fanout_plan(
@@ -1541,6 +1570,136 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         orders.extend(base_redirs)
         return orders
 
+    def _build_rescue_and_snipe_plan(
+        self,
+        sim: GalconSim,
+        enc: EncodedGalconState,
+        probs: np.ndarray,
+        *,
+        ms_probs: Optional[np.ndarray] = None,
+        base_redirs: Sequence[Order] = (),
+    ) -> List[Order]:
+        """Wave 12 surgical exact-defense rescue + single-target high-ROI snipe/capture plan."""
+        n = len(enc.planet_ids)
+        futures = enc.futures or [
+            project_planet_future(sim, p.id, enc.player, horizon=GALCON_TIMELINE_HORIZON) for p in enc.planets
+        ]
+        orders: List[Order] = []
+        avail = np.zeros((n,), dtype=np.float64)
+        for i in range(n):
+            if enc.owned_mask[i]:
+                avail[i] = max(0.0, min(float(enc.safe_surplus[i]), float(enc.planets[i].ships) * 0.85))
+        rem_ships = np.array([float(p.ships) for p in enc.planets], dtype=np.float64)
+
+        # 1. Exact defensive rescue for any friendly planet projected to fall within horizon
+        threatened: List[Tuple[float, int, int, float]] = []
+        for j in range(n):
+            if not enc.owned_mask[j]:
+                continue
+            _, _, po, ps = futures[j]
+            lost = [t for t in range(len(po)) if po[t] <= 0.0]
+            if not lost:
+                continue
+            t_fall = lost[0] + 1
+            deficit = float(ps[lost[0]]) + 3.0
+            if deficit > 0.0:
+                threatened.append((float(enc.planets[j].production) / max(1.0, float(t_fall)), j, t_fall, deficit))
+        threatened.sort(key=lambda x: -x[0])
+
+        for _, tgt_j, t_fall, need in threatened[:2]:
+            dst = enc.planets[tgt_j]
+            helpers = []
+            for i in range(n):
+                if i == tgt_j or not enc.owned_mask[i] or avail[i] < 4.0 or not enc.legal_edges[i, tgt_j]:
+                    continue
+                eta = sim.planet_eta_ticks(enc.planets[i], dst)
+                if eta <= t_fall:
+                    helpers.append((eta, i))
+            helpers.sort(key=lambda x: x[0])
+            if sum(avail[i] for _, i in helpers) < need * 0.85:
+                continue
+            rem_need = need
+            for _, i in helpers:
+                if rem_need <= 0.5 or rem_ships[i] < 2.0:
+                    break
+                send_s = min(avail[i], rem_need)
+                if send_s < 2.0:
+                    continue
+                pct = max(5, min(100, int(math.ceil(100.0 * send_s / max(1.0, rem_ships[i])))))
+                actual = math.floor(rem_ships[i] * (pct / 100.0) + 1e-9)
+                if actual >= 1:
+                    orders.append(SendOrder(enc.planet_ids[i], enc.planet_ids[tgt_j], pct))
+                    avail[i] = max(0.0, avail[i] - actual)
+                    rem_ships[i] = max(0.0, rem_ships[i] - actual)
+                    rem_need -= actual
+
+        # 2. Opportunistic exact-need single-target snipe / stalemate-breaking high-ROI capture
+        claimed = set()
+        for i in range(n):
+            if not enc.owned_mask[i] or avail[i] < 6.0 or rem_ships[i] < 6.0:
+                continue
+            src = enc.planets[i]
+            best_j = -1
+            best_sc = 0.0
+            best_need = 0.0
+            for j in range(n):
+                if j == i or j in claimed or not enc.legal_edges[i, j]:
+                    continue
+                dst = enc.planets[j]
+                if dst.owner == enc.player:
+                    continue
+                eta = sim.planet_eta_ticks(src, dst)
+                if eta > 18:
+                    continue
+                t_idx = min(GALCON_TIMELINE_HORIZON - 1, max(0, eta - 1))
+                _, _, po, ps = futures[j]
+                if po[t_idx] > 0.0:
+                    continue
+                extra = (
+                    0.0
+                    if dst.owner == 0
+                    else (dst.production / PRODUCTION_DIVISOR) * 0.25 * max(0, eta - GALCON_TIMELINE_HORIZON)
+                )
+                need = math.ceil(float(ps[t_idx]) + extra) + 2.0
+                if need <= 0.0 or need > avail[i]:
+                    continue
+                roi = (dst.production / max(1.0, PRODUCTION_DIVISOR)) * 22.0 / max(4.0, need + 0.60 * eta)
+                if dst.owner != 0:
+                    roi *= 1.65
+                p_prior = float(ms_probs[i, j]) if ms_probs is not None else float(probs[i, 1 + j])
+                sc = (0.40 + p_prior * 2.8) * roi
+                if sc > best_sc:
+                    best_sc = sc
+                    best_j = j
+                    best_need = need
+            if best_j >= 0 and best_sc >= 1.2:
+                pct = max(5, min(100, int(math.ceil(100.0 * best_need / max(1.0, rem_ships[i])))))
+                actual = math.floor(rem_ships[i] * (pct / 100.0) + 1e-9)
+                if actual >= 1:
+                    orders.append(SendOrder(enc.planet_ids[i], enc.planet_ids[best_j], pct))
+                    claimed.add(best_j)
+                    avail[i] = max(0.0, avail[i] - actual)
+                    rem_ships[i] = max(0.0, rem_ships[i] - actual)
+
+        if not orders:
+            return []
+        orders.extend(base_redirs)
+        return orders
+
+    def _build_opp_direct_rush_plan(self, sim: GalconSim, opp_enc: EncodedGalconState) -> List[Order]:
+        """Wave 12 soft-minimax fallback: 85% strike from opponent's strongest planet at our closest/weakest planet."""
+        n = len(opp_enc.planet_ids)
+        opp_owned = [i for i in range(n) if opp_enc.owned_mask[i] and opp_enc.planets[i].ships >= 25.0]
+        my_planets = [j for j in range(n) if opp_enc.planets[j].owner not in (0, opp_enc.player)]
+        if not opp_owned or not my_planets:
+            return []
+        src_i = max(opp_owned, key=lambda i: opp_enc.planets[i].ships)
+        src = opp_enc.planets[src_i]
+        tgt_j = min(my_planets, key=lambda j: sim.planet_eta_ticks(src, opp_enc.planets[j]) + 0.15 * opp_enc.planets[j].ships)
+        if not opp_enc.legal_edges[src_i, tgt_j]:
+            return []
+        return [SendOrder(opp_enc.planet_ids[src_i], opp_enc.planet_ids[tgt_j], 85)]
+
     def _predict_opponent_reply(
         self,
         sim: GalconSim,
@@ -1705,6 +1864,10 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         fan_cons = self._build_fanout_plan(
             sim, enc, probs, ms_probs=prior_ms, max_targets_per_planet=3, reserve_ratio=0.25, base_redirs=base_redirs
         )
+        if not fan_cons and self.enable_rescue_snipe:
+            fan_cons = self._build_rescue_and_snipe_plan(
+                sim, enc, probs, ms_probs=prior_ms, base_redirs=base_redirs
+            )
         if fan_cons:
             raw_cands.append(fan_cons)
         fan_agg = self._build_fanout_plan(
@@ -1768,7 +1931,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         opp_orders: List[Order] = []
         opp_adv_orders: List[Order] = []
         if opp_enc.planet_ids and np.any(opp_enc.owned_mask):
-            op, of, _, _, oms_p, oms_f = self._predict_all(opp_enc, use_d4_tta=False)
+            op, of, _, _, oms_p, oms_f = self._predict_all(opp_enc, use_d4_tta=False, need_value=False)
             opp_orders = self._predict_opponent_reply(sim, opp_enc, op, of, oms_p, oms_f)
             if use_adv:
                 opp_adv_orders = self._build_fanout_plan(
@@ -1776,6 +1939,8 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                 )
                 if not opp_adv_orders:
                     opp_adv_orders = self._build_focus_fire_plan(sim, opp_enc, op, max_sources=3)
+                if not opp_adv_orders and self.enable_opp_direct_rush:
+                    opp_adv_orders = self._build_opp_direct_rush_plan(sim, opp_enc)
 
         # Wave 8/9 map-adaptive lookahead: on Large (>=22pl) maps, extend rollout to 22 ticks and 3 reactive plies
         # (66.7% Large 24pl Asym / 50.0% Paired vs Sparky); on <22pl Std/Compact, pair 2-ply h=16 with
@@ -1817,7 +1982,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
             for i in live_indices:
                 mid_encs.append(extract_galcon_features(rolls[i], player, feature_version=self.feature_version))
                 mid_encs.append(extract_galcon_features(rolls[i], opp, feature_version=self.feature_version))
-            m_probs, m_fracs, _, m_msp, m_msf = self._batch_forward_policy_and_val(mid_encs)
+            m_probs, m_fracs, _, m_msp, m_msf = self._batch_forward_policy_and_val(mid_encs, need_value=False)
             for k_idx, r_idx in enumerate(live_indices):
                 r = rolls[r_idx]
                 p_enc = mid_encs[2 * k_idx]
@@ -1931,12 +2096,19 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
         *,
         weights: Optional[Sequence[float]] = None,
         value_weights: Optional[Sequence[float]] = None,
+        enable_rescue_snipe: bool = True,
+        enable_opp_direct_rush: bool = True,
         **kwargs,
     ) -> None:
         paths = [Path(p) for p in checkpoint_paths]
         if not paths:
             raise ValueError("EnsembleGalconSearchAgent requires at least one checkpoint path.")
-        super().__init__(paths[0], **kwargs)
+        super().__init__(
+            paths[0],
+            enable_rescue_snipe=enable_rescue_snipe,
+            enable_opp_direct_rush=enable_opp_direct_rush,
+            **kwargs,
+        )
         self.ensemble_agents: List[GalconTransformerAgent] = [self]
         for p in paths[1:]:
             self.ensemble_agents.append(
@@ -1975,13 +2147,14 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
         redir_enc: Optional[EncodedRedirState] = None,
         use_d4_tta: Optional[bool] = None,
         use_d4_canonical: Optional[bool] = None,
+        need_value: bool = True,
     ) -> Tuple[np.ndarray, np.ndarray, float, Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
         p_sum = f_sum = r_sum = msp_sum = msf_sum = None
         r_w = ms_w = 0.0
         v_sum = 0.0
         for idx, ag in enumerate(self.ensemble_agents):
             w = float(self.ensemble_weights[idx])
-            vw = float(self.value_weights[idx])
+            vw = float(self.value_weights[idx]) if need_value else 0.0
             if w <= 0.0 and vw <= 0.0:
                 continue
             if idx == 0:
@@ -2014,12 +2187,12 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
 
     @torch.no_grad()
     def _batch_forward_policy_and_val(
-        self, encs: Sequence[EncodedGalconState]
+        self, encs: Sequence[EncodedGalconState], *, need_value: bool = True
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
         """Run one batched forward pass per ensemble member and blend predictions."""
         k = len(encs)
         if k == 0:
-            return super()._batch_forward_policy_and_val(encs)
+            return super()._batch_forward_policy_and_val(encs, need_value=need_value)
         n = len(encs[0].planet_ids)
         pf_t = torch.from_numpy(np.stack([self._prep_pf(e) for e in encs], axis=0)).to(self.device)
         tf_t = torch.from_numpy(np.stack([e.timeline_feats for e in encs], axis=0)).to(self.device)
@@ -2028,11 +2201,12 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
         pm_t = torch.ones((k, n), dtype=torch.bool, device=self.device)
         mask = torch.cat([torch.ones((k, n, 1), dtype=torch.bool, device=self.device), le_t], dim=-1)
 
-        p_sum = f_sum = v_sum = msp_sum = msf_sum = None
+        p_sum = f_sum = msp_sum = msf_sum = None
+        v_sum = np.zeros((k,), dtype=np.float32)
         ms_w = 0.0
         for idx, ag in enumerate(self.ensemble_agents):
             w = float(self.ensemble_weights[idx])
-            vw = float(self.value_weights[idx])
+            vw = float(self.value_weights[idx]) if need_value else 0.0
             if w <= 0.0 and vw <= 0.0:
                 continue
             want_ms = (w > 0.0) and isinstance(ag.model, GalconPlanetTransformer) and ag.model.enable_multi_send
@@ -2054,12 +2228,11 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
                 p_sum = w * probs if p_sum is None else p_sum + w * probs
                 f_sum = w * fr_np if f_sum is None else f_sum + w * fr_np
             if vw > 0.0:
-                v_np = vals.cpu().numpy()
-                v_sum = vw * v_np if v_sum is None else v_sum + vw * v_np
+                v_sum += vw * vals.cpu().numpy()
         if msp_sum is not None and msf_sum is not None and ms_w > 0.0:
             msp_sum = msp_sum / ms_w
             msf_sum = msf_sum / ms_w
-        assert p_sum is not None and f_sum is not None and v_sum is not None
+        assert p_sum is not None and f_sum is not None
         return p_sum, f_sum, v_sum, msp_sum, msf_sum
 
     @torch.no_grad()
@@ -2077,7 +2250,11 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
             vw = float(self.value_weights[idx])
             if vw <= 0.0:
                 continue
-            _, _, vals = ag.model(pf_t, tf_t, ef_t, pm_t)
+            if isinstance(ag.model, GalconPlanetTransformer):
+                h = ag.model.encode_planets(pf_t, tf_t, ef_t, pm_t)
+                vals = ag.model.decode_value_from_hidden(h, pm_t)
+            else:
+                _, _, vals = ag.model(pf_t, tf_t, ef_t, pm_t)
             v_tot += vw * vals.cpu().numpy()
         return v_tot
 

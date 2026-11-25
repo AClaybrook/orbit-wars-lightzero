@@ -18,6 +18,7 @@ Gen 2 Teacher-Free Self-Play RL Flywheel:
 from __future__ import annotations
 
 import argparse
+import atexit
 from concurrent.futures import ProcessPoolExecutor
 import copy
 import math
@@ -32,7 +33,102 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Sampler, TensorDataset
+
+
+class _LengthBucketBatchSampler(Sampler[List[int]]):
+    """Groups samples with similar planet counts ``N`` into minibatches so ``_trim_batch_n`` avoids O(N^2) padding waste."""
+
+    def __init__(
+        self,
+        lengths: Sequence[int] | np.ndarray,
+        batch_size: int,
+        *,
+        shuffle: bool = True,
+        seed: int = 0,
+    ) -> None:
+        self.lengths = [int(x) for x in lengths]
+        self.batch_size = max(1, int(batch_size))
+        self.shuffle = bool(shuffle)
+        self._rng = random.Random(seed)
+
+    def __iter__(self):
+        buckets: Dict[int, List[int]] = {0: [], 1: [], 2: []}
+        for idx, n_pl in enumerate(self.lengths):
+            if n_pl <= 14:
+                buckets[0].append(idx)
+            elif n_pl <= 18:
+                buckets[1].append(idx)
+            else:
+                buckets[2].append(idx)
+        batches: List[List[int]] = []
+        for bk in (0, 1, 2):
+            idxs = buckets[bk]
+            if not idxs:
+                continue
+            if self.shuffle:
+                self._rng.shuffle(idxs)
+            for s in range(0, len(idxs), self.batch_size):
+                batches.append(idxs[s : s + self.batch_size])
+        if self.shuffle:
+            self._rng.shuffle(batches)
+        return iter(batches)
+
+    def __len__(self) -> int:
+        cnt = 0
+        b0 = sum(1 for n_pl in self.lengths if n_pl <= 14)
+        b1 = sum(1 for n_pl in self.lengths if 14 < n_pl <= 18)
+        b2 = len(self.lengths) - b0 - b1
+        for sz in (b0, b1, b2):
+            if sz > 0:
+                cnt += (sz + self.batch_size - 1) // self.batch_size
+        return cnt
+
+
+_WORKER_SNAP_CACHE: Dict[str, object] = {}
+_WORKER_LUA_POOLS: Dict[Tuple[str, int], List[object]] = {}
+_WORKER_ATEXIT_REGISTERED = False
+
+
+def _close_worker_lua_pools() -> None:
+    for pool in list(_WORKER_LUA_POOLS.values()):
+        for lb in pool:
+            try:
+                lb.close()
+            except Exception:
+                pass
+    _WORKER_LUA_POOLS.clear()
+
+
+def _get_worker_lua_pool(lua_spec: str, count: int) -> List[object]:
+    """Return persistent per-worker ``GalconLuaBotBridge`` instances to avoid respawning lua5.3 every iter."""
+    global _WORKER_ATEXIT_REGISTERED
+    if not lua_spec or count <= 0:
+        return []
+    key = (str(lua_spec), int(count))
+    pool = _WORKER_LUA_POOLS.get(key)
+    if pool is not None:
+        return pool
+    from galcon.lua_bridge import GalconLuaBotBridge
+
+    if not _WORKER_ATEXIT_REGISTERED:
+        atexit.register(_close_worker_lua_pools)
+        _WORKER_ATEXIT_REGISTERED = True
+    pool = [GalconLuaBotBridge(lua_spec) for _ in range(int(count))]
+    _WORKER_LUA_POOLS[key] = pool
+    return pool
+
+
+def _get_worker_cached_snap(ckpt_str: str) -> object:
+    """Cache immutable snapshot checkpoints inside persistent rollout/validation workers."""
+    m = _WORKER_SNAP_CACHE.get(ckpt_str)
+    if m is not None:
+        return m
+    m = _load_gen4_policy_from_ckpt(Path(ckpt_str), allow_non_ms=True).eval()
+    for p in m.parameters():
+        p.requires_grad_(False)
+    _WORKER_SNAP_CACHE[ckpt_str] = m
+    return m
 
 from galcon.heuristic_bot import (
     GalconClassicBot,
@@ -2441,6 +2537,7 @@ def _gen4_ei_worker(
     ckpt_path2_str: str = "",
     large_map_prob: float = 0.30,
     lua_opp3_str: str = "",
+    filter_draw_policy: bool = False,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     torch.set_num_threads(1)
     return collect_gen4_multisend_ei_dataset(
@@ -2454,6 +2551,7 @@ def _gen4_ei_worker(
         ckpt_path2=Path(ckpt_path2_str) if ckpt_path2_str else None,
         large_map_prob=large_map_prob,
         filter_losing_policy=filter_losing_policy,
+        filter_draw_policy=filter_draw_policy,
         workers=1,
     )
 
@@ -2470,6 +2568,7 @@ def collect_gen4_multisend_ei_dataset(
     ckpt_path2: Optional[Path] = None,
     large_map_prob: float = 0.30,
     filter_losing_policy: bool = True,
+    filter_draw_policy: bool = False,
     workers: int = 1,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """Collect winning/drawing multi-send trajectories from our Opponent-Adaptive Reactive Search.
@@ -2477,6 +2576,8 @@ def collect_gen4_multisend_ei_dataset(
     Supports up to 3 external Lua bosses (e.g. ``Sparky v1.6`` + ``EsparanBot v0.2`` + ``Waffle3z-GA`` via
     ``path.lua::bots_waffle3z_optimized``). When ``ckpt_path2`` is supplied, uses ``EnsembleGalconSearchAgent``
     as the teacher to distill 2-model Ensemble Search directly into a single fast student.
+    When ``filter_draw_policy=True``, boss stalemate draws still supervise the value & aux heads while
+    masking passive draw trajectories from policy updates.
     """
     if workers > 1 and num_games >= 2:
         n_w = min(int(workers), int(num_games))
@@ -2503,6 +2604,7 @@ def collect_gen4_multisend_ei_dataset(
                     ckpt2_str,
                     large_map_prob,
                     lua3_str,
+                    filter_draw_policy,
                 )
                 for idx, cnt in enumerate(shards)
             ]
@@ -2737,7 +2839,12 @@ def collect_gen4_multisend_ei_dataset(
                 snaps_by_p[pid].append((sim.tick, so, ss))
                 snaps = snaps_by_p[pid]
                 z = 1.0 if win == pid else (0.0 if win == 0 else -1.0)
-                keep_policy = (not filter_losing_policy) or (z >= 0.0)
+                if not filter_losing_policy:
+                    keep_policy = True
+                elif filter_draw_policy and is_boss:
+                    keep_policy = z > 0.0
+                else:
+                    keep_policy = z >= 0.0
                 for tick_rec, pad, ms_tar, ms_fr, t_msp_pad, best_sc, t_val, redir_pack in traj_by_p[pid]:
                     target_tick = tick_rec + 10
                     fut_o, fut_s = snaps[-1][1], snaps[-1][2]
@@ -2828,8 +2935,7 @@ def _gen4_multisend_loss(
         pf, tf, ef, le, om, pm, ms_tar, ms_fr, aux_own, aux_shp = _trim_batch_n(
             pf, tf, ef, le, om, pm, ms_tar, ms_fr, aux_own, aux_shp
         )
-    _, _, val, aux_pred, h = model(pf, tf, ef, pm, return_aux=True, return_hidden=True)
-    ms_logits, ms_frac_pred = model.predict_multi_send(h, ef)
+    ms_logits, ms_frac_pred, val, aux_pred = model.forward_multi_send(pf, tf, ef, pm, return_aux=True)
 
     edge_valid = om.unsqueeze(-1) & le
     ev_f = edge_valid.float()
@@ -2932,8 +3038,16 @@ def train_gen4_multisend_supervised(
             tensors.append(torch.from_numpy(data["teacher_ms_prob"][idx]))
         return TensorDataset(*tensors)
 
-    tr_loader = DataLoader(make_ds(tr_idx), batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(make_ds(val_idx), batch_size=batch_size, shuffle=False)
+    tr_lens = data["pad_mask"][tr_idx].sum(axis=1)
+    val_lens = data["pad_mask"][val_idx].sum(axis=1)
+    tr_loader = DataLoader(
+        make_ds(tr_idx),
+        batch_sampler=_LengthBucketBatchSampler(tr_lens, batch_size, shuffle=True, seed=seed),
+    )
+    val_loader = DataLoader(
+        make_ds(val_idx),
+        batch_sampler=_LengthBucketBatchSampler(val_lens, batch_size, shuffle=False, seed=seed),
+    )
 
     redir_loader = None
     if redir_data and len(redir_data.get("planet_feats", [])) >= 16:
@@ -3057,11 +3171,9 @@ def _fast_gen4_neural_act(
         tf_t = torch.from_numpy(enc.timeline_feats[None])
         ef_t = torch.from_numpy(enc.edge_feats[None])
         pm_t = torch.ones((1, n), dtype=torch.bool)
-        logits, fracs, _, h = model(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
-
         orders: List[Order] = []
         if model.enable_multi_send:
-            ms_l, ms_f = model.predict_multi_send(h, ef_t)
+            ms_l, ms_f, _, h = model.forward_multi_send(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
             le_t = torch.from_numpy(enc.legal_edges[None])
             ms_l = ms_l.masked_fill(~le_t, -1e9)
             ms_p = torch.sigmoid(ms_l[0]).numpy()
@@ -3088,6 +3200,7 @@ def _fast_gen4_neural_act(
                         orders.append(SendOrder(enc.planet_ids[i], enc.planet_ids[j], pct))
                         rem = max(0.0, rem - sent)
         else:
+            logits, fracs, _, h = model(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
             le_t = torch.from_numpy(enc.legal_edges[None])
             mask = torch.cat([torch.ones((1, n, 1), dtype=torch.bool), le_t], dim=-1)
             probs = F.softmax(logits.masked_fill(~mask, -1e9)[0], dim=-1).numpy()
@@ -3181,8 +3294,7 @@ def _run_gen4_ppo_episode(
                 tf_t = torch.from_numpy(enc_c.timeline_feats[None])
                 ef_t = torch.from_numpy(enc_c.edge_feats[None])
                 pm_t = torch.ones((1, n), dtype=torch.bool)
-                _, _, val, h_emb = policy(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
-                ms_l, ms_f = policy.predict_multi_send(h_emb, ef_t)
+                ms_l, ms_f, val, h_emb = policy.forward_multi_send(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
                 le_t = torch.from_numpy(enc.legal_edges)
                 om_t = torch.from_numpy(enc.owned_mask)
                 edge_m = om_t.unsqueeze(-1) & le_t
@@ -3426,8 +3538,7 @@ def _run_gen4_ppo_episodes_batched(
             tf_t = torch.from_numpy(tf_b)
             ef_t = torch.from_numpy(ef_b)
             pm_t = torch.from_numpy(pm_b)
-            _, _, val_b, h_emb_b = policy(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
-            ms_l_b, ms_f_b = policy.predict_multi_send(h_emb_b, ef_t)
+            ms_l_b, ms_f_b, val_b, h_emb_b = policy.forward_multi_send(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
 
             for bi, idx in enumerate(even_act):
                 sim = sims[idx]
@@ -3551,7 +3662,7 @@ def _run_gen4_ppo_episodes_batched(
 
 
 def _gen4_ppo_rollout_worker(args_tuple):
-    """Worker entrypoint for parallel paired-mirror Gen 4 PPO rollout collection (batched lockstep inference)."""
+    """Worker entrypoint for parallel paired-mirror Gen 4 PPO rollout collection (batched lockstep + cached bridges)."""
     (
         policy_ckpt_str,
         snap_ckpt_strs,
@@ -3579,10 +3690,7 @@ def _gen4_ppo_rollout_worker(args_tuple):
     needed_snaps = {opp_idx for (_, _, _, _, _, ok, opp_idx) in pair_jobs if ok == "snap"}
     snap_map: Dict[int, GalconPlanetTransformer] = {}
     for s_idx in needed_snaps:
-        sm = _load_gen4_policy_from_ckpt(Path(snap_ckpt_strs[s_idx]), allow_non_ms=True).eval()
-        for p in sm.parameters():
-            p.requires_grad_(False)
-        snap_map[s_idx] = sm
+        snap_map[s_idx] = _get_worker_cached_snap(snap_ckpt_strs[s_idx])  # type: ignore[assignment]
 
     lua_pools: Dict[str, List] = {"boss": [], "boss2": [], "boss3": []}
     buf: Dict[str, List] = {
@@ -3592,116 +3700,107 @@ def _gen4_ppo_rollout_worker(args_tuple):
     boss_wins = boss_eps = boss2_wins = boss2_eps = boss3_wins = boss3_eps = 0
     split_pairs = total_eps = 0
 
-    try:
-        from galcon.lua_bridge import GalconLuaBotBridge
+    need_b1 = any(j[5] == "boss" for j in pair_jobs)
+    need_b2 = any(j[5] == "boss2" for j in pair_jobs)
+    need_b3 = any(j[5] == "boss3" for j in pair_jobs)
+    if lua_opp_str and need_b1:
+        lua_pools["boss"] = _get_worker_lua_pool(lua_opp_str, 2)
+    if lua_opp2_str and need_b2:
+        lua_pools["boss2"] = _get_worker_lua_pool(lua_opp2_str, 2)
+    if lua_opp3_str and need_b3:
+        lua_pools["boss3"] = _get_worker_lua_pool(lua_opp3_str, 2)
 
-        need_b1 = any(j[5] == "boss" for j in pair_jobs)
-        need_b2 = any(j[5] == "boss2" for j in pair_jobs)
-        need_b3 = any(j[5] == "boss3" for j in pair_jobs)
-        if lua_opp_str and need_b1:
-            # 2 lightweight lua5.3 bridges allow both mirror sides (P1 & P2) of Sparky pairs to run batched in lockstep!
-            lua_pools["boss"] = [GalconLuaBotBridge(lua_opp_str), GalconLuaBotBridge(lua_opp_str)]
-        if lua_opp2_str and need_b2:
-            lua_pools["boss2"] = [GalconLuaBotBridge(lua_opp2_str), GalconLuaBotBridge(lua_opp2_str)]
-        if lua_opp3_str and need_b3:
-            lua_pools["boss3"] = [GalconLuaBotBridge(lua_opp3_str), GalconLuaBotBridge(lua_opp3_str)]
-
-        # Build all episode tasks and pack into conflict-free waves of up to 6 episodes per batched forward pass
-        # Each task: (pair_idx, side_idx, lua_key, ep_spec_without_bot, opp_kind, opp_idx)
-        pending = []
-        pair_meta = []
-        for p_idx, (map_seed, n_pl, w, h, sym, opp_kind, opp_idx) in enumerate(pair_jobs):
-            opp_snap = snap_map[opp_idx] if opp_kind == "snap" else None
-            is_boss = False
-            is_boss2 = False
-            is_boss3 = False
-            lua_key = None
-            heur_bot = None
-            if opp_kind == "boss" and lua_pools["boss"]:
-                lua_key = "boss"
+    # Build all episode tasks and pack into conflict-free waves of up to 6 episodes per batched forward pass
+    pending = []
+    pair_meta = []
+    for p_idx, (map_seed, n_pl, w, h, sym, opp_kind, opp_idx) in enumerate(pair_jobs):
+        opp_snap = snap_map[opp_idx] if opp_kind == "snap" else None
+        is_boss = False
+        is_boss2 = False
+        is_boss3 = False
+        lua_key = None
+        heur_bot = None
+        if opp_kind == "boss" and lua_pools["boss"]:
+            lua_key = "boss"
+            is_boss = True
+        elif opp_kind == "boss2":
+            if lua_pools["boss2"]:
+                lua_key = "boss2"
                 is_boss = True
-            elif opp_kind == "boss2":
-                if lua_pools["boss2"]:
-                    lua_key = "boss2"
-                    is_boss = True
-                    is_boss2 = True
-                else:
-                    heur_bot = _make_sparring_bot(w_rng, "tactical")
-            elif opp_kind == "boss3":
-                if lua_pools["boss3"]:
-                    lua_key = "boss3"
-                    is_boss = True
-                    is_boss3 = True
-                else:
-                    heur_bot = _make_sparring_bot(w_rng, "tactical")
-            elif opp_kind != "snap":
-                heur_bot = _make_sparring_bot(w_rng, opp_kind)
-            pair_meta.append((opp_snap is not None, is_boss, is_boss2, is_boss3))
-            for side_idx, ours_pid in enumerate((1, 2)):
-                pending.append((p_idx, side_idx, lua_key, (map_seed, n_pl, w, h, sym, ours_pid, opp_snap, heur_bot, is_boss)))
+                is_boss2 = True
+            else:
+                heur_bot = _make_sparring_bot(w_rng, "tactical")
+        elif opp_kind == "boss3":
+            if lua_pools["boss3"]:
+                lua_key = "boss3"
+                is_boss = True
+                is_boss3 = True
+            else:
+                heur_bot = _make_sparring_bot(w_rng, "tactical")
+        elif opp_kind != "snap":
+            heur_bot = _make_sparring_bot(w_rng, opp_kind)
+        pair_meta.append((opp_snap is not None, is_boss, is_boss2, is_boss3))
+        for side_idx, ours_pid in enumerate((1, 2)):
+            pending.append((p_idx, side_idx, lua_key, (map_seed, n_pl, w, h, sym, ours_pid, opp_snap, heur_bot, is_boss)))
 
-        pair_results: Dict[int, List] = {i: [None, None] for i in range(len(pair_jobs))}
-        while pending:
-            wave_specs = []
-            wave_refs = []
-            used_lua: Dict[str, int] = {"boss": 0, "boss2": 0, "boss3": 0}
-            still = []
-            for item in pending:
-                p_idx, side_idx, lua_key, spec = item
-                if len(wave_specs) >= 6:
+    pair_results: Dict[int, List] = {i: [None, None] for i in range(len(pair_jobs))}
+    while pending:
+        wave_specs = []
+        wave_refs = []
+        used_lua: Dict[str, int] = {"boss": 0, "boss2": 0, "boss3": 0}
+        still = []
+        for item in pending:
+            p_idx, side_idx, lua_key, spec = item
+            if len(wave_specs) >= 6:
+                still.append(item)
+                continue
+            if lua_key is not None:
+                slot = used_lua[lua_key]
+                if slot >= len(lua_pools[lua_key]):
                     still.append(item)
                     continue
-                if lua_key is not None:
-                    slot = used_lua[lua_key]
-                    if slot >= len(lua_pools[lua_key]):
-                        still.append(item)
-                        continue
-                    used_lua[lua_key] = slot + 1
-                    bot_obj = lua_pools[lua_key][slot]
-                    spec = (spec[0], spec[1], spec[2], spec[3], spec[4], spec[5], spec[6], bot_obj, spec[8])
-                wave_specs.append(spec)
-                wave_refs.append((p_idx, side_idx))
-            pending = still
+                used_lua[lua_key] = slot + 1
+                bot_obj = lua_pools[lua_key][slot]
+                spec = (spec[0], spec[1], spec[2], spec[3], spec[4], spec[5], spec[6], bot_obj, spec[8])
+            wave_specs.append(spec)
+            wave_refs.append((p_idx, side_idx))
+        pending = still
 
-            outs = _run_gen4_ppo_episodes_batched(
-                policy,
-                wave_specs,
-                gamma=gamma,
-                gae_lam=gae_lam,
-                frac_std=frac_std,
-                draw_penalty=draw_penalty,
-                boss_draw_penalty=boss_draw_penalty,
-                max_sends_per_planet=max_sends_per_planet,
-            )
-            for (p_idx, side_idx), ep_out in zip(wave_refs, outs):
-                pair_results[p_idx][side_idx] = ep_out
+        outs = _run_gen4_ppo_episodes_batched(
+            policy,
+            wave_specs,
+            gamma=gamma,
+            gae_lam=gae_lam,
+            frac_std=frac_std,
+            draw_penalty=draw_penalty,
+            boss_draw_penalty=boss_draw_penalty,
+            max_sends_per_planet=max_sends_per_planet,
+        )
+        for (p_idx, side_idx), ep_out in zip(wave_refs, outs):
+            pair_results[p_idx][side_idx] = ep_out
 
-        for p_idx in range(len(pair_jobs)):
-            ep_a, ep_b = pair_results[p_idx]
-            is_snap, is_boss, is_boss2, is_boss3 = pair_meta[p_idx]
-            total_eps += 2
-            won_a, won_b = ep_a[5], ep_b[5]
-            wins += won_a + won_b
-            if is_boss3:
-                boss3_eps += 2
-                boss3_wins += won_a + won_b
-            elif is_boss2:
-                boss2_eps += 2
-                boss2_wins += won_a + won_b
-            elif is_boss:
-                boss_eps += 2
-                boss_wins += won_a + won_b
-            elif is_snap:
-                sp_eps += 2
-                sp_wins += won_a + won_b
-            else:
-                bot_eps += 2
-                bot_wins += won_a + won_b
-            split_pairs += _append_gen4_pair_to_buf(buf, ep_a, ep_b)
-    finally:
-        for pool_list in lua_pools.values():
-            for lb in pool_list:
-                lb.close()
+    for p_idx in range(len(pair_jobs)):
+        ep_a, ep_b = pair_results[p_idx]
+        is_snap, is_boss, is_boss2, is_boss3 = pair_meta[p_idx]
+        total_eps += 2
+        won_a, won_b = ep_a[5], ep_b[5]
+        wins += won_a + won_b
+        if is_boss3:
+            boss3_eps += 2
+            boss3_wins += won_a + won_b
+        elif is_boss2:
+            boss2_eps += 2
+            boss2_wins += won_a + won_b
+        elif is_boss:
+            boss_eps += 2
+            boss_wins += won_a + won_b
+        elif is_snap:
+            sp_eps += 2
+            sp_wins += won_a + won_b
+        else:
+            bot_eps += 2
+            bot_wins += won_a + won_b
+        split_pairs += _append_gen4_pair_to_buf(buf, ep_a, ep_b)
 
     arr_buf = {k: np.stack(v) for k, v in buf.items()} if buf["ret"] else {}
     return (
@@ -3866,8 +3965,144 @@ def _should_promote_gen4_val(
     return False
 
 
+def _decode_gen4_ms_orders_fast(
+    sim: GalconSim,
+    enc,
+    ms_probs: np.ndarray,
+    ms_fracs: np.ndarray,
+    h_row: Optional[torch.Tensor],
+    model: GalconPlanetTransformer,
+    *,
+    threshold: float = 0.45,
+    max_sends_per_planet: int = 6,
+) -> List[Order]:
+    """Fast greedy Gen 4 multi-send + native /REDIR decoder from precomputed batched tensors."""
+    n = len(enc.planet_ids)
+    orders: List[Order] = []
+    for i in range(n):
+        if not enc.owned_mask[i]:
+            continue
+        orig_s = float(enc.planets[i].ships)
+        if orig_s < 2.0:
+            continue
+        sel = [
+            (float(ms_probs[i, j]), j)
+            for j in range(n)
+            if j != i and enc.legal_edges[i, j] and float(ms_probs[i, j]) >= threshold
+        ]
+        if not sel:
+            continue
+        sel.sort(key=lambda x: -x[0])
+        rem = orig_s
+        for _, j in sel[:max_sends_per_planet]:
+            if rem < 2.0:
+                break
+            want = min(rem, max(1.0, float(ms_fracs[i, j]) * orig_s))
+            ratio = want / max(1.0, rem)
+            pct = 100 if ratio >= 0.92 else max(5, min(100, int(round(ratio * 100.0))))
+            sent = math.floor(rem * (pct / 100.0) + 1e-9)
+            if sent >= 1:
+                orders.append(SendOrder(enc.planet_ids[i], enc.planet_ids[j], pct))
+                rem = max(0.0, rem - sent)
+    if sim.allow_redirect and sim.fleets and h_row is not None:
+        renc = extract_galcon_redir_features(sim, enc)
+        if renc.fleet_ids:
+            rlogits = model.predict_redir_logits(
+                h_row,
+                torch.from_numpy(renc.cur_dst_idx[None]),
+                torch.from_numpy(renc.redir_feats[None]),
+                torch.ones((1, n), dtype=torch.bool),
+            )
+            rprobs = F.softmax(rlogits[0], dim=-1).numpy()
+            for fi, fid in enumerate(renc.fleet_ids):
+                c_idx = int(renc.cur_dst_idx[fi])
+                bj = int(np.argmax(rprobs[fi]))
+                if bj != c_idx and float(rprobs[fi, bj]) >= 0.55:
+                    orders.append(RedirOrder(fid, enc.planet_ids[bj]))
+    return orders
+
+
+def _run_gen4_val_wave_batched(
+    model_eval: GalconPlanetTransformer,
+    wave_jobs: Sequence[Tuple[str, str, int, int, float, float, int, bool, int, object, bool]],
+) -> List[Tuple[str, float]]:
+    """Run a batch of up to 6 validation games in lockstep with one batched ``forward_multi_send`` call per tick."""
+    m = len(wave_jobs)
+    if m == 0:
+        return []
+    sims = [
+        GalconSim.create(seed=j[2], num_planets=j[3], width=j[4], height=j[5], max_ticks=j[6], symmetric=j[7])
+        for j in wave_jobs
+    ]
+    a_pids = [j[8] for j in wave_jobs]
+    b_pids = [2 if a == 1 else 1 for a in a_pids]
+    opp_objs = [j[9] for j in wave_jobs]
+    opp_is_nn = [j[10] for j in wave_jobs]
+
+    while True:
+        active = [idx for idx in range(m) if not sims[idx].done]
+        if not active:
+            break
+        even_act = [idx for idx in active if sims[idx].tick % 2 == 0]
+        for idx in active:
+            if sims[idx].tick % 2 != 0:
+                sims[idx].step({})
+        if not even_act:
+            continue
+
+        encs = []
+        pfs = []
+        ns = []
+        for idx in even_act:
+            enc = extract_galcon_features(sims[idx], a_pids[idx], feature_version=2)
+            encs.append(enc)
+            pfs.append(canonicalize_galcon_d4(enc.planet_feats))
+            ns.append(len(enc.planet_ids))
+
+        k_b = len(even_act)
+        max_n = max(ns)
+        pf_dim = pfs[0].shape[-1]
+        tf_tail = encs[0].timeline_feats.shape[1:]
+        ef_dim = encs[0].edge_feats.shape[-1]
+        pf_b = np.zeros((k_b, max_n, pf_dim), dtype=np.float32)
+        tf_b = np.zeros((k_b, max_n, *tf_tail), dtype=np.float32)
+        ef_b = np.zeros((k_b, max_n, max_n, ef_dim), dtype=np.float32)
+        pm_b = np.zeros((k_b, max_n), dtype=bool)
+        for bi, (pf_c, enc, n) in enumerate(zip(pfs, encs, ns)):
+            pf_b[bi, :n] = pf_c
+            tf_b[bi, :n] = enc.timeline_feats
+            ef_b[bi, :n, :n] = enc.edge_feats
+            pm_b[bi, :n] = True
+
+        with torch.no_grad():
+            pf_t = torch.from_numpy(pf_b)
+            tf_t = torch.from_numpy(tf_b)
+            ef_t = torch.from_numpy(ef_b)
+            pm_t = torch.from_numpy(pm_b)
+            ms_l_b, ms_f_b, _, h_b = model_eval.forward_multi_send(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
+            for bi, idx in enumerate(even_act):
+                enc = encs[bi]
+                n = ns[bi]
+                le_t = torch.from_numpy(enc.legal_edges)
+                ms_p = torch.sigmoid(ms_l_b[bi, :n, :n].masked_fill(~le_t, -1e9)).numpy()
+                ms_f = ms_f_b[bi, :n, :n].numpy()
+                oa = _decode_gen4_ms_orders_fast(
+                    sims[idx], enc, ms_p, ms_f, h_b[bi : bi + 1, :n], model_eval
+                )
+                ob = opp_objs[idx]
+                ob_act = _fast_gen4_neural_act(ob, sims[idx], b_pids[idx]) if opp_is_nn[idx] else ob.act(sims[idx], b_pids[idx])
+                sims[idx].step({a_pids[idx]: oa, b_pids[idx]: ob_act})
+
+    out: List[Tuple[str, float]] = []
+    for idx in range(m):
+        w_id = sims[idx].winner()
+        pts = 1.0 if w_id == a_pids[idx] else (0.5 if w_id == 0 else 0.0)
+        out.append((wave_jobs[idx][0], pts))
+    return out
+
+
 def _gen4_val_worker(args_tuple):
-    """Worker entrypoint for parallel ``val_44g`` / ``val_56g`` validation shards."""
+    """Worker entrypoint for parallel batched lockstep ``val_44g`` / ``val_56g`` shards (with cached bridges)."""
     (
         policy_ckpt_str,
         anchor_ckpt_str,
@@ -3882,53 +4117,50 @@ def _gen4_val_worker(args_tuple):
         p.requires_grad_(False)
     anchor_ref = None
     if any(j[1] == "anc" for j in val_jobs):
-        anchor_ref = _load_gen4_policy_from_ckpt(Path(anchor_ckpt_str), allow_non_ms=True).eval()
-        for p in anchor_ref.parameters():
-            p.requires_grad_(False)
+        anchor_ref = _get_worker_cached_snap(anchor_ckpt_str)
 
-    lua_map: Dict[str, object] = {}
+    lua_pools: Dict[str, List] = {"boss": [], "boss2": [], "boss3": []}
+    needed_kinds = {j[1] for j in val_jobs}
+    if "boss" in needed_kinds and lua1_str:
+        lua_pools["boss"] = _get_worker_lua_pool(lua1_str, 2)
+    if "boss2" in needed_kinds and lua2_str:
+        lua_pools["boss2"] = _get_worker_lua_pool(lua2_str, 2)
+    if "boss3" in needed_kinds and lua3_str:
+        lua_pools["boss3"] = _get_worker_lua_pool(lua3_str, 2)
+
+    heur_bots = {
+        "tactical": GalconTacticalBot(),
+        "rusher": GalconRusherBot(style="all_in"),
+        "macro": GalconMacroBot(),
+    }
     b_sc: Dict[str, float] = {"heur": 0.0, "anc": 0.0, "boss": 0.0, "boss2": 0.0, "boss3": 0.0}
     b_cnt: Dict[str, int] = {"heur": 0, "anc": 0, "boss": 0, "boss2": 0, "boss3": 0}
-    try:
-        from galcon.lua_bridge import GalconLuaBotBridge
 
-        needed_kinds = {j[1] for j in val_jobs}
-        if "boss" in needed_kinds and lua1_str:
-            lua_map["boss"] = GalconLuaBotBridge(lua1_str)
-        if "boss2" in needed_kinds and lua2_str:
-            lua_map["boss2"] = GalconLuaBotBridge(lua2_str)
-        if "boss3" in needed_kinds and lua3_str:
-            lua_map["boss3"] = GalconLuaBotBridge(lua3_str)
-
-        heur_bots = {
-            "tactical": GalconTacticalBot(),
-            "rusher": GalconRusherBot(style="all_in"),
-            "macro": GalconMacroBot(),
-        }
-        for bucket, opp_kind, g_seed, n_p, ww, hh, max_t, sym, a_p in val_jobs:
-            b_p = 2 if a_p == 1 else 1
-            s = GalconSim.create(seed=g_seed, num_planets=n_p, width=ww, height=hh, max_ticks=max_t, symmetric=sym)
-            is_nn = opp_kind == "anc"
-            if is_nn:
-                ob = anchor_ref
-            elif opp_kind in lua_map:
-                ob = lua_map[opp_kind]
+    pending = list(val_jobs)
+    while pending:
+        wave = []
+        used_lua: Dict[str, int] = {"boss": 0, "boss2": 0, "boss3": 0}
+        still = []
+        for job in pending:
+            bucket, opp_kind, g_seed, n_p, ww, hh, max_t, sym, a_p = job
+            if len(wave) >= 6:
+                still.append(job)
+                continue
+            if opp_kind in lua_pools and lua_pools[opp_kind]:
+                slot = used_lua[opp_kind]
+                if slot >= len(lua_pools[opp_kind]):
+                    still.append(job)
+                    continue
+                used_lua[opp_kind] = slot + 1
+                wave.append((bucket, opp_kind, g_seed, n_p, ww, hh, max_t, sym, a_p, lua_pools[opp_kind][slot], False))
+            elif opp_kind == "anc":
+                wave.append((bucket, opp_kind, g_seed, n_p, ww, hh, max_t, sym, a_p, anchor_ref, True))
             else:
-                ob = heur_bots.get(opp_kind, heur_bots["tactical"])
-            while not s.done:
-                if s.tick % 2 == 0:
-                    oa = _fast_gen4_neural_act(model_eval, s, a_p)
-                    ob_act = _fast_gen4_neural_act(ob, s, b_p) if is_nn else ob.act(s, b_p)
-                    s.step({a_p: oa, b_p: ob_act})
-                else:
-                    s.step({})
-            w_id = s.winner()
-            pts = 1.0 if w_id == a_p else (0.5 if w_id == 0 else 0.0)
+                wave.append((bucket, opp_kind, g_seed, n_p, ww, hh, max_t, sym, a_p, heur_bots.get(opp_kind, heur_bots["tactical"]), False))
+        pending = still
+        for bucket, pts in _run_gen4_val_wave_batched(model_eval, wave):
             b_sc[bucket] += pts
             b_cnt[bucket] += 1
-    finally:
-        for lb in lua_map.values():
-            lb.close()
     return b_sc, b_cnt
 
 
@@ -4358,31 +4590,31 @@ def rl_mirror_league_ppo_gen4(
 
             t_upd = time.time()
             torch.set_num_threads(max(1, int(train_threads)))
-            # Wave 11 speedup: precompute frozen ema_teacher KL probs & values ONCE per iter instead of every PPO epoch
-            e_p_chunks: List[torch.Tensor] = []
-            e_v_chunks: List[torch.Tensor] = []
+            # Wave 11/12 speedup: length-bucketed frozen ema_teacher precompute + forward_multi_send (skips dead legacy pairwise head)
+            ds_lens = ds.tensors[5].sum(dim=1).numpy()
+            n_ds = len(ds)
+            full_n_ds = int(ds.tensors[0].shape[1])
+            e_p_all = torch.full((n_ds, full_n_ds, full_n_ds), 1e-5, dtype=torch.float32)
+            e_v_all = torch.zeros((n_ds,), dtype=torch.float32)
             with torch.no_grad():
-                pre_loader = DataLoader(ds, batch_size=128, shuffle=False)
-                for p_batch in pre_loader:
-                    p_pf, p_tf, p_ef, p_le, p_om, p_pm = (t.to(train_dev) for t in p_batch[:6])
-                    full_n = p_pf.shape[1]
+                pre_sampler = _LengthBucketBatchSampler(ds_lens, 128, shuffle=False, seed=seed + it)
+                for b_indices in pre_sampler:
+                    idx_t = torch.tensor(b_indices, dtype=torch.long)
+                    p_pf, p_tf, p_ef, p_le, p_om, p_pm = (ds.tensors[k][idx_t].to(train_dev) for k in range(6))
                     t_pf, t_tf, t_ef, t_le, t_om, t_pm = _trim_batch_n(p_pf, p_tf, p_ef, p_le, p_om, p_pm)
-                    _, _, ev_c, eh_c = ema_teacher(t_pf, t_tf, t_ef, t_pm, return_hidden=True)
-                    eml_c, _ = ema_teacher.predict_multi_send(eh_c, t_ef)
+                    eml_c, _, ev_c = ema_teacher.forward_multi_send(t_pf, t_tf, t_ef, t_pm)
                     em_c = t_om.unsqueeze(-1) & t_le
-                    ep_c = torch.sigmoid(eml_c.masked_fill(~em_c, -1e9)).clamp(1e-5, 1.0 - 1e-5)
+                    ep_c = torch.sigmoid(eml_c.masked_fill(~em_c, -1e9)).clamp(1e-5, 1.0 - 1e-5).cpu()
                     tn = t_pf.shape[1]
-                    if tn < full_n:
-                        ep_pad = torch.full((ep_c.shape[0], full_n, full_n), 1e-5, dtype=ep_c.dtype)
-                        ep_pad[:, :tn, :tn] = ep_c.cpu()
-                        e_p_chunks.append(ep_pad)
-                    else:
-                        e_p_chunks.append(ep_c.cpu())
-                    e_v_chunks.append(ev_c.cpu())
-            ds_with_ema = TensorDataset(*ds.tensors, torch.cat(e_p_chunks, dim=0), torch.cat(e_v_chunks, dim=0))
+                    e_p_all[idx_t, :tn, :tn] = ep_c
+                    e_v_all[idx_t] = ev_c.cpu()
+            ds_with_ema = TensorDataset(*ds.tensors, e_p_all, e_v_all)
 
             policy.train()
-            loader = DataLoader(ds_with_ema, batch_size=96, shuffle=True)
+            loader = DataLoader(
+                ds_with_ema,
+                batch_sampler=_LengthBucketBatchSampler(ds_lens, 96, shuffle=True, seed=seed + it * 31),
+            )
             ent_coef = 0.004 * (1.0 - 0.45 * (it / max(1, iters)))
             r_iter = iter(redir_loader) if redir_loader is not None else None
 
@@ -4394,8 +4626,7 @@ def rl_mirror_league_ppo_gen4(
                     pf, tf, ef, le, om, pm, acts, f_acts, aux_o, aux_s, e_p = _trim_batch_n(
                         pf, tf, ef, le, om, pm, acts, f_acts, aux_o, aux_s, e_p
                     )
-                    _, _, val, aux_pred, h_emb = policy(pf, tf, ef, pm, return_aux=True, return_hidden=True)
-                    ms_l, ms_f = policy.predict_multi_send(h_emb, ef)
+                    ms_l, ms_f, val, aux_pred = policy.forward_multi_send(pf, tf, ef, pm, return_aux=True)
                     edge_m = om.unsqueeze(-1) & le
                     edge_f = edge_m.float()
                     edge_sum = edge_f.sum().clamp_min(1.0)
@@ -4607,6 +4838,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--kl-coef", type=float, default=0.030)
     parser.add_argument("--v-anchor-coef", type=float, default=0.0)
     parser.add_argument("--kd-alpha", type=float, default=0.30)
+    parser.add_argument("--filter-draws", action="store_true", help="Mask boss stalemate draws from EI policy loss while keeping value/aux supervision.")
     parser.add_argument("--eval-every", type=int, default=4)
     parser.add_argument("--redir-npz", default="checkpoints/galcon_gen2_redir.npz")
     parser.add_argument("--bc-games", type=int, default=80)
@@ -4628,14 +4860,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     out_path = Path(args.out)
-
     if args.mode == "v1":
         bc_path = out_path.with_name("galcon_v1_bc.pt")
         dagger_path = out_path.with_name("galcon_v1_dagger.pt")
         ppo_path = out_path.with_name("galcon_v1_ppo.pt")
 
-        bc_data = collect_teacher_dataset(num_games=args.bc_games, seed=1000)
-        train_supervised(bc_data, epochs=args.epochs, lr=1.4e-3, out_path=bc_path, seed=42)
+        bc_data = collect_teacher_dataset(num_games=args.bc_games, seed=2000)
+        train_supervised(bc_data, epochs=args.epochs, lr=1.2e-3, out_path=bc_path, seed=42)
 
         stu = GalconTransformerAgent(bc_path, use_d4_tta=False)
         dg_data = collect_teacher_dataset(num_games=args.dagger_games, seed=3000, dagger_agent=stu)
@@ -4735,6 +4966,7 @@ def main(argv: list[str] | None = None) -> int:
             lua_opp3_path=lua_p3,
             ckpt_path2=resume_p2,
             large_map_prob=args.large_map_prob,
+            filter_draw_policy=args.filter_draws,
             workers=args.workers,
         )
         old_r = _load_redir_npz()
