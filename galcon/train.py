@@ -3065,46 +3065,48 @@ def train_gen4_multisend_supervised(
         val_idx, tr_idx = perm[:n_val], perm[n_val:]
     has_kd = "teacher_ms_prob" in data and kd_alpha > 0.0
 
-    def make_ds(idx):
-        tensors = [
-            torch.from_numpy(data["planet_feats"][idx]),
-            torch.from_numpy(data["timeline_feats"][idx]),
-            torch.from_numpy(data["edge_feats"][idx]),
-            torch.from_numpy(data["legal_edges"][idx]),
-            torch.from_numpy(data["owned_mask"][idx]),
-            torch.from_numpy(data["pad_mask"][idx]),
-            torch.from_numpy(data["ms_target"][idx]),
-            torch.from_numpy(data["ms_frac"][idx]),
-            torch.from_numpy(data["val_targets"][idx]),
-            torch.from_numpy(data["aux_owner"][idx]),
-            torch.from_numpy(data["aux_ships"][idx]),
-        ]
-        if has_kd:
-            tensors.append(torch.from_numpy(data["teacher_ms_prob"][idx]))
-        return TensorDataset(*tensors)
+    # Zero-copy TensorDataset + Subset avoids duplicating GBs of padded edge tensors in RAM
+    full_tensors = [
+        torch.from_numpy(data["planet_feats"]),
+        torch.from_numpy(data["timeline_feats"]),
+        torch.from_numpy(data["edge_feats"]),
+        torch.from_numpy(data["legal_edges"]),
+        torch.from_numpy(data["owned_mask"]),
+        torch.from_numpy(data["pad_mask"]),
+        torch.from_numpy(data["ms_target"]),
+        torch.from_numpy(data["ms_frac"]),
+        torch.from_numpy(data["val_targets"]),
+        torch.from_numpy(data["aux_owner"]),
+        torch.from_numpy(data["aux_ships"]),
+    ]
+    if has_kd:
+        full_tensors.append(torch.from_numpy(data["teacher_ms_prob"]))
+    full_ds = TensorDataset(*full_tensors)
 
     tr_lens = data["pad_mask"][tr_idx].sum(axis=1)
     val_lens = data["pad_mask"][val_idx].sum(axis=1)
     tr_loader = DataLoader(
-        make_ds(tr_idx),
+        torch.utils.data.Subset(full_ds, tr_idx.tolist()),
         batch_sampler=_LengthBucketBatchSampler(tr_lens, batch_size, shuffle=True, seed=seed),
     )
     val_loader = DataLoader(
-        make_ds(val_idx),
+        torch.utils.data.Subset(full_ds, val_idx.tolist()),
         batch_sampler=_LengthBucketBatchSampler(val_lens, batch_size, shuffle=False, seed=seed),
     )
 
     redir_loader = None
     if redir_data and len(redir_data.get("planet_feats", [])) >= 16:
+        n_r = len(redir_data["planet_feats"])
+        r_sl = slice(max(0, n_r - 4000), n_r)
         rds = TensorDataset(
-            torch.from_numpy(redir_data["planet_feats"]),
-            torch.from_numpy(redir_data["timeline_feats"]),
-            torch.from_numpy(redir_data["edge_feats"]),
-            torch.from_numpy(redir_data["pad_mask"]),
-            torch.from_numpy(redir_data["cur_dst_idx"]),
-            torch.from_numpy(redir_data["redir_feats"]),
-            torch.from_numpy(redir_data["redir_target"]),
-            torch.from_numpy(redir_data["redir_mask"]),
+            torch.from_numpy(redir_data["planet_feats"][r_sl]),
+            torch.from_numpy(redir_data["timeline_feats"][r_sl]),
+            torch.from_numpy(redir_data["edge_feats"][r_sl]),
+            torch.from_numpy(redir_data["pad_mask"][r_sl]),
+            torch.from_numpy(redir_data["cur_dst_idx"][r_sl]),
+            torch.from_numpy(redir_data["redir_feats"][r_sl]),
+            torch.from_numpy(redir_data["redir_target"][r_sl]),
+            torch.from_numpy(redir_data["redir_mask"][r_sl]),
         )
         redir_loader = DataLoader(rds, batch_size=32, shuffle=True)
 
@@ -5136,13 +5138,15 @@ def main(argv: list[str] | None = None) -> int:
                 )
             datasets_to_pool.append(fresh_data)
 
-        g4_data = _merge_datasets(datasets_to_pool)
+        g4_data = datasets_to_pool[0] if len(datasets_to_pool) == 1 else _merge_datasets(datasets_to_pool)
+        datasets_to_pool.clear()
         if not g4_data:
             raise ValueError("gen4_ei requires either --search-games > 0 or a non-empty --load-ei-npz buffer.")
         old_r = _load_redir_npz()
         merged_r = _merge_datasets([old_r, g4_redir]) if (old_r and g4_redir) else (g4_redir or old_r)
         if g4_redir:
             _save_redir_npz(merged_r)
+        del old_r, g4_redir
         train_gen4_multisend_supervised(
             g4_data,
             merged_r,

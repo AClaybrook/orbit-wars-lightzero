@@ -1370,6 +1370,8 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         adversarial_search: bool = True,
         enable_rescue_snipe: bool = False,
         enable_opp_direct_rush: bool = False,
+        enable_def_stream: bool = False,
+        enable_opening_def_guard: bool = False,
         prior_bonus: float = 0.015,
         contempt: Optional[float] = None,
         device: str = "cpu",
@@ -1395,6 +1397,8 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         self.adversarial_search = bool(adversarial_search)
         self.enable_rescue_snipe = bool(enable_rescue_snipe)
         self.enable_opp_direct_rush = bool(enable_opp_direct_rush)
+        self.enable_def_stream = bool(enable_def_stream)
+        self.enable_opening_def_guard = bool(enable_opening_def_guard)
         self.prior_bonus = float(prior_bonus)
         # Online opponent style tracker (reset automatically whenever sim.tick decreases)
         self._last_obs_tick = 10**9
@@ -1876,6 +1880,143 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
             return []
         return [SendOrder(opp_enc.planet_ids[src_i], opp_enc.planet_ids[tgt_j], 85)]
 
+    def _build_defense_and_pressure_plan(
+        self,
+        sim: GalconSim,
+        enc: EncodedGalconState,
+        *,
+        base_redirs: Sequence[Order] = (),
+    ) -> List[Order]:
+        """Wave 16 active midgame logistics: exact multi-helper defense + rear-to-front streaming + safe frontline pressure."""
+        n = len(enc.planet_ids)
+        my_idx = [i for i in range(n) if enc.owned_mask[i]]
+        opp_idx = [j for j in range(n) if enc.planets[j].owner not in (0, enc.player)]
+        if not my_idx or not opp_idx:
+            return []
+        futures = enc.futures or [
+            project_planet_future(sim, p.id, enc.player, horizon=GALCON_TIMELINE_HORIZON) for p in enc.planets
+        ]
+        avail = np.zeros((n,), dtype=np.float64)
+        rem_ships = np.array([float(p.ships) for p in enc.planets], dtype=np.float64)
+        for i in my_idx:
+            avail[i] = max(0.0, min(float(enc.safe_surplus[i]), float(enc.planets[i].ships) * 0.85))
+
+        orders: List[Order] = []
+
+        # 1. Multi-helper exact defense for EVERY threatened owned planet (closing the 5x undefended-fall gap)
+        threatened: List[Tuple[float, int, int, float]] = []
+        for j in my_idx:
+            _, _, po, ps = futures[j]
+            lost = next((t for t in range(len(po)) if po[t] <= 0.0), -1)
+            if lost >= 0:
+                deficit = float(ps[lost]) + 2.5
+                if deficit > 0.0:
+                    threatened.append((float(enc.planets[j].production) / max(1.0, float(lost + 1)), j, lost + 1, deficit))
+        threatened.sort(key=lambda x: -x[0])
+
+        for _, tgt_j, t_fall, need in threatened:
+            dst = enc.planets[tgt_j]
+            helpers = [
+                (sim.planet_eta_ticks(enc.planets[i], dst), i)
+                for i in my_idx
+                if i != tgt_j and avail[i] >= 3.0 and enc.legal_edges[i, tgt_j] and sim.planet_eta_ticks(enc.planets[i], dst) <= t_fall
+            ]
+            helpers.sort(key=lambda x: x[0])
+            if sum(avail[i] for _, i in helpers) < need * 0.75:
+                continue
+            rem_need = need
+            for _, i in helpers:
+                if rem_need <= 0.5 or rem_ships[i] < 2.0:
+                    break
+                # Pull up to 55% of helper's safe surplus per pass (or full surplus if single helper)
+                cap = avail[i] if len(helpers) == 1 else max(3.0, avail[i] * 0.65)
+                send_s = min(cap, rem_need)
+                pct = max(5, min(100, int(math.ceil(100.0 * send_s / max(1.0, rem_ships[i])))))
+                actual = math.floor(rem_ships[i] * (pct / 100.0) + 1e-9)
+                if actual >= 1:
+                    orders.append(SendOrder(enc.planet_ids[i], enc.planet_ids[tgt_j], pct))
+                    avail[i] = max(0.0, avail[i] - actual)
+                    rem_ships[i] = max(0.0, rem_ships[i] - actual)
+                    rem_need -= actual
+
+        # Skip passive midgame logistics spam on tick 0..8 when openings dominate
+        if sim.tick <= 8 and not orders:
+            return []
+
+        # 2. Classify front vs rear planets & stream rear surplus forward + pressure closest enemy
+        dist_en: Dict[int, float] = {}
+        nearest_en: Dict[int, int] = {}
+        for i in my_idx:
+            pi = enc.planets[i]
+            best_d = 1e9
+            best_e = opp_idx[0]
+            for ej in opp_idx:
+                pe = enc.planets[ej]
+                d = math.hypot(pi.x - pe.x, pi.y - pe.y)
+                if d < best_d:
+                    best_d = d
+                    best_e = ej
+            dist_en[i] = best_d
+            nearest_en[i] = best_e
+
+        for i in my_idx:
+            if avail[i] < 6.0 or rem_ships[i] < 6.0:
+                continue
+            pi = enc.planets[i]
+            pe = enc.planets[nearest_en[i]]
+            d_direct = dist_en[i]
+            # Check if a closer friendly relay exists along a collinear tunnel (const=1.22)
+            best_relay = -1
+            best_rd = 1e9
+            for b in my_idx:
+                if b == i or not enc.legal_edges[i, b] or dist_en[b] >= d_direct * 0.90:
+                    continue
+                pb = enc.planets[b]
+                d1 = math.hypot(pi.x - pb.x, pi.y - pb.y)
+                d2 = math.hypot(pb.x - pe.x, pb.y - pe.y)
+                if d1 < d_direct and d2 < d_direct and (d1 + d2) < d_direct * 1.22 and d1 < best_rd:
+                    best_rd = d1
+                    best_relay = b
+            if best_relay >= 0:
+                send_s = min(avail[i] * 0.78, rem_ships[i] * 0.75)
+                pct = max(10, min(90, int(round(100.0 * send_s / max(1.0, rem_ships[i])))))
+                actual = math.floor(rem_ships[i] * (pct / 100.0) + 1e-9)
+                if actual >= 3:
+                    orders.append(SendOrder(enc.planet_ids[i], enc.planet_ids[best_relay], pct))
+                    avail[i] = max(0.0, avail[i] - actual)
+                    rem_ships[i] = max(0.0, rem_ships[i] - actual)
+            elif sim.tick > 10:
+                # Frontline planet: pressure nearest enemy (or weakest enemy within 1.25x distance)
+                tgt_e = nearest_en[i]
+                best_sc = -1e9
+                for ej in opp_idx:
+                    if not enc.legal_edges[i, ej]:
+                        continue
+                    eta = sim.planet_eta_ticks(pi, enc.planets[ej])
+                    if eta > 18:
+                        continue
+                    t_idx = min(GALCON_TIMELINE_HORIZON - 1, max(0, eta - 1))
+                    _, _, po, ps = futures[ej]
+                    if po[t_idx] > 0.0:
+                        continue
+                    sc = (enc.planets[ej].production * 1.5) / max(4.0, float(ps[t_idx]) + 1.2 * eta)
+                    if sc > best_sc:
+                        best_sc = sc
+                        tgt_e = ej
+                if enc.legal_edges[i, tgt_e] and sim.planet_eta_ticks(pi, enc.planets[tgt_e]) <= 18:
+                    send_s = min(avail[i] * 0.80, rem_ships[i] * 0.78)
+                    pct = max(10, min(90, int(round(100.0 * send_s / max(1.0, rem_ships[i])))))
+                    actual = math.floor(rem_ships[i] * (pct / 100.0) + 1e-9)
+                    if actual >= 4:
+                        orders.append(SendOrder(enc.planet_ids[i], enc.planet_ids[tgt_e], pct))
+                        avail[i] = max(0.0, avail[i] - actual)
+                        rem_ships[i] = max(0.0, rem_ships[i] - actual)
+
+        if not orders:
+            return []
+        orders.extend(base_redirs)
+        return orders
+
     def _predict_opponent_reply(
         self,
         sim: GalconSim,
@@ -2082,12 +2223,20 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
             raw_cands.append([])
 
         # Smart redirect-augmented vs no-redirect comparison when friendly fleets are flying
+        smart_redirs: List[RedirOrder] = []
         if sim.allow_redirect and any(fl.owner == player for fl in sim.fleets.values()):
             smart_redirs, _ = compute_smart_redirects(sim, enc, verify_rollout=False)
             if smart_redirs:
                 base_sends = [o for o in raw_cands[0] if isinstance(o, SendOrder)]
                 raw_cands.append(base_sends + list(smart_redirs))
                 raw_cands.append(base_sends)
+
+        if self.enable_def_stream:
+            def_plan = self._build_defense_and_pressure_plan(
+                sim, enc, base_redirs=(smart_redirs if smart_redirs else base_redirs)
+            )
+            if def_plan:
+                raw_cands.append(def_plan)
 
         # Deduplicate preserving order (candidates[0] is always the base pure policy)
         seen = set()
@@ -2250,6 +2399,57 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                     else (self.neural_value_weight * adv_nn_map[loc_i] + (1.0 - self.neural_value_weight) * adv_h[loc_i])
                 )
                 scores[cand_i] = 0.65 * scores[cand_i] + 0.35 * min(scores[cand_i], s_adv)
+
+        # Wave 16 opening deep-strike defensive soft-minimax guard:
+        # Exposes suicidal long-distance opening rushes (eta >= 14 > rollout_horizon) by testing top candidates
+        # against a calm defending opponent (opp=[]) out to min(28, max_eta + 2) ticks.
+        if (
+            self.enable_opening_def_guard
+            and sim.tick <= 8
+            and len(eval_cands) > 1
+            and time.perf_counter() < deadline - 0.015
+        ):
+            max_strike_eta = 0
+            for plan in eval_cands:
+                for o in plan:
+                    if isinstance(o, SendOrder) and o.percent >= 45:
+                        sp = sim.planets.get(o.src_id)
+                        dp = sim.planets.get(o.dst_id)
+                        if sp is not None and dp is not None and dp.owner not in (0, player):
+                            eta_sd = sim.planet_eta_ticks(sp, dp)
+                            if eta_sd > max_strike_eta:
+                                max_strike_eta = eta_sd
+            if max_strike_eta >= 14:
+                def_horizon = min(28, max_strike_eta + 2)
+                top_k_def = sorted(
+                    range(len(eval_cands)),
+                    key=lambda i: -(scores[i] + (self.prior_bonus if i == 0 else 0.0)),
+                )[:6]
+                def_h: List[float] = []
+                def_done: List[bool] = []
+                def_encs: List[EncodedGalconState] = []
+                def_pos: List[int] = []
+                for loc_i, cand_i in enumerate(top_k_def):
+                    r_def = sim.clone()
+                    r_def.step({player: eval_cands[cand_i], opp: []})
+                    for _ in range(1, def_horizon):
+                        if r_def.done:
+                            break
+                        r_def.step({})
+                    def_h.append(evaluate_galcon_state(r_def, player))
+                    def_done.append(r_def.done)
+                    if not r_def.done:
+                        def_pos.append(loc_i)
+                        def_encs.append(extract_galcon_features(r_def, player, feature_version=self.feature_version))
+                def_nn = self._batch_evaluate_leaves(def_encs)
+                def_nn_map = {pos: float(def_nn[idx_l]) for idx_l, pos in enumerate(def_pos)}
+                for loc_i, cand_i in enumerate(top_k_def):
+                    s_def = (
+                        def_h[loc_i]
+                        if def_done[loc_i]
+                        else (self.neural_value_weight * def_nn_map[loc_i] + (1.0 - self.neural_value_weight) * def_h[loc_i])
+                    )
+                    scores[cand_i] = 0.55 * scores[cand_i] + 0.45 * min(scores[cand_i], s_def)
 
         best_idx = 0
         best_score = -1e9
