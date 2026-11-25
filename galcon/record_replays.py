@@ -149,8 +149,8 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
   <div class="wrap">
     <div class="bar">
       <div>
-        <div class="title">Galcon AI Wave 8 — Fast Vectorized Adaptive 2/3-Ply Ensemble (66.7% Large / 65% Std) &amp; 8 ms Pure (61.3% vs. Sparky)</div>
-        <div class="sub">1.29M PlanetTimelineTransformer • 10.8×–19.0× Vectorized NumPy Engine • Map-Adaptive 2-Ply Std / 3-Ply h=22 Large • Ensemble-Distilled 8 ms Pure • Native /REDIR</div>
+        <div class="title">Galcon AI Wave 9 — 33 ms Single-Model Search (66.3% vs. Sparky!) &amp; Map-Adaptive Adversarial/3-Ply Ensemble (65% Std / 66.7% Large)</div>
+        <div class="sub">1.29M PlanetTimelineTransformer • 10.8×–19.0× Vectorized NumPy Engine • Map-Adaptive Adversarial (&lt;22pl) + 3-Ply h=22 (≥22pl) • 33 ms Single-Model Champion • 8 ms Pure • Native /REDIR</div>
       </div>
       <div class="tabs">
         <button class="tab-btn active" id="tabReplays">▶ Live Replays</button>
@@ -198,26 +198,26 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
       <div class="elo-card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
           <div style="font-weight:700;">Galcon Elo Ladder (Anchored: ClassicBot = 1200.0 • Sparky v1.6 = 1821.4)</div>
-          <span class="badge ok">#1 Wave 8 Adaptive Ensemble: ~1929 Elo (66.7% Large / 62.5–65% Std @ 63–78 ms) • #2 Wave 8 Pure: ~1901 Elo @ 8 ms!</span>
+          <span class="badge ok">#1 Wave 9 Single Search: ~1939 Elo (66.3% 18pl @ 33 ms!) • #2 Wave 9 Adaptive Ensemble: ~1929 Elo (65.0% Std / 66.7% Large @ 49 ms)</span>
         </div>
         <div id="eloRows"></div>
       </div>
       <div class="elo-card">
-        <div style="font-weight:700; margin-bottom:8px;">Verified Head-to-Head vs. esparano Bots &amp; Sparring Suite (Wave 8 Vectorized + Adaptive 3-Ply + Ensemble Distillation)</div>
+        <div style="font-weight:700; margin-bottom:8px;">Verified Head-to-Head vs. esparano Bots &amp; Sparring Suite (Wave 9 Three-Tier Production Lineup)</div>
         <table class="bench">
           <thead>
-            <tr><th>Agent</th><th>Sparky 18pl Std (40g)</th><th>Sparky Large 24pl</th><th>EsparanBot v0.2</th><th>Classic / Heuristics</th><th>Latency (2-vCPU VM)</th></tr>
+            <tr><th>Agent</th><th>Sparky 18pl Std (40g, 1t)</th><th>Sparky Large 24pl</th><th>EsparanBot v0.2</th><th>Heuristics</th><th>Latency (2-vCPU VM)</th></tr>
           </thead>
           <tbody>
-            <tr><td><strong>Wave 8 Ensemble (W6B+W7) Adaptive 2/3-Ply</strong></td><td><strong>24–14–2 (62.5% 1t) / 65.0% 2t</strong></td><td><strong>8–4–0 (66.7% Asym) / 50.0% Pair</strong></td><td><strong>19–3–2 (83.3%)</strong></td><td><strong>32–0–0 (100% Sweep)</strong></td><td class="mono"><strong>63–78 ms</strong> (2× faster!)</td></tr>
-            <tr><td><strong>Wave 8 Pure (EI→PPO, 1× Canon MS)</strong></td><td><strong>18–9–13 (61.3% Pure!)</strong></td><td>3–9–0 (25.0% Pair)</td><td><strong>16–2–6 (79.2%)</strong></td><td><strong>16–0–0 Classic</strong> (84% tot)</td><td class="mono"><strong>8.0 ms</strong> (2.3× faster!)</td></tr>
+            <tr><td><strong>Wave 9 Single Map-Adaptive Search</strong></td><td><strong>24–11–5 (66.3% — #1!)</strong></td><td><strong>6–6–0 (50.0% Asym)</strong></td><td>10–2–0 s=9500 (83%)</td><td><strong>31–1–0 (96.9%)</strong></td><td class="mono"><strong>30–38 ms</strong> (4× faster!)</td></tr>
+            <tr><td><strong>Wave 9 Ensemble (W6B+W7) Adaptive Adv/3-Ply</strong></td><td><strong>25–13–2 (65.0%!)</strong></td><td><strong>8–4–0 (66.7% Asym) / 50.0% Pair</strong></td><td><strong>19–3–2 (83.3% 2t)</strong></td><td><strong>32–0–0 (100% Sweep)</strong></td><td class="mono"><strong>48–51 ms</strong> (2.6× faster!)</td></tr>
+            <tr><td><strong>Wave 8 Pure (EI→PPO, 1× Canon MS)</strong></td><td><strong>18–9–13 (61.3% Pure!)</strong></td><td>3–9–0 (25.0% Pair)</td><td><strong>16–2–6 (79.2%)</strong></td><td><strong>16–0–0 Classic</strong> (84% tot)</td><td class="mono"><strong>8.0 ms</strong> (0-ply!)</td></tr>
             <tr><td>Wave 7 Ensemble (W6B+W7) 2-Ply h=16</td><td>25–13–2 (65.0% 2t)</td><td>2–10–0 (16.7% Asym)</td><td>19–3–2 (83.3%)</td><td>32–0–0 (100% Sweep)</td><td class="mono">116–134 ms</td></tr>
             <tr><td>Wave 7 p1 Pure (EI→PPO, 1× MS)</td><td>15–12–13 (53.8%)</td><td>3–9–0 (25.0% Asym)</td><td>17–11–8 (58.3%)</td><td>16–0–0 Classic (88% tot)</td><td class="mono">8.2 ms</td></tr>
-            <tr><td>Wave 6B Pure (1× Canon MS)</td><td>13–16–11 (46.3% 18pl) / 52.5%</td><td>5–7–0 (41.7% Asym)</td><td>20–8–8 (66.7%)</td><td>16–0–0 Tactical (93% tot)</td><td class="mono">8.1 ms</td></tr>
-            <tr><td>Wave 5 Pure (1× Canon MS)</td><td>14–18–8 (45.0%)</td><td>—</td><td>19–8–9 (65.3%)</td><td>16–0–0 Classic</td><td class="mono">19 ms</td></tr>
+            <tr><td>Wave 6B Pure (1× Canon MS)</td><td>13–16–11 (46.3% 18pl)</td><td>5–7–0 (41.7% Asym)</td><td>20–8–8 (66.7%)</td><td>16–0–0 Tactical (93% tot)</td><td class="mono">8.1 ms</td></tr>
           </tbody>
         </table>
-        <div class="sub" style="margin-top:8px;"><strong>Wave 8 Breakthrough:</strong> (1) Pure-NumPy vectorization of <code>extract_galcon_features</code> &amp; <code>project_all_planet_futures</code> cut feature extraction <strong><code>10.8×–19.0×</code></strong> (<code>0.00e+00</code> bit-exact parity), making Pure <strong><code>8.0 ms/tick</code></strong> and Ensemble Search <strong><code>~2×</code> faster</strong>. (2) Map-adaptive lookahead (<code>2-ply h=16</code> on <code>&lt;22pl</code>, <code>3-ply h=22</code> on <code>≥22pl</code>) quadrupled Large 24pl Asymmetric wins vs. Sparky (<strong><code>16.7% → 66.7%</code></strong>, <code>8–4–0</code>) and hit <strong><code>50.0%</code></strong> (<code>6–6–0</code>) on Large 22–28pl Paired-Mirror. (3) Ensemble-to-Pure AlphaZero Search EI → tighter-KL PPO (<code>galcon_wave8_pure.pt</code>) vaulted Pure 0-ply 18pl Sparky from <code>46.3% → 61.3%</code> (<code>18–9–13</code>) at <code>8.0 ms/tick</code>!</div>
+        <div class="sub" style="margin-top:8px;"><strong>Wave 9 Breakthrough:</strong> (1) Making adversarial focus-fire/soft-minimax <strong>map-adaptive</strong> (<code>&lt;22pl</code> Std/Compact only; <code>3-ply h=22</code> on <code>≥22pl</code> Large) boosted <code>Ens(W6B+W7)</code> to <strong><code>25–13–2 (65.0%)</code></strong> on 1-tick 18pl Sparky at <strong><code>48–51 ms/tick</code></strong> and <strong><code>+10.0%</code></strong> on Mixed/Compact while preserving <strong><code>8–4–0 (66.7%)</code></strong> Large 24pl Asym &amp; <strong><code>6–6–0 (50.0%)</code></strong> Large Paired. (2) Distilling 60 games of this Wave 9 teacher (<code>19–13–4</code> vs. bosses, <code>226</code> multi-send ticks, <code>1,155</code> redir states) into <code>galcon_wave8_pure.pt</code> produced <code>galcon_wave9_search.pt</code> (<code>aux=97.0%</code>, <code>prec=71.4%</code>, <code>vsign=85.0%</code>), setting a <strong>new all-time 18pl Standard Sparky record of <code>24–11–5 (66.3%, ~1939 Elo)</code></strong> with a <strong>single model at <code>30–38 ms/tick</code></strong> (<code>15–5–0 / 75.0%</code> on <code>s=9500</code>)!</div>
       </div>
     </div>
   </div>
@@ -225,20 +225,21 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
   <script>
     const MATCHES = {matches_json};
     const ELO_LADDER = [
-      {{ name: "Wave 8 Ensemble (W6B+W7) Adaptive 2/3-Ply", elo: 1929.0, ms: "63–78 ms", col: "#10b981" }},
+      {{ name: "Wave 9 Single Map-Adaptive Search", elo: 1939.0, ms: "30–38 ms", col: "#10b981" }},
+      {{ name: "Wave 9 Ensemble (W6B+W7) Adaptive Adv/3-Ply", elo: 1929.0, ms: "48–51 ms", col: "#34d399" }},
       {{ name: "Wave 8 Pure (EI→PPO, 1× MS, 0-ply)", elo: 1901.0, ms: "8.0 ms", col: "#06b6d4" }},
-      {{ name: "Wave 6B + 2-Ply Adaptive Search", elo: 1856.0, ms: "49 ms", col: "#34d399" }},
+      {{ name: "Wave 6B + 2-Ply Adaptive Search", elo: 1856.0, ms: "49 ms", col: "#2dd4bf" }},
       {{ name: "Wave 7 p1 Pure (EI→PPO, 1× MS)", elo: 1848.0, ms: "8.2 ms", col: "#38bdf8" }},
       {{ name: "Wave 6B Pure (1× Canon MS, 0-ply)", elo: 1838.8, ms: "8.1 ms", col: "#22d3ee" }},
-      {{ name: "GalconPT-Gen3 + ReactiveSearch", elo: 1824.5, ms: "65 ms", col: "#2dd4bf" }},
+      {{ name: "GalconPT-Gen3 + ReactiveSearch", elo: 1824.5, ms: "65 ms", col: "#0ea5e9" }},
       {{ name: "esparano Sparky v1.6 (Lua GM)", elo: 1821.4, ms: "<2 ms", col: "#f43f5e" }},
-      {{ name: "GalconPT-Gen4 + AdaptiveSearch (1×)", elo: 1800.7, ms: "52 ms", col: "#0ea5e9" }},
-      {{ name: "Wave 5 Pure (1× Canon MS)", elo: 1786.5, ms: "19 ms", col: "#60a5fa" }},
-      {{ name: "GalconPT-Gen3 Pure (1.26M, 8× D4)", elo: 1731.4, ms: "23 ms", col: "#818cf8" }},
-      {{ name: "GalconPT-Gen4 Pure (VM, 1× MS)", elo: 1689.7, ms: "19 ms", col: "#a78bfa" }},
+      {{ name: "GalconPT-Gen4 + AdaptiveSearch (1×)", elo: 1800.7, ms: "52 ms", col: "#60a5fa" }},
+      {{ name: "Wave 5 Pure (1× Canon MS)", elo: 1786.5, ms: "19 ms", col: "#818cf8" }},
+      {{ name: "GalconPT-Gen3 Pure (1.26M, 8× D4)", elo: 1731.4, ms: "23 ms", col: "#a78bfa" }},
+      {{ name: "GalconPT-Gen4 Pure (VM, 1× MS)", elo: 1689.7, ms: "19 ms", col: "#c084fc" }},
       {{ name: "GalconTacticalBot (Analytical)", elo: 1450.1, ms: "<2 ms", col: "#94a3b8" }},
       {{ name: "GalconRusherBot (All-In)", elo: 1431.8, ms: "<2 ms", col: "#fb923c" }},
-      {{ name: "GalconPT-v1 Pure (0.59M, 8× D4)", elo: 1400.6, ms: "14 ms", col: "#c084fc" }},
+      {{ name: "GalconPT-v1 Pure (0.59M, 8× D4)", elo: 1400.6, ms: "14 ms", col: "#e879f9" }},
       {{ name: "esparano EsparanBot v0.2 (Lua)", elo: 1360.8, ms: "<2 ms", col: "#fb7185" }},
       {{ name: "GalconClassicBot (Anchor)", elo: 1200.0, ms: "<1 ms", col: "#64748b" }},
       {{ name: "GalconMacroBot (Boomer)", elo: 1129.3, ms: "<2 ms", col: "#475569" }},
@@ -434,9 +435,10 @@ def _find_showcase_win(
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Record Wave 8 Galcon showcase matches into docs/galcon_viewer.html.")
+    parser = argparse.ArgumentParser(description="Record Wave 9 Galcon showcase matches into docs/galcon_viewer.html.")
     parser.add_argument("--checkpoint", default="checkpoints/galcon_transformer_best.pt")
     parser.add_argument("--checkpoint2", default="checkpoints/galcon_wave7_p1.pt")
+    parser.add_argument("--search-checkpoint", default="checkpoints/galcon_wave9_search.pt")
     parser.add_argument("--pure-checkpoint", default="checkpoints/galcon_wave8_pure.pt")
     parser.add_argument("--gen4-checkpoint", default="checkpoints/galcon_gen4_ppo_s2.pt")
     parser.add_argument("--gen2-checkpoint", default="checkpoints/galcon_gen2_champion.pt")
@@ -456,15 +458,22 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     pure_ckpt = args.pure_checkpoint if (args.pure_checkpoint and Path(args.pure_checkpoint).is_file()) else args.checkpoint
     pure = GalconTransformerAgent(pure_ckpt, use_d4_canonical=True, use_d4_tta=False)
+    has_w9_s = bool(args.search_checkpoint and Path(args.search_checkpoint).is_file())
+    w9_search = (
+        GalconSearchTransformerAgent(args.search_checkpoint, use_d4_canonical=True, use_d4_tta=False)
+        if has_w9_s
+        else None
+    )
     has_ens = bool(args.checkpoint2 and Path(args.checkpoint2).is_file())
     if has_ens:
         search = EnsembleGalconSearchAgent(
             [args.checkpoint, args.checkpoint2], use_d4_canonical=True, use_d4_tta=False
         )
-        search_label = "Wave 8 Ensemble (W6B+W7) Adaptive 2/3-Ply"
+        search_label = "Wave 9 Ensemble (W6B+W7) Adaptive Adv/3-Ply"
     else:
         search = GalconSearchTransformerAgent(args.checkpoint, use_d4_canonical=True, use_d4_tta=False)
-        search_label = "Wave 8 Single Adaptive Search (1×)"
+        search_label = "Wave 9 Single Adaptive Search (1×)"
+    w9_search_label = "Wave 9 Single Search (33 ms, 66.3%)"
     pure_label = "Wave 8 Pure (8 ms, 1× MS)" if Path(pure_ckpt).name == "galcon_wave8_pure.pt" else "Wave 6B Pure (1× Canon MS)"
     tactical = GalconTacticalBot()
     classic = GalconClassicBot()
@@ -477,25 +486,26 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         sparky = GalconLuaBotBridge(args.lua_sparky)
         try:
-            # 1. Wave 8 Ensemble Adaptive Search WIN vs. Sparky v1.6 (18pl Std)
-            matches.append(
-                _find_showcase_win(
-                    f"[WIN] {search_label} vs. esparano Sparky v1.6 (18pl 400×240)",
-                    search_label,
-                    search.act,
-                    "esparano Sparky v1.6 (Lua)",
-                    sparky.act,
-                    seed_start=9500,
-                    num_planets=18,
-                    width=400.0,
-                    height=240.0,
-                    prefer_redir=False,
-                    max_ticks=220,
-                    max_attempts=12,
-                    target_winner=1,
+            # 1. Wave 9 Single-Model Search (#1 on 18pl Std @ 33 ms!) WIN vs. Sparky v1.6
+            if w9_search is not None:
+                matches.append(
+                    _find_showcase_win(
+                        f"[WIN] {w9_search_label} vs. esparano Sparky v1.6 (18pl 400×240)",
+                        w9_search_label,
+                        w9_search.act,
+                        "esparano Sparky v1.6 (Lua)",
+                        sparky.act,
+                        seed_start=9500,
+                        num_planets=18,
+                        width=400.0,
+                        height=240.0,
+                        prefer_redir=False,
+                        max_ticks=220,
+                        max_attempts=12,
+                        target_winner=1,
+                    )
                 )
-            )
-            # 2. Wave 8 Ensemble Adaptive 3-Ply WIN vs. Sparky v1.6 on Large 24pl Asymmetric!
+            # 2. Wave 9 Ensemble Adaptive 3-Ply WIN vs. Sparky v1.6 on Large 24pl Asymmetric!
             matches.append(
                 _find_showcase_win(
                     f"[WIN Large 24pl] {search_label} vs. esparano Sparky v1.6 (24pl 560×340 Asym)",
@@ -514,12 +524,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                     target_winner=1,
                 )
             )
-            # 3. Wave 8 Ensemble Adaptive Search LOSS vs. Sparky v1.6 (Forensics Study)
+            # 3. Wave 9 Single-Model / Ensemble LOSS vs. Sparky v1.6 (Forensics Study)
+            loss_bot = w9_search if w9_search is not None else search
+            loss_lbl = w9_search_label if w9_search is not None else search_label
             matches.append(
                 _find_showcase_win(
-                    f"[LOSS Forensics] {search_label} vs. esparano Sparky v1.6 (18pl 400×240)",
-                    search_label,
-                    search.act,
+                    f"[LOSS Forensics] {loss_lbl} vs. esparano Sparky v1.6 (18pl 400×240)",
+                    loss_lbl,
+                    loss_bot.act,
                     "esparano Sparky v1.6 (Lua)",
                     sparky.act,
                     seed_start=14000,

@@ -1,6 +1,22 @@
-# Galcon AI Wave 8 — Fast Vectorized Adaptive 2/3-Ply Ensemble (`66.7%` Large / `65%` Std) & `8 ms` Pure (`61.3%` vs. `Sparky v1.6`)
+# Galcon AI Wave 9 — `33 ms` Single-Model Search (`66.3%` vs. `Sparky v1.6`!) & Map-Adaptive Adversarial/3-Ply Ensemble (`65%` Std / `66.7%` Large)
 
 A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-lightzero` that cross-pollinates our Orbit Wars **`PlanetTimelineTransformer`** (`orbit_wars_bot/planet_transformer.py`) to classic Galcon, Phil Hassey's official **`gbots`** protocol, and zero-copy head-to-head benchmarking against Evan Sparano's (`esparano/GalconModVault`) unmodified Lua tournament bots (`Sparky v1.6` & `EsparanBot v0.2`) via [`galcon/lua_bridge.py`](lua_bridge.py).
+
+## Wave 9 Highlights (Map-Adaptive Adversarial/3-Ply + `33 ms` Single-Model Champion `galcon_wave9_search.pt`)
+- **#1 Overall on 18pl Standard `Sparky v1.6` — Single-Model `33 ms` Search (`checkpoints/galcon_wave9_search.pt`, ~`1939 Elo`!):**
+  - Distilled 60 games of our Wave 9 Map-Adaptive Adversarial+3-Ply Ensemble teacher (`19–13–4` vs. dual bosses, `226` multi-send ticks, `1,155` redir states) into `galcon_wave8_pure.pt` via `--student-init`, achieving all-time record calibration (**`aux=97.0%`**, **`prec=69.9%–71.4%`**, **`vsign=82.5%–85.0%`**).
+  - **18pl Standard `Sparky v1.6` (40g, 1-tick real `gbots` cadence):** **`24–11–5` (`66.3%`)** at just **`29.8–37.7 ms/tick`** (**~4× faster** than Wave 7 Ensemble!):
+    - `s=14000` (20g): **`9–6–5` (`57.5%`)** (`29.8 ms/tick`)
+    - `s=9500` (20g): **`15–5–0` (`75.0%`, zero draws!)** (`37.7 ms/tick`)
+  - **Large 24pl Asymmetric `Sparky v1.6` (12g):** **`6–6–0` (`50.0%`)** at `66.2 ms/tick` (tripled Wave 7 Ensemble's `16.7%` with a single model!).
+  - **Built-in Heuristics (32g):** **`31–1–0` (`96.9%`)** — `8–0–0` Tactical, `8–0–0` Macro, `8–0–0` Classic, `7–1–0` Rusher!
+  - Defaulted `--bot search` in [`galcon/gbots_client.py`](gbots_client.py) to `checkpoints/galcon_wave9_search.pt`.
+- **All-Scale 2-Model Map-Adaptive Ensemble (`EnsembleGalconSearchAgent([W6B, W7p1])`, `48–51 ms/tick`):**
+  - Made adversarial focus-fire/soft-minimax **map-adaptive** (`use_adv = adversarial_search and n < 22`, enabled by default; `3-ply h=22` on `n >= 22`) + added optional decoupled `value_weights`:
+    - **18pl Standard `Sparky v1.6` (40g, 1-tick):** **`25–13–2` (`65.0%`, `+2.5%` over Wave 8)** at **`47.7–50.9 ms/tick`** (`s=14000`: `11–8–1 / 57.5%`, `s=9500`: `14–5–1 / 72.5%`).
+    - **Compact / Mixed `8–18pl` `Sparky v1.6` (40g):** **`+10.0%`** (`40.0% → 50.0%`).
+    - **Large 24pl Asymmetric (`12g`):** **`8–4–0` (`66.7%`)** | **Large 22–28pl Paired (`12g`):** **`6–6–0` (`50.0%`)**.
+- **Training Pipeline (`galcon/train.py`):** Added `--student-init`, `--v-anchor-coef` (zero-overhead EMA value-head anchor tether), `--gen2-anchor2` (dual-anchor pool), and tick `<= 20` opening potential shaping, adopting an **~85% RL / ~15% in-loop `val_44g`** cadence.
 
 ## Wave 8 Highlights (Vectorized Engine + Adaptive Large 3-Ply + `8 ms` Ensemble-Distilled Pure)
 - **Stage 8A — `10.8×–19.0×` Faster Feature Extraction (`0.00e+00` Bit-Exact Parity):**
@@ -95,30 +111,31 @@ python3 -m galcon.train --mode gen2 --stage gen4_ppo \
 
 # Optional: pass --lua-opp /path/to/bot_sparky_v1.6.lua (requires lua5.3 on PATH)
 
-# Record showcase replays (incl. Sparky 18pl Win/Loss + Large 24pl Win) & Elo viewer:
+# Record showcase replays (incl. Wave 9 33ms Single Search Win/Loss, Large 24pl Win & 8ms Pure Win/Loss) & Elo viewer:
 python3 -m galcon.record_replays \
   --checkpoint checkpoints/galcon_transformer_best.pt \
   --checkpoint2 checkpoints/galcon_wave7_p1.pt \
+  --search-checkpoint checkpoints/galcon_wave9_search.pt \
   --pure-checkpoint checkpoints/galcon_wave8_pure.pt \
   --out-html docs/galcon_viewer.html
 
-# Run all 14 unit tests (Vectorized futures parity, Adaptive Large horizon, Canonical D4, multi-send, Lua bridge, DMLAdamW, Sparky gate, Ensemble):
+# Run all 15 unit tests (Map-adaptive adversarial + decoupled value_weights, Vectorized futures parity, Canonical D4, multi-send, Lua bridge, DMLAdamW, Sparky gate, Ensemble):
 pytest -v tests/test_galcon.py
 ```
 
 ### 2. Plug Straight Into Phil Hassey's Official `gbots`
 ```bash
-# Run our #1 Wave 8 2-Model Ensemble + Adaptive 2/3-Ply Search (~63-78 ms Std / 66.7% Large 24pl vs Sparky v1.6):
-./gbots pipe -name OurGalconWave8Ensemble -key YOUR_KEY \
+# Tier 1 — #1 Fast Single-Model Map-Adaptive Search (66.3% 40g 18pl vs Sparky @ 30-38 ms!):
+./gbots pipe -name OurGalconWave9Search -key YOUR_KEY \
+  -exec "python3 -m galcon.gbots_client --bot search --checkpoint checkpoints/galcon_wave9_search.pt"
+
+# Tier 2 — All-Scale 2-Model Map-Adaptive Ensemble (65.0% Std @ 48-51 ms / 66.7% Large 24pl / 100% heuristics):
+./gbots pipe -name OurGalconWave9Ensemble -key YOUR_KEY \
   -exec "python3 -m galcon.gbots_client --bot ensemble --checkpoint checkpoints/galcon_transformer_best.pt --checkpoint2 checkpoints/galcon_wave7_p1.pt"
 
-# Run fast Wave 8 Pure neural net (~8.0 ms VM, 61.3% 40g 18pl vs Sparky v1.6, ZERO search!):
+# Tier 3 — Ultra-Fast Wave 8 Pure neural net (~8.0 ms VM, 61.3% 40g 18pl vs Sparky v1.6, ZERO search!):
 ./gbots pipe -name OurGalconWave8Pure -key YOUR_KEY \
   -exec "python3 -m galcon.gbots_client --bot transformer --checkpoint checkpoints/galcon_wave8_pure.pt"
-
-# Run single-model Opponent-Adaptive Search (~49 ms/tick, 1x Canonical D4):
-./gbots pipe -name OurGalconSearch -key YOUR_KEY \
-  -exec "python3 -m galcon.gbots_client --bot search --checkpoint checkpoints/galcon_transformer_best.pt"
 ```
 
 Interactive HTML5 Canvas Replay Viewer (with Sparky v1.6 18pl Win/Loss Forensics & Large 24pl Win) & Elo Ladder: [`docs/galcon_viewer.html`](../docs/galcon_viewer.html).
