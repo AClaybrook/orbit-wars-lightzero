@@ -1591,6 +1591,8 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
             else None
         )
         probs, mean_fracs, root_val, redir_probs, ms_probs, ms_fracs = self._predict_all(enc, redir_enc=redir_enc)
+        self._last_root_ms_probs = ms_probs
+        self._last_root_val = float(root_val)
         using_ms = self.use_multi_send and self.has_trained_multi_send and ms_probs is not None and ms_fracs is not None
 
         raw_cands: List[List[Order]] = []

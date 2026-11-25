@@ -863,3 +863,66 @@ def test_wave10_triple_boss_schedule_val_gate_and_lua_spec(tmp_path: Path):
         has_lua3=True,
     )
     assert _should_promote_gen4_val(improved, start, start, has_lua1=True, has_lua3=True)
+
+
+def test_wave11_soft_kd_and_batched_ppo_rollouts():
+    from galcon.heuristic_bot import GalconClassicBot, GalconTacticalBot
+    from galcon.train import _gen4_multisend_loss, _run_gen4_ppo_episodes_batched
+    from galcon.transformer_bot import (
+        GALCON_MAX_PLANETS,
+        build_galcon_gen4_transformer,
+        canonicalize_galcon_d4,
+        pad_galcon_state,
+    )
+
+    torch.manual_seed(11)
+    model = build_galcon_gen4_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
+
+    # 1. Batched lockstep PPO rollout across heterogeneous map sizes (10pl + 16pl)
+    specs = [
+        (7101, 10, 240.0, 150.0, True, 1, None, GalconClassicBot(), False),
+        (7101, 10, 240.0, 150.0, True, 2, None, GalconClassicBot(), False),
+        (7102, 16, 400.0, 240.0, True, 1, None, GalconTacticalBot(), False),
+    ]
+    outs = _run_gen4_ppo_episodes_batched(
+        model.eval(),
+        specs,
+        gamma=0.985,
+        gae_lam=0.95,
+        frac_std=0.065,
+        draw_penalty=-0.4,
+        boss_draw_penalty=0.1,
+        max_sends_per_planet=4,
+    )
+    assert len(outs) == 3
+    for ep_steps, snaps, advs, rets, term_rew, won in outs:
+        assert len(ep_steps) >= 1
+        assert len(advs) == len(ep_steps) and len(rets) == len(ep_steps)
+        assert won in (0, 1) and -1.5 <= term_rew <= 1.5
+
+    # 2. Hybrid Search-EI + Ensemble Soft-KD loss computes finite gradients with kd_alpha=0.35
+    sim = GalconSim.create(seed=7103, num_planets=12, width=320.0, height=200.0)
+    enc = extract_galcon_features(sim, 1, feature_version=2)
+    enc.planet_feats = canonicalize_galcon_d4(enc.planet_feats)
+    pad = pad_galcon_state(enc)
+    pf = torch.from_numpy(pad["planet_feats"][None])
+    tf = torch.from_numpy(pad["timeline_feats"][None])
+    ef = torch.from_numpy(pad["edge_feats"][None])
+    le = torch.from_numpy(pad["legal_edges"][None])
+    om = torch.from_numpy(pad["owned_mask"][None])
+    pm = torch.from_numpy(pad["pad_mask"][None])
+    ms_tar = torch.zeros((1, GALCON_MAX_PLANETS, GALCON_MAX_PLANETS), dtype=torch.float32)
+    ms_fr = torch.zeros_like(ms_tar)
+    t_msp = torch.full_like(ms_tar, 0.25)
+    vtar = torch.tensor([0.5], dtype=torch.float32)
+    aux_o = torch.zeros((1, GALCON_MAX_PLANETS), dtype=torch.long)
+    aux_s = torch.zeros((1, GALCON_MAX_PLANETS), dtype=torch.float32)
+
+    model.train()
+    loss, metrics = _gen4_multisend_loss(
+        model, pf, tf, ef, le, om, pm, ms_tar, ms_fr, vtar, aux_o, aux_s, t_msp=t_msp, kd_alpha=0.35
+    )
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert metrics["bce"] >= 0.0
+

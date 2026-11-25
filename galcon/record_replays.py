@@ -149,8 +149,8 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
   <div class="wrap">
     <div class="bar">
       <div>
-        <div class="title">Galcon AI Wave 10 — Triple-Boss Champions (66.3% Sparky • 68.8%–70.0% Waffle3z-GA • 66.7%–83.3% Large)</div>
-        <div class="sub">1.29M PlanetTimelineTransformer • 10.8×–19.0× Vectorized NumPy Engine • Map-Adaptive Adversarial (&lt;22pl) + 3-Ply h=22 (≥22pl) • Unmodified Sparky v1.6, Waffle3z-GA &amp; EsparanBot v0.2 via Lua Bridge</div>
+        <div class="title">Galcon AI Wave 11 — Soft-KD Champions &amp; 2× Faster Training (66.3% Sparky • 68.8% Waffle3z @ 28 ms • 58.3% Large Paired • 85.4% EsparanBot)</div>
+        <div class="sub">1.29M PlanetTimelineTransformer • 1.8×–2.0× Faster Batched-PPO + Parallel Val • Hybrid Soft-KD (vsign=88.2%, aux=97.4%) • Unmodified Sparky v1.6, Waffle3z-GA &amp; EsparanBot v0.2 via Lua Bridge</div>
       </div>
       <div class="tabs">
         <button class="tab-btn active" id="tabReplays">▶ Live Replays</button>
@@ -198,29 +198,32 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
       <div class="elo-card">
         <div style="display:flex; flex-wrap:wrap; gap:8px; justify-content:space-between; align-items:center; margin-bottom:10px;">
           <div style="font-weight:700;">Galcon Elo Ladder (Anchored: ClassicBot = 1200.0 • Sparky v1.6 = 1821.4 • Waffle3z-GA ≈ 1745)</div>
-          <span class="badge ok">#1 Ens(W9S+W6B): ~1945 Elo (66.3% Sparky / 68.8% Waffle3z / 66.7% Large @ 43–49 ms)</span>
+          <span class="badge ok">#1 Ens(W9S+W6B): ~1945 Elo • #1 28ms Soft-KD (W11_KD): 68.8% Waff / 58.3% Large Pair / 85.4% Esp</span>
         </div>
         <div id="eloRows"></div>
       </div>
       <div class="elo-card">
-        <div style="font-weight:700; margin-bottom:10px;">Triple-Boss Head-to-Head Win-Rate Comparison (40g 18pl Std 1-Tick &amp; 12g Large 24pl Asym)</div>
+        <div style="font-weight:700; margin-bottom:10px;">Triple-Boss Head-to-Head Win-Rate Comparison (40g 18pl Std 1-Tick &amp; 12g Large 22–28pl)</div>
         <div id="bossBars" style="display:grid; gap:10px; margin-bottom:14px;"></div>
         <table class="bench">
           <thead>
-            <tr><th>Agent</th><th>Sparky v1.6 18pl (40g, 1t)</th><th>Waffle3z-GA 18pl (40g, 1t)</th><th>Large 24pl (Spky / Waff)</th><th>EsparanBot / Heur</th><th>Latency (VM)</th></tr>
+            <tr><th>Agent</th><th>Sparky v1.6 18pl (40g, 1t)</th><th>Waffle3z-GA 18pl (40g, 1t)</th><th>Large 22–28pl (Asym / Pair Spky)</th><th>EsparanBot / Heur</th><th>Latency (VM)</th></tr>
           </thead>
           <tbody>
-            <tr><td><strong>Wave 10 Ensemble (W9S+W6B)</strong> <span class="badge ok">#1 All-Round</span></td><td><strong>24–11–5 (66.3%)</strong> <span class="sub">s14k:60% s9.5k:72.5%</span></td><td><strong>26–11–3 (68.8%)</strong> <span class="sub">s14k:65% s9.5k:72.5%</span></td><td><strong>66.7% / 75.0%</strong> <span class="sub">(66.7% Pair Waff)</span></td><td>64.6% / 89.1%</td><td class="mono"><strong>43–49 ms</strong></td></tr>
-            <tr><td><strong>Wave 10 Ensemble (W9S+W10S)</strong> <span class="badge">s14k King</span></td><td><strong>23–10–7 (66.3%)</strong> <span class="sub">s14k:67.5% (10L!)</span></td><td><strong>24–11–5 (66.3%)</strong> <span class="sub">s14k:65% s9.5k:67.5%</span></td><td>41.7% / —</td><td>—</td><td class="mono"><strong>41–51 ms</strong></td></tr>
-            <tr><td><strong>Wave 9 Single Search (W9S)</strong> <span class="badge ok">#1 33ms</span></td><td><strong>24–11–5 (66.3%)</strong> <span class="sub">s14k:57.5% s9.5k:75%</span></td><td><strong>23–13–4 (62.5%)</strong> <span class="sub">s14k:65% s9.5k:60%</span></td><td><strong>50.0% / 83.3%</strong></td><td>83.3% / <strong>96.9%</strong></td><td class="mono"><strong>30–38 ms</strong></td></tr>
-            <tr><td><strong>Wave 10 Single Search (W10S)</strong> <span class="badge">Waff 1-Model</span></td><td>18–12–10 (57.5%) <span class="sub"><strong>s14k:65.0%</strong></span></td><td><strong>24–11–5 (66.3%)</strong> <span class="sub"><strong>s9.5k:77.5%</strong></span></td><td>33.3% / 58.3%</td><td>—</td><td class="mono"><strong>28–30 ms</strong></td></tr>
-            <tr><td><strong>Wave 9 Ensemble (W6B+W7p1)</strong></td><td>25–13–2 (65.0%)</td><td>24–13–3 (63.8%)</td><td><strong>66.7% / 83.3%</strong> <span class="sub">(50% Pair Spky)</span></td><td><strong>83.3% / 100%</strong></td><td class="mono">48–51 ms</td></tr>
-            <tr><td><strong>Wave 10 3-Model (W9S+W10S+W6B)</strong></td><td>21–14–5 (58.8%)</td><td><strong>26–10–4 (70.0% — #1!)</strong> <span class="sub">s9.5k:77.5%</span></td><td>—</td><td>—</td><td class="mono">58–61 ms</td></tr>
-            <tr><td><strong>Wave 8 Pure (8 ms, 0-ply!)</strong> <span class="badge ok">#1 Pure</span></td><td><strong>18–9–13 (61.3% Pure!)</strong></td><td><strong>18–16–6 (52.5%)</strong></td><td>25.0% / 33.3% Pair</td><td><strong>79.2%</strong> / 100% Cls</td><td class="mono"><strong>8.0 ms</strong></td></tr>
-            <tr><td><strong>Waffle3z-GA (bots_waffle3z_optimized)</strong></td><td>9–20–11 (36.3%)</td><td>— (Self)</td><td>16.7% Asym / <strong>41.7% Pair</strong></td><td><strong>67.5% vs Esp</strong></td><td class="mono">&lt;3 ms</td></tr>
+            <tr><td><strong>Wave 10 Ensemble (W9S+W6B)</strong> <span class="badge ok">#1 All-Round</span></td><td><strong>24–11–5 (66.3%)</strong> <span class="sub">s14k:60% s9.5k:72.5%</span></td><td><strong>26–11–3 (68.8%)</strong> <span class="sub">s14k:65% s9.5k:72.5%</span></td><td><strong>66.7%</strong> / — <span class="sub">(75% Asym Waff)</span></td><td>64.6% / 89.1%</td><td class="mono"><strong>43–49 ms</strong></td></tr>
+            <tr><td><strong>Wave 9 Single Search (W9S)</strong> <span class="badge ok">#1 Spky 33ms</span></td><td><strong>24–11–5 (66.3%)</strong> <span class="sub">s14k:57.5% s9.5k:75%</span></td><td>23–13–4 (62.5%) <span class="sub">s14k:65% s9.5k:60%</span></td><td>50.0% / — <span class="sub">(83.3% Asym Waff)</span></td><td>83.3% / <strong>96.9%</strong></td><td class="mono"><strong>30–38 ms</strong></td></tr>
+            <tr><td><strong>Wave 10 Ensemble (W9S+W10S)</strong> <span class="badge">s14k King</span></td><td><strong>23–10–7 (66.3%)</strong> <span class="sub">s14k:67.5% (10L!)</span></td><td>24–11–5 (66.3%) <span class="sub">s14k:65% s9.5k:67.5%</span></td><td>41.7% / —</td><td>—</td><td class="mono"><strong>41–51 ms</strong></td></tr>
+            <tr><td><strong>Wave 9 Ensemble (W6B+W7p1)</strong></td><td>25–13–2 (65.0%)</td><td>24–13–3 (63.8%)</td><td><strong>66.7%</strong> / 50.0% <span class="sub">(83.3% Asym Waff)</span></td><td>83.3% / <strong>100%</strong></td><td class="mono">48–51 ms</td></tr>
+            <tr><td><strong>Wave 11 Soft-KD Search (W11_KD)</strong> <span class="badge ok">3× Record!</span></td><td>21–15–4 (57.5%) <span class="sub">57.5% / 57.5% bal</span></td><td><strong>26–11–3 (68.8% — #1 1-Mod!)</strong> <span class="sub">s14k:70%</span></td><td>41.7% / <strong>58.3% (#1 All-Time!)</strong></td><td><strong>85.4% (#1!)</strong> / 84.4% <span class="sub">(92.2% Pure)</span></td><td class="mono"><strong>28–33 ms</strong></td></tr>
+            <tr><td><strong>Wave 10 Single Search (W10S)</strong></td><td>18–12–10 (57.5%) <span class="sub"><strong>s14k:65.0%</strong></span></td><td>24–11–5 (66.3%) <span class="sub"><strong>s9.5k:77.5%</strong></span></td><td>33.3% / — <span class="sub">(58.3% Waff)</span></td><td>—</td><td class="mono"><strong>28–30 ms</strong></td></tr>
+            <tr><td><strong>Wave 11 PPO Search (W11_Pure)</strong></td><td><strong>21–12–7 (61.3%)</strong> <span class="sub">s9.5k:70.0%</span></td><td>17–18–5 (48.8%)</td><td>50.0% / 41.7% <span class="sub">(83.3% Asym Waff)</span></td><td>—</td><td class="mono"><strong>25–32 ms</strong></td></tr>
+            <tr><td><strong>Wave 11 Ens (W11_KD+W7p1)</strong></td><td>21–13–6 (60.0%) <span class="sub">60% / 60%</span></td><td>25–12–3 (66.2%) <span class="sub">s9.5k:67.5%</span></td><td>—</td><td>—</td><td class="mono">42–48 ms</td></tr>
+            <tr><td><strong>Wave 8 Pure (8 ms, 0-ply!)</strong> <span class="badge ok">#1 Std Pure</span></td><td><strong>18–9–13 (61.3% Pure!)</strong></td><td><strong>18–16–6 (52.5%)</strong></td><td>— / 25.0% <span class="sub">(33.3% Pair Waff)</span></td><td><strong>79.2%</strong> / 100% Cls</td><td class="mono"><strong>8.0 ms</strong></td></tr>
+            <tr><td><strong>Wave 11 Pure (10 ms, 0-ply!)</strong> <span class="badge ok">#1 Large Pure</span></td><td>13–14–13 (48.8%) <span class="sub">s14k:52.5%</span></td><td>10–21–9 (36.2%)</td><td>— / <strong>50.0% Pure (2× W8!)</strong></td><td>62.5% / 82.8%</td><td class="mono"><strong>8–10 ms</strong></td></tr>
+            <tr><td><strong>Waffle3z-GA (bots_waffle3z_optimized)</strong></td><td>9–20–11 (36.3%)</td><td>— (Self)</td><td>16.7% / 41.7%</td><td><strong>67.5% vs Esp</strong></td><td class="mono">&lt;3 ms</td></tr>
           </tbody>
         </table>
-        <div class="sub" style="margin-top:10px;"><strong>Wave 10 Highlights:</strong> (1) Integrated Evan Sparano's GA-optimized <strong>Waffle3z-GA</strong> (<code>mod_botwar_testing.lua::bots_waffle3z_optimized</code>) unmodified via a full Galcon <code>botwar</code> functional-API Lua bridge (auto <code>_sandbox_init</code> + per-tick <code>sb_stats()</code> call/time budget). Waffle3z-GA beats EsparanBot <code>67.5%</code> and pulls <code>41.7%</code> Large Paired vs. Sparky (~<code>1745 Elo</code>). (2) <strong><code>Ens(W9S+W6B)</code></strong> jumped to <strong><code>26–11–3 (68.8%)</code></strong> vs. Waffle3z-GA (+5.0% over Wave 9 Ensemble) while matching #1 18pl Std Sparky (<strong><code>66.3%</code></strong>) and #1 Large 24pl Asym Sparky (<strong><code>66.7%</code></strong>) at <code>43–49 ms/t</code>. (3) Triple-Boss distilled <strong><code>galcon_wave10_search.pt</code></strong> set new single-model records on Waffle3z-GA (<strong><code>66.3%</code></strong>, <code>77.5%</code> on <code>s=9500</code>) and Sparky <code>s=14000</code> (<strong><code>65.0%</code></strong>), and paired with <code>W9S</code> achieved the lowest Sparky loss count ever (<code>23–10–7</code>, <code>67.5%</code> on <code>s=14000</code>)!</div>
+        <div class="sub" style="margin-top:10px;"><strong>Wave 11 Highlights:</strong> (1) <strong><code>1.8×–2.0×</code> Faster Training Engine</strong> in <code>galcon/train.py</code>: batched lockstep <code>B=6</code> multi-game PPO rollouts (<code>~1.6×</code> faster), precomputed frozen <code>ema_teacher</code> + <code>batch_size=96</code> updates (<code>~1.5×</code> faster), and parallel worker-sharded <code>val_56g</code> (<code>~2×</code> on VM, <code>4×–8×</code> on desktop) — 10 full Triple-Boss PPO iters (320 eps + 3 vals) now finish in <strong><code>6.0 min</code></strong> on a 2-vCPU VM! (2) <strong>Hybrid Search-EI + Ensemble Soft-KD (<code>--kd-alpha 0.35</code>, <code>galcon_wave11_kd.pt</code>)</strong> set all-time calibration records (<strong><code>aux=97.4%</code>, <code>vsign=88.2%</code></strong>) and <strong>3 new benchmark records</strong>: <strong><code>68.8%</code> vs. Waffle3z-GA at <code>27.9 ms/t</code></strong> (tying 2-model <code>Ens(W9S+W6B)</code> with a single model!), <strong><code>58.3%</code> Large Paired vs. Sparky</strong> (all-time #1 across all single &amp; ensemble bots!), and <strong><code>85.4%</code> vs. EsparanBot v0.2</strong> (<code>91.7%</code> on <code>s=9500</code>), while boosting raw EI Pure Heuristics <code>76.6% → 92.2%</code> (+15.6%)! (3) <strong>Fast 10-Iter PPO (<code>galcon_wave11_pure.pt</code>)</strong> doubled <code>10 ms</code> Pure Large Paired vs. Sparky (<strong><code>25.0% → 50.0%</code></strong>, tying 3-ply Ensemble with zero search!).</div>
       </div>
     </div>
   </div>
@@ -232,7 +235,9 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
       {{ name: "Wave 9 Single Search (W9S) [33ms #1]", elo: 1939.0, ms: "30–38 ms", col: "#059669" }},
       {{ name: "Wave 10 Ensemble (W9S+W10S) [s14k #1]", elo: 1939.0, ms: "41–51 ms", col: "#34d399" }},
       {{ name: "Wave 9 Ensemble (W6B+W7p1) [Large/Heur]", elo: 1929.0, ms: "48–51 ms", col: "#2dd4bf" }},
-      {{ name: "Wave 10 Single Search (W10S) [Waff #1]", elo: 1905.0, ms: "28–30 ms", col: "#14b8a6" }},
+      {{ name: "Wave 11 Soft-KD Search (W11_KD) [3× Rec]", elo: 1925.0, ms: "28–33 ms", col: "#22d3ee" }},
+      {{ name: "Wave 10 Single Search (W10S)", elo: 1905.0, ms: "28–30 ms", col: "#14b8a6" }},
+      {{ name: "Wave 11 PPO Search (W11_Pure) [Spky 61%]", elo: 1900.0, ms: "25–32 ms", col: "#0891b2" }},
       {{ name: "Wave 8 Pure (EI→PPO, 1× MS, 0-ply)", elo: 1890.0, ms: "8.0 ms", col: "#06b6d4" }},
       {{ name: "Wave 6B + 2-Ply Adaptive Search", elo: 1856.0, ms: "49 ms", col: "#38bdf8" }},
       {{ name: "Wave 7 p1 Pure (EI→PPO, 1× MS)", elo: 1848.0, ms: "8.2 ms", col: "#0ea5e9" }},
@@ -252,24 +257,25 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
       const pct = Math.max(6, Math.min(100, ((row.elo - 1060) / (1970 - 1060)) * 100));
       const div = document.createElement("div");
       div.className = "elo-row";
-      div.innerHTML = `<div class="mono sub">#${{idx+1}}</div><div style="font-weight:${{idx<4?700:500}}">${{row.name}}</div><div class="elo-bar-bg"><div class="elo-bar" style="width:${{pct.toFixed(1)}}%;background:${{row.col}}"></div></div><div class="mono" style="text-align:right;font-weight:700;">${{row.elo.toFixed(1)}}</div><div class="mono sub" style="text-align:right;">${{row.ms}}</div>`;
+      div.innerHTML = `<div class="mono sub">#${{idx+1}}</div><div style="font-weight:${{idx<5?700:500}}">${{row.name}}</div><div class="elo-bar-bg"><div class="elo-bar" style="width:${{pct.toFixed(1)}}%;background:${{row.col}}"></div></div><div class="mono" style="text-align:right;font-weight:700;">${{row.elo.toFixed(1)}}</div><div class="mono sub" style="text-align:right;">${{row.ms}}</div>`;
       eloWrap.appendChild(div);
     }});
 
     const BOSS_COMPARE = [
-      {{ name: "W10 Ens (W9S+W6B)", spky: 66.3, waff: 68.8, lg: 66.7 }},
-      {{ name: "W10 Ens (W9S+W10S)", spky: 66.3, waff: 66.3, lg: 41.7 }},
-      {{ name: "W9 Single Search", spky: 66.3, waff: 62.5, lg: 50.0 }},
-      {{ name: "W10 Single Search", spky: 57.5, waff: 66.3, lg: 33.3 }},
-      {{ name: "W9 Ens (W6B+W7p1)", spky: 65.0, waff: 63.8, lg: 66.7 }},
-      {{ name: "W8 Pure (8 ms)", spky: 61.3, waff: 52.5, lg: 25.0 }},
+      {{ name: "W10 Ens (W9S+W6B)", spky: 66.3, waff: 68.8, lg: 66.7, lgLbl: "Large Asym Spky" }},
+      {{ name: "W9 Single Search", spky: 66.3, waff: 62.5, lg: 50.0, lgLbl: "Large Asym Spky" }},
+      {{ name: "W11 Soft-KD (28ms)", spky: 57.5, waff: 68.8, lg: 58.3, lgLbl: "Large Pair Spky" }},
+      {{ name: "W10 Ens (W9S+W10S)", spky: 66.3, waff: 66.3, lg: 41.7, lgLbl: "Large Asym Spky" }},
+      {{ name: "W11 PPO (32ms)", spky: 61.3, waff: 48.8, lg: 50.0, lgLbl: "Large Asym Spky" }},
+      {{ name: "W8 Pure (8 ms)", spky: 61.3, waff: 52.5, lg: 25.0, lgLbl: "Large Pair Spky" }},
+      {{ name: "W11 Pure (10 ms)", spky: 48.8, waff: 36.2, lg: 50.0, lgLbl: "Large Pair Spky" }},
     ];
     const bossWrap = document.getElementById("bossBars");
     BOSS_COMPARE.forEach(r => {{
       const el = document.createElement("div");
       el.style.cssText = "display:grid; grid-template-columns:165px 1fr 1fr 1fr; gap:10px; align-items:center; font-size:12px;";
       const mkBar = (v, col, lbl) => `<div><div style="display:flex;justify-content:space-between;margin-bottom:2px;"><span class="sub">${{lbl}}</span><span class="mono" style="font-weight:700;">${{v.toFixed(1)}}%</span></div><div class="elo-bar-bg"><div class="elo-bar" style="width:${{v}}%;background:${{col}}"></div></div></div>`;
-      el.innerHTML = `<div style="font-weight:600;">${{r.name}}</div>${{mkBar(r.spky, "#38bdf8", "Sparky 18pl")}}${{mkBar(r.waff, "#f59e0b", "Waffle3z 18pl")}}${{mkBar(r.lg, "#34d399", "Large 24pl Spky")}}`;
+      el.innerHTML = `<div style="font-weight:600;">${{r.name}}</div>${{mkBar(r.spky, "#38bdf8", "Sparky 18pl")}}${{mkBar(r.waff, "#f59e0b", "Waffle3z 18pl")}}${{mkBar(r.lg, "#34d399", r.lgLbl)}}`;
       bossWrap.appendChild(el);
     }});
 
@@ -462,11 +468,13 @@ def _lua_path_exists(spec: str) -> bool:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Record Wave 10 Galcon Triple-Boss showcase matches into docs/galcon_viewer.html.")
+    parser = argparse.ArgumentParser(description="Record Wave 11 Galcon Triple-Boss showcase matches into docs/galcon_viewer.html.")
     parser.add_argument("--checkpoint", default="checkpoints/galcon_wave9_search.pt")
     parser.add_argument("--checkpoint2", default="checkpoints/galcon_transformer_best.pt")
     parser.add_argument("--search-checkpoint", default="checkpoints/galcon_wave9_search.pt")
     parser.add_argument("--w10-checkpoint", default="checkpoints/galcon_wave10_search.pt")
+    parser.add_argument("--w11-kd-checkpoint", default="checkpoints/galcon_wave11_kd.pt")
+    parser.add_argument("--w11-pure-checkpoint", default="checkpoints/galcon_wave11_pure.pt")
     parser.add_argument("--pure-checkpoint", default="checkpoints/galcon_wave8_pure.pt")
     parser.add_argument("--gen4-checkpoint", default="checkpoints/galcon_gen4_ppo_s2.pt")
     parser.add_argument("--gen2-checkpoint", default="checkpoints/galcon_gen2_champion.pt")
@@ -499,6 +507,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         if has_w10_s
         else None
     )
+    has_w11_kd = bool(args.w11_kd_checkpoint and Path(args.w11_kd_checkpoint).is_file())
+    w11_kd = (
+        GalconSearchTransformerAgent(args.w11_kd_checkpoint, use_d4_canonical=True, use_d4_tta=False)
+        if has_w11_kd
+        else None
+    )
+    has_w11_pure = bool(args.w11_pure_checkpoint and Path(args.w11_pure_checkpoint).is_file())
+    w11_pure = (
+        GalconTransformerAgent(args.w11_pure_checkpoint, use_d4_canonical=True, use_d4_tta=False)
+        if has_w11_pure
+        else None
+    )
     has_ens = bool(args.checkpoint2 and Path(args.checkpoint2).is_file())
     if has_ens:
         search = EnsembleGalconSearchAgent(
@@ -510,6 +530,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         search_label = "Wave 10 Single Adaptive Search (1×)"
     w9_search_label = "Wave 9 Single Search (33 ms, 66.3%)"
     w10_search_label = "Wave 10 Single Search (29 ms, 66.3% Waff)"
+    w11_kd_label = "Wave 11 Soft-KD Search (28 ms, 68.8% Waff / 58.3% Large)"
+    w11_pure_label = "Wave 11 Pure (10 ms, 50.0% Large Pair!)"
     pure_label = "Wave 8 Pure (8 ms, 1× MS)" if Path(pure_ckpt).name == "galcon_wave8_pure.pt" else "Wave 6B Pure (1× Canon MS)"
     tactical = GalconTacticalBot()
     classic = GalconClassicBot()
@@ -548,7 +570,47 @@ def main(argv: Optional[List[str]] = None) -> int:
                     target_winner=1,
                 )
             )
-            # 2. Wave 10 Ensemble WIN vs. Sparky v1.6 on Large 24pl Asymmetric (66.7%)
+            # 2. Wave 11 Soft-KD WIN vs. Sparky v1.6 on Large 24pl Paired (58.3% All-Time Record!)
+            if w11_kd is not None:
+                matches.append(
+                    _find_showcase_win(
+                        f"[WIN Large 24pl #1] {w11_kd_label} vs. esparano Sparky v1.6 (58.3% Record!)",
+                        w11_kd_label,
+                        w11_kd.act,
+                        "esparano Sparky v1.6 (Lua)",
+                        sparky.act,
+                        seed_start=14700,
+                        num_planets=24,
+                        width=560.0,
+                        height=340.0,
+                        prefer_redir=False,
+                        symmetric=True,
+                        max_ticks=220,
+                        max_attempts=10,
+                        target_winner=1,
+                    )
+                )
+            # 3. Wave 11 Pure (10 ms, ZERO search!) WIN vs. Sparky v1.6 on Large 24pl (50.0% Pure Record!)
+            if w11_pure is not None:
+                matches.append(
+                    _find_showcase_win(
+                        f"[WIN 10ms Pure Large] {w11_pure_label} vs. esparano Sparky v1.6",
+                        w11_pure_label,
+                        w11_pure.act,
+                        "esparano Sparky v1.6 (Lua)",
+                        sparky.act,
+                        seed_start=14700,
+                        num_planets=24,
+                        width=560.0,
+                        height=340.0,
+                        prefer_redir=False,
+                        symmetric=True,
+                        max_ticks=220,
+                        max_attempts=10,
+                        target_winner=1,
+                    )
+                )
+            # 4. Wave 10 Ensemble WIN vs. Sparky v1.6 on Large 24pl Asymmetric (66.7%)
             matches.append(
                 _find_showcase_win(
                     f"[WIN Large 24pl] {search_label} vs. esparano Sparky v1.6 (Asym 66.7%)",
@@ -567,7 +629,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     target_winner=1,
                 )
             )
-            # 3. Single-Model Search LOSS vs. Sparky v1.6 (Forensics Study)
+            # 5. Single-Model Search LOSS vs. Sparky v1.6 (Forensics Study)
             loss_bot = w9_search if w9_search is not None else search
             loss_lbl = w9_search_label if w9_search is not None else search_label
             matches.append(
@@ -587,7 +649,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     target_winner=2,
                 )
             )
-            # 4. Wave 8 Pure (8 ms!) WIN vs. Sparky v1.6
+            # 6. Wave 8 Pure (8 ms!) WIN vs. Sparky v1.6
             matches.append(
                 _find_showcase_win(
                     f"[WIN 8ms Pure] {pure_label} vs. esparano Sparky v1.6 (61.3%)",
@@ -607,7 +669,26 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
 
         if waffle is not None:
-            # 5. Wave 10 #1 Ensemble (W9S+W6B) WIN vs. Waffle3z-GA (68.8% record!)
+            # 7. Wave 11 Soft-KD (28 ms!) WIN vs. Waffle3z-GA (68.8% Single-Model Record!)
+            if w11_kd is not None:
+                matches.append(
+                    _find_showcase_win(
+                        f"[WIN 28ms Soft-KD #1] {w11_kd_label} vs. Waffle3z-GA (68.8% Record!)",
+                        w11_kd_label,
+                        w11_kd.act,
+                        "Waffle3z-GA (bots_waffle3z_optimized)",
+                        waffle.act,
+                        seed_start=14000,
+                        num_planets=18,
+                        width=400.0,
+                        height=240.0,
+                        prefer_redir=False,
+                        max_ticks=220,
+                        max_attempts=12,
+                        target_winner=1,
+                    )
+                )
+            # 8. Wave 10 #1 Ensemble (W9S+W6B) WIN vs. Waffle3z-GA (68.8% record!)
             matches.append(
                 _find_showcase_win(
                     f"[WIN 18pl] {search_label} vs. Waffle3z-GA (68.8% Record!)",
@@ -625,7 +706,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     target_winner=1,
                 )
             )
-            # 6. Wave 10 Single Search (W10S) WIN vs. Waffle3z-GA (66.3% / 77.5% s9500!)
+            # 9. Wave 10 Single Search (W10S) WIN vs. Waffle3z-GA (66.3% / 77.5% s9500!)
             if w10_search is not None:
                 matches.append(
                     _find_showcase_win(
@@ -644,7 +725,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         target_winner=1,
                     )
                 )
-            # 7. Wave 10 Ensemble WIN vs. Waffle3z-GA on Large 24pl Asymmetric (75.0%)
+            # 10. Wave 10 Ensemble WIN vs. Waffle3z-GA on Large 24pl Asymmetric (75.0%)
             matches.append(
                 _find_showcase_win(
                     f"[WIN Large 24pl] {search_label} vs. Waffle3z-GA (Asym 75.0%)",
@@ -663,7 +744,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     target_winner=1,
                 )
             )
-            # 8. Wave 10 Ensemble LOSS Forensics vs. Waffle3z-GA
+            # 11. Wave 10 Ensemble LOSS Forensics vs. Waffle3z-GA
             matches.append(
                 _find_showcase_win(
                     f"[LOSS Forensics] {search_label} vs. Waffle3z-GA (18pl)",
@@ -681,26 +762,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     target_winner=2,
                 )
             )
-            # 9. Wave 8 Pure (8 ms) WIN vs. Waffle3z-GA
-            matches.append(
-                _find_showcase_win(
-                    f"[WIN 8ms Pure] {pure_label} vs. Waffle3z-GA (18pl)",
-                    pure_label,
-                    pure.act,
-                    "Waffle3z-GA (bots_waffle3z_optimized)",
-                    waffle.act,
-                    seed_start=9500,
-                    num_planets=18,
-                    width=400.0,
-                    height=240.0,
-                    prefer_redir=False,
-                    max_ticks=220,
-                    max_attempts=14,
-                    target_winner=1,
-                )
-            )
 
-        # 10. External Lua Boss War: Sparky v1.6 vs. Waffle3z-GA!
+        # 12. External Lua Boss War: Sparky v1.6 vs. Waffle3z-GA!
         if sparky is not None and waffle is not None:
             matches.append(
                 _find_showcase_win(
@@ -730,11 +793,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         esparan = GalconLuaBotBridge(args.lua_esparan)
         try:
+            esp_bot = w11_kd if w11_kd is not None else search
+            esp_lbl = w11_kd_label if w11_kd is not None else search_label
             matches.append(
                 _find_showcase_win(
-                    f"External Benchmark (18pl 400×240): {search_label} vs. esparano EsparanBot v0.2",
-                    search_label,
-                    search.act,
+                    f"[WIN 85.4% Record] {esp_lbl} vs. esparano EsparanBot v0.2",
+                    esp_lbl,
+                    esp_bot.act,
                     "esparano EsparanBot v0.2 (Lua)",
                     esparan.act,
                     seed_start=15300,
