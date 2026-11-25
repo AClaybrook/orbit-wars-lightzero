@@ -24,11 +24,13 @@ local reset_fn_name = arg[3] or "reset_sparky"
 
 -- Stub Galcon 2 global() helper, require("foo.lua") compatibility & UI no-ops
 function global(name) end
-package.path = "./?.lua;" .. package.path
+package.path = "./?.lua;../?.lua;../../utils/elo/?.lua;../../utils/genetics/?.lua;" .. package.path
 local _orig_require = require
 function require(mod)
     local clean = string.gsub(mod, "%.lua$", "")
-    return _orig_require(clean)
+    local ok, res = pcall(_orig_require, clean)
+    if ok then return res end
+    return {}
 end
 
 local _items = {}
@@ -96,6 +98,9 @@ function g2.new_user() return make_item({n = 0}) end
 function g2.new_planet() return make_item({n = 0}) end
 function g2.net_send() end
 
+-- Botwar registration stubs (for mods like mod_botwar_testing.lua)
+function bots_register(...) end
+
 function g2.search(query)
     local tokens = {}
     for tok in string.gmatch(query, "%S+") do
@@ -150,16 +155,83 @@ end
 -- Load external bot script
 dofile(bot_file)
 
-local loop_fn = _G[loop_fn_name]
+-- Support both standard Galcon 2 `g2` bots and `botwar` functional-API bots (e.g. bots_waffle3z_optimized)
+local _botwar_mode = false
+local _botwar_env = nil
+local _botwar_mem = {}
+local _sb_calls = 0
+local _sb_t0 = 0.0
+
+local function _make_botwar_sandbox()
+    local _pow = math.pow or function(a, b) return a ^ b end
+    local _atan2 = math.atan2 or math.atan
+    return {
+        type = type, pairs = pairs, ipairs = ipairs, next = next,
+        tostring = tostring, tonumber = tonumber,
+        print = function() end,
+        strsub = string.sub,
+        abs = math.abs, ceil = math.ceil, floor = math.floor,
+        max = math.max, min = math.min, HUGE = math.huge, random = math.random,
+        PI = math.pi, cos = math.cos, sin = math.sin, atan2 = _atan2,
+        log = math.log, pow = _pow, sqrt = math.sqrt, exp = math.exp,
+        sort = table.sort,
+        math = math, table = table, string = string,
+        sb_stats = function()
+            _sb_calls = _sb_calls + 1
+            local dt_score = (os.clock() - _sb_t0) * 4000.0
+            return (_sb_calls > dt_score) and _sb_calls or dt_score
+        end,
+    }
+end
+
+if type(_G["_sandbox_init"]) == "function" then
+    _botwar_env = _make_botwar_sandbox()
+    _G["_sandbox_init"](_botwar_env)
+end
+
+local loop_fn = nil
 local reset_fn = _G[reset_fn_name]
-if loop_fn_name == "auto" or type(loop_fn) ~= "function" then
-    for _, cand in ipairs({"bot_sparky", "bot_vacuumbot", "bot_esparanbot", "bot_act", "bot_loop"}) do
-        if type(_G[cand]) == "function" then
-            loop_fn = _G[cand]
-            break
+
+if _botwar_env ~= nil then
+    if loop_fn_name ~= "auto" and type(_botwar_env[loop_fn_name]) == "function" then
+        loop_fn = _botwar_env[loop_fn_name]
+        _botwar_mode = true
+    elseif loop_fn_name == "auto" then
+        for _, cand in ipairs({"bots_waffle3z_optimized", "bots_waffle3z", "botwar_act"}) do
+            if type(_botwar_env[cand]) == "function" then
+                loop_fn = _botwar_env[cand]
+                _botwar_mode = true
+                break
+            end
         end
     end
 end
+
+if loop_fn == nil then
+    if loop_fn_name ~= "auto" and type(_G[loop_fn_name]) == "function" then
+        loop_fn = _G[loop_fn_name]
+        if string.sub(loop_fn_name, 1, 5) == "bots_" or string.sub(loop_fn_name, 1, 7) == "botwar_" then
+            _botwar_mode = true
+        end
+    else
+        for _, cand in ipairs({"bot_sparky", "bot_vacuumbot", "bot_esparanbot", "bot_act", "bot_loop"}) do
+            if type(_G[cand]) == "function" then
+                loop_fn = _G[cand]
+                break
+            end
+        end
+        if loop_fn == nil then
+            for _, cand in ipairs({"bots_waffle3z_optimized", "bots_waffle3z", "botwar_act"}) do
+                if type(_G[cand]) == "function" then
+                    loop_fn = _G[cand]
+                    _botwar_mode = true
+                    break
+                end
+            end
+        end
+    end
+end
+
 if reset_fn_name == "auto" or type(reset_fn) ~= "function" then
     for _, cand in ipairs({"reset_sparky", "reset_vacuumbot", "reset_esparanbot", "reset_bot"}) do
         if type(_G[cand]) == "function" then
@@ -173,12 +245,59 @@ if type(loop_fn) ~= "function" then
     os.exit(2)
 end
 
+local function _build_botwar_data()
+    local res = {}
+    for i = 1, #_users do
+        local u = _users[i]
+        res[u.n] = {
+            n = u.n,
+            is_user = true,
+            team = u.user_team_n,
+            neutral = u.user_neutral,
+        }
+    end
+    for i = 1, #_planets do
+        local p = _planets[i]
+        local u = _items[p.owner_n]
+        res[p.n] = {
+            n = p.n,
+            is_planet = true,
+            x = p.position_x,
+            y = p.position_y,
+            r = p.planet_r,
+            ships = p.ships_value,
+            production = p.ships_production,
+            owner = p.owner_n,
+            team = u and u.user_team_n or p.owner_n,
+            neutral = u and u.user_neutral or false,
+        }
+    end
+    for i = 1, #_fleets do
+        local f = _fleets[i]
+        local u = _items[f.owner_n]
+        local sid = tostring(f.n)
+        res[sid] = {
+            _n = f.n,
+            n = sid,
+            is_fleet = true,
+            x = f.position_x,
+            y = f.position_y,
+            r = f.fleet_r or 6.0,
+            ships = f.fleet_ships,
+            owner = f.owner_n,
+            team = u and u.user_team_n or f.owner_n,
+            target = f.fleet_target,
+        }
+    end
+    return res
+end
+
 -- Protocol loop:
 -- Input lines:
 --   RESET
 --   U <n> <is_neutral:0|1>
 --   P <id> <owner> <ships> <x> <y> <prod> <rad>
---   F <id> <owner> <ships> <x> <y> <target>
+--   F <id> <owner> <ships> <x> <y> <target> [rad]
 --   ACT <player_id>
 -- Output lines:
 --   S <src> <dst> <pct>
@@ -193,6 +312,7 @@ while true do
         _planets = {}
         _fleets = {}
         _orders = {}
+        _botwar_mem = {}
         if type(reset_fn) == "function" then reset_fn() end
         io.write("OK\n")
         io.flush()
@@ -251,7 +371,7 @@ while true do
                 p.planet_r = tonumber(r)
             end
         elseif tag == "F" then
-            local id, own, sh, x, y, tgt = string.match(line, "^F (%d+) (%d+) ([%-%d%.eE%+]+) ([%-%d%.eE%+]+) ([%-%d%.eE%+]+) (%d+)$")
+            local id, own, sh, x, y, tgt, fr = string.match(line, "^F (%d+) (%d+) ([%-%d%.eE%+]+) ([%-%d%.eE%+]+) ([%-%d%.eE%+]+) (%d+)%s*([%-%d%.eE%+]*)$")
             id = tonumber(id)
             local fl = make_item({
                 n = id,
@@ -261,6 +381,7 @@ while true do
                 position_x = tonumber(x),
                 position_y = tonumber(y),
                 fleet_target = tonumber(tgt),
+                fleet_r = (fr and fr ~= "") and tonumber(fr) or 6.0,
             })
             _items[id] = fl
             _fleets[#_fleets + 1] = fl
@@ -268,9 +389,42 @@ while true do
             local pid = tonumber(string.match(line, "^ACT (%d+)$"))
             local u = _items[pid]
             if u then
-                local ok, err = pcall(loop_fn, u)
-                if not ok then
-                    io.stderr:write("Lua bot error: " .. tostring(err) .. "\n")
+                if _botwar_mode then
+                    if not _botwar_mem[pid] then _botwar_mem[pid] = {} end
+                    _sb_calls = 0
+                    _sb_t0 = os.clock()
+                    local data = _build_botwar_data()
+                    local ok, res = pcall(loop_fn, {
+                        items = data,
+                        user = pid,
+                        options = nil,
+                        memory = _botwar_mem[pid],
+                    })
+                    if not ok then
+                        io.stderr:write("Lua botwar error: " .. tostring(res) .. "\n")
+                    elseif type(res) == "table" and res.to ~= nil and res.from ~= nil then
+                        local pct = tonumber(res.percent) or 50
+                        pct = math.max(5, math.min(100, math.floor(pct / 5 + 0.5) * 5))
+                        local from = type(res.from) == "table" and res.from or { res.from }
+                        local dst = data[res.to]
+                        if dst and dst.is_planet then
+                            for _, fk in pairs(from) do
+                                local src = data[fk]
+                                if src then
+                                    if src.is_planet and src.owner == pid then
+                                        _orders[#_orders + 1] = string.format("S %d %d %d", src.n, dst.n, pct)
+                                    elseif src.is_fleet and src.owner == pid and src.target ~= dst.n then
+                                        _orders[#_orders + 1] = string.format("R %d %d", src._n, dst.n)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                else
+                    local ok, err = pcall(loop_fn, u)
+                    if not ok then
+                        io.stderr:write("Lua bot error: " .. tostring(err) .. "\n")
+                    end
                 end
             end
             for i = 1, #_orders do
@@ -285,7 +439,7 @@ end
 
 
 class GalconLuaBotBridge:
-    """Persistent ``lua5.3`` bridge to benchmark unmodified Galcon 2 Lua bots in ``GalconSim``."""
+    """Persistent ``lua5.3`` bridge to benchmark unmodified Galcon 2 Lua bots (``g2`` & ``botwar`` APIs) in ``GalconSim``."""
 
     def __init__(
         self,
@@ -294,7 +448,13 @@ class GalconLuaBotBridge:
         loop_fn: str = "auto",
         reset_fn: str = "auto",
     ) -> None:
-        self.lua_bot_path = Path(lua_bot_path).resolve()
+        raw_str = str(lua_bot_path)
+        if "::" in raw_str and loop_fn == "auto":
+            path_part, fn_part = raw_str.rsplit("::", 1)
+            raw_str = path_part
+            loop_fn = fn_part.strip() or "auto"
+        self.lua_bot_path = Path(raw_str).resolve()
+        self.loop_fn = loop_fn
         if not self.lua_bot_path.is_file():
             raise FileNotFoundError(f"Lua bot file not found: {self.lua_bot_path}")
         lua_bin = shutil.which("lua5.3") or shutil.which("lua")
@@ -341,7 +501,9 @@ class GalconLuaBotBridge:
                 f"P {p.id} {uid_off + p.owner} {p.ships:.4f} {p.x:.4f} {p.y:.4f} {p.production:.4f} {p.radius:.4f}"
             )
         for fl in sorted(sim.fleets.values(), key=lambda x: x.id):
-            lines.append(f"F {fl.id} {uid_off + fl.owner} {fl.ships:.4f} {fl.x:.4f} {fl.y:.4f} {fl.target}")
+            lines.append(
+                f"F {fl.id} {uid_off + fl.owner} {fl.ships:.4f} {fl.x:.4f} {fl.y:.4f} {fl.target} {fl.radius:.4f}"
+            )
         lines.append(f"ACT {uid_off + player}")
         self._proc.stdin.write("\n".join(lines) + "\n")
         self._proc.stdin.flush()
