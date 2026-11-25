@@ -30,6 +30,7 @@ import torch.nn.functional as F
 from galcon.fast_c import HAS_FAST_C, extract_features_fast_c
 from galcon.gen5_model import GalconGen5Transformer, build_galcon_gen5_transformer
 from galcon.sim import (
+    ARRIVAL_EPS,
     PRODUCTION_DIVISOR,
     GalconSim,
     Order,
@@ -263,7 +264,7 @@ def extract_galcon_features(
     dx = xs64[None, :] - xs64[:, None]
     dy = ys64[None, :] - ys64[:, None]
     dist = np.maximum(0.0, np.hypot(dx, dy) - rs64[:, None] - rs64[None, :])
-    etas = np.maximum(1.0, np.ceil(dist / step_dist)).astype(np.float32)
+    etas = np.maximum(1.0, np.ceil((dist - ARRIVAL_EPS) / step_dist)).astype(np.float32)
     np.fill_diagonal(etas, 0.0)
 
     is_mine_b = owners_raw == player
@@ -467,7 +468,7 @@ def extract_galcon_redir_features(sim: GalconSim, enc: EncodedGalconState) -> En
 
     step_dist = max(1e-6, sim.fleet_speed * sim.tick_dt)
     dist = np.maximum(0.0, np.hypot(px[None, :] - fx[:, None], py[None, :] - fy[:, None]) - pr[None, :])
-    eta_mat = np.maximum(1.0, np.ceil(dist / step_dist)).astype(np.float32)  # (F, N)
+    eta_mat = np.maximum(1.0, np.ceil((dist - ARRIVAL_EPS) / step_dist)).astype(np.float32)  # (F, N)
     t_mat = np.clip(eta_mat.astype(np.int64) - 1, 0, GALCON_TIMELINE_HORIZON - 1)  # (F, N)
     j_grid = np.broadcast_to(np.arange(n)[None, :], (f_cnt, n))
     owner_eta = po_all[j_grid, t_mat]  # (F, N)

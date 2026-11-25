@@ -1397,5 +1397,109 @@ def test_galcon_sim_radius_defaults_and_settle_clearance():
             assert dist >= overlapping[i].radius + overlapping[j].radius + MIN_PLANET_GAP - 1e-6
 
 
+def test_galcon_sim_epsilon_tie_and_arrival_tolerance():
+    """Verify epsilon-safe combat tie breaking, arrival boundary tolerance, and fast_c parity."""
+    import math
+    from galcon.sim import (
+        ARRIVAL_EPS,
+        TIE_EPS,
+        Fleet,
+        GalconSim,
+        Planet,
+        project_all_planet_futures,
+        project_planet_future,
+    )
+    from galcon.transformer_bot import extract_galcon_features, extract_galcon_redir_features
 
+    assert TIE_EPS == 1e-9
+    assert ARRIVAL_EPS == 1e-9
 
+    step_dist = 40.0 * 0.25  # 10.0 units/tick
+    p1 = Planet(id=1, owner=1, ships=50.0, x=0.0, y=50.0, production=100.0, radius=12.0)
+    # Defender with IEEE-754 drift ships=4.999999999999984 and 0 production, placed at radius + step_dist + 7e-15
+    p2 = Planet(id=2, owner=2, ships=4.999999999999984, x=12.0 + step_dist + 7e-15, y=0.0, production=0.0, radius=12.0)
+    # Pairwise planet boundary jitter: center-to-center = r1 + r3 + step_dist + 7e-15
+    p3 = Planet(id=3, owner=2, ships=50.0, x=12.0 + 12.0 + step_dist + 7e-15, y=50.0, production=100.0, radius=12.0)
+    # Neutral defender with exact same IEEE-754 drift
+    p4 = Planet(id=4, owner=0, ships=4.999999999999984, x=120.0, y=0.0, production=0.0, radius=12.0)
+
+    fl_atk = Fleet(id=1000, owner=1, ships=5.0, x=0.0, y=0.0, source=1, target=2)
+    fl_neu = Fleet(id=1001, owner=1, ships=5.0, x=100.0, y=0.0, source=1, target=4)
+
+    # Confirm the 7e-15 overshoot is actually representable in float64 (strictly > exact boundary)
+    assert math.hypot(p2.x - fl_atk.x, p2.y - fl_atk.y) > p2.radius + step_dist
+    assert math.hypot(p3.x - p1.x, p3.y - p1.y) > p1.radius + p3.radius + step_dist
+
+    sim = GalconSim([p1, p2, p3, p4], [fl_atk, fl_neu], fleet_speed=40.0, tick_dt=0.25)
+
+    # 1. Arrival boundary 7e-15 jitter gives eta == 1 in both eta_ticks and planet_eta_ticks
+    assert sim.eta_ticks(fl_atk.x, fl_atk.y, p2) == 1
+    assert sim.planet_eta_ticks(p1, p3) == 1
+
+    # 2. Projections keep defender (and neutral) ownership with 0.0 ships on near-tie at tick 1
+    planets = [sim.planets[pid] for pid in sorted(sim.planets.keys())]
+    for player, exp_p2_owner in ((1, -1.0), (2, 1.0)):
+        _, _, po2, ps2 = project_planet_future(sim, 2, player, horizon=6)
+        assert po2[0] == exp_p2_owner and ps2[0] == 0.0
+        _, _, po4, ps4 = project_planet_future(sim, 4, player, horizon=6)
+        assert po4[0] == 0.0 and ps4[0] == 0.0
+
+        my_all, en_all, po_all, ps_all = project_all_planet_futures(sim, planets, player, horizon=6)
+        assert po_all[1, 0] == exp_p2_owner and ps_all[1, 0] == 0.0
+        assert po_all[3, 0] == 0.0 and ps_all[3, 0] == 0.0
+        assert np.array_equal(po_all[1], po2) and np.array_equal(ps_all[1], ps2)
+        assert np.array_equal(po_all[3], po4) and np.array_equal(ps_all[3], ps4)
+        if player == 1:
+            assert my_all[1, 0] == 5.0 and en_all[1, 0] == 0.0
+        else:
+            assert en_all[1, 0] == 5.0 and my_all[1, 0] == 0.0
+
+    # 3. extract_galcon_features fast_c vs pure-NumPy parity on the exact near-tie + 7e-15 boundary state
+    for player in (1, 2):
+        for fv in (1, 2):
+            enc_c = extract_galcon_features(sim, player, feature_version=fv, _use_fast_c=True)
+            enc_py = extract_galcon_features(sim, player, feature_version=fv, _use_fast_c=False)
+            assert np.allclose(enc_c.planet_feats, enc_py.planet_feats, atol=1e-5)
+            assert np.allclose(enc_c.timeline_feats, enc_py.timeline_feats, atol=1e-5)
+            assert np.allclose(enc_c.edge_feats, enc_py.edge_feats, atol=1e-5)
+            assert np.allclose(enc_c.safe_surplus, enc_py.safe_surplus, atol=1e-5)
+            assert np.array_equal(enc_c.legal_edges, enc_py.legal_edges)
+            assert np.array_equal(enc_c.owned_mask, enc_py.owned_mask)
+            assert enc_c.futures is not None and enc_py.futures is not None
+            for fc, fp in zip(enc_c.futures, enc_py.futures):
+                for ac, ap in zip(fc, fp):
+                    assert np.allclose(ac, ap, atol=1e-6)
+            # Pairwise p1 -> p3 edge (indices 0 -> 2) has eta == 1 (1/35 in col 0) despite 7e-15 overshoot
+            assert np.isclose(enc_c.edge_feats[0, 2, 0], 1.0 / 35.0, atol=1e-6)
+            assert np.isclose(enc_py.edge_feats[0, 2, 0], 1.0 / 35.0, atol=1e-6)
+            # Defender keeps p2 (idx 1) with 0 ships at t=0 in both backends
+            if player == 1:
+                assert enc_c.timeline_feats[1, 0, 3] == 1.0 and enc_c.timeline_feats[1, 0, 5] == 0.0
+                assert enc_py.timeline_feats[1, 0, 3] == 1.0 and enc_py.timeline_feats[1, 0, 5] == 0.0
+            else:
+                assert enc_c.timeline_feats[1, 0, 2] == 1.0 and enc_c.timeline_feats[1, 0, 5] == 0.0
+                assert enc_py.timeline_feats[1, 0, 2] == 1.0 and enc_py.timeline_feats[1, 0, 5] == 0.0
+
+    # Redir feature extractor also computes eta == 1 for fl_atk -> p2 despite 7e-15 jitter
+    enc_p1 = extract_galcon_features(sim, 1, feature_version=2)
+    redir_p1 = extract_galcon_redir_features(sim, enc_p1)
+    idx_fl_atk = redir_p1.fleet_ids.index(1000)
+    assert np.isclose(redir_p1.redir_feats[idx_fl_atk, 1, 1], 1.0 / 35.0, atol=1e-6)
+
+    # 4. GalconSim.step() lands fl_atk on tick 1 and keeps defender/neutral ownership with 0.0 ships
+    sim.step({})
+    assert 1000 not in sim.fleets and 1001 not in sim.fleets
+    assert sim.planets[2].owner == 2 and sim.planets[2].ships == 0.0
+    assert sim.planets[4].owner == 0 and sim.planets[4].ships == 0.0
+
+    # 5. Strictly above tolerance: arrival beyond ARRIVAL_EPS takes 2 ticks, and clear advantage captures
+    p_def = Planet(id=1, owner=2, ships=5.0, x=12.0 + step_dist + 1e-6, y=0.0, production=0.0, radius=12.0)
+    p_home = Planet(id=2, owner=1, ships=50.0, x=200.0, y=0.0, production=100.0, radius=12.0)
+    fl_far = Fleet(id=2000, owner=1, ships=5.0 + 1e-6, x=0.0, y=0.0, source=2, target=1)
+    sim2 = GalconSim([p_def, p_home], [fl_far], fleet_speed=40.0, tick_dt=0.25)
+    assert sim2.eta_ticks(fl_far.x, fl_far.y, p_def) == 2
+    sim2.step({})
+    assert 2000 in sim2.fleets  # did not arrive on tick 1
+    sim2.step({})
+    assert 2000 not in sim2.fleets
+    assert sim2.planets[1].owner == 1 and np.isclose(sim2.planets[1].ships, 1e-6, atol=1e-12)

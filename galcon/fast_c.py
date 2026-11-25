@@ -93,7 +93,7 @@ void extract_galcon_features_c(
         double dx = xs[idx_p] - fl_x[f];
         double dy = ys[idx_p] - fl_y[f];
         double dist = dmax(0.0, hypot(dx, dy) - rs[idx_p]);
-        int eta = (int)ceil(dist / step_dist);
+        int eta = (int)ceil((dist - 1e-9) / step_dist);
         if (eta < 1) eta = 1;
         int t_i = eta - 1;
         if (t_i >= 0 && t_i < H) {
@@ -141,7 +141,7 @@ void extract_galcon_features_c(
                         top_v = f_nu; top_o = 0;
                         sec_v = (f_my >= f_en) ? f_my : f_en;
                     }
-                    if (top_v == sec_v) {
+                    if (fabs(top_v - sec_v) <= 1e-9) {
                         cur_ships = 0.0;
                     } else {
                         cur_owner = top_o;
@@ -173,7 +173,7 @@ void extract_galcon_features_c(
                 etas[i * n + j] = 0.0f;
             } else {
                 double d = dmax(0.0, hypot(xs[j] - xs[i], ys[j] - ys[i]) - rs[i] - rs[j]);
-                double e = ceil(d / step_dist);
+                double e = ceil((d - 1e-9) / step_dist);
                 if (e < 1.0) e = 1.0;
                 etas[i * n + j] = (float)e;
             }

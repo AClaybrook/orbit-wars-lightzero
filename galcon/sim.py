@@ -30,6 +30,8 @@ NEUTRAL_SHIPS_MIN = 0
 NEUTRAL_SHIPS_MAX = 45
 NEUTRAL_PROD_MIN = 15
 NEUTRAL_PROD_MAX = 100
+TIE_EPS = 1e-9
+ARRIVAL_EPS = 1e-9
 
 
 @dataclass
@@ -586,13 +588,13 @@ class GalconSim:
         """Exact arrival ticks from ``(x1, y1)`` to ``dst`` boundary."""
         dist = max(0.0, math.hypot(dst.x - x1, dst.y - y1) - dst.radius)
         step_dist = self.fleet_speed * self.tick_dt
-        return max(1, int(math.ceil(dist / max(1e-6, step_dist))))
+        return max(1, int(math.ceil((dist - ARRIVAL_EPS) / max(1e-6, step_dist))))
 
     def planet_eta_ticks(self, src: Planet, dst: Planet) -> int:
         """Exact arrival ticks for a fleet launched from ``src`` edge to ``dst`` edge."""
         dist = max(0.0, math.hypot(dst.x - src.x, dst.y - src.y) - src.radius - dst.radius)
         step_dist = self.fleet_speed * self.tick_dt
-        return max(1, int(math.ceil(dist / max(1e-6, step_dist))))
+        return max(1, int(math.ceil((dist - ARRIVAL_EPS) / max(1e-6, step_dist))))
 
     def step(self, orders_by_player: Dict[int, Sequence[Order]]) -> None:
         """Advance the Galcon world by one tick (orders -> production -> movement -> combat)."""
@@ -652,7 +654,7 @@ class GalconSim:
             dx = dst.x - fl.x
             dy = dst.y - fl.y
             dist = math.hypot(dx, dy)
-            if dist <= dst.radius + step_dist:
+            if dist <= dst.radius + step_dist + ARRIVAL_EPS:
                 arrivals.setdefault(dst.id, []).append(fl)
                 del self.fleets[fid]
             else:
@@ -671,8 +673,8 @@ class GalconSim:
             ranked = sorted(forces.items(), key=lambda kv: (-kv[1], kv[0] != p.owner))
             if len(ranked) == 1:
                 p.owner, p.ships = ranked[0][0], ranked[0][1]
-            elif ranked[0][1] == ranked[1][1]:
-                # Exact tie: planet keeps owner with 0 ships (neutral stays neutral)
+            elif abs(ranked[0][1] - ranked[1][1]) <= TIE_EPS:
+                # Exact tie (within float epsilon): planet keeps owner with 0 ships (neutral stays neutral)
                 p.ships = 0.0
             else:
                 p.owner = ranked[0][0]
@@ -763,7 +765,7 @@ def project_planet_future(
             f_nu = cur_ships if cur_owner == 0 else 0.0
             cands = [(f_my, 1), (f_en, -1), (f_nu, 0)]
             cands.sort(key=lambda kv: -kv[0])
-            if cands[0][0] == cands[1][0]:
+            if abs(cands[0][0] - cands[1][0]) <= TIE_EPS:
                 cur_ships = 0.0
             else:
                 cur_owner = cands[0][1]
@@ -801,7 +803,7 @@ def project_all_planet_futures(
             continue
         dst = planets[idx_p]
         dist = max(0.0, math.hypot(dst.x - fl.x, dst.y - fl.y) - dst.radius)
-        eta = max(1, int(math.ceil(dist / step_dist)))
+        eta = max(1, int(math.ceil((dist - ARRIVAL_EPS) / step_dist)))
         t_i = eta - 1
         if 0 <= t_i < horizon:
             has_inc[idx_p] = True
@@ -851,7 +853,7 @@ def project_all_planet_futures(
                 else:
                     top_v, top_o = f_nu, 0
                     sec_v = f_my if f_my >= f_en else f_en
-                if top_v == sec_v:
+                if abs(top_v - sec_v) <= TIE_EPS:
                     cur_ships = 0.0
                 else:
                     cur_owner = top_o
