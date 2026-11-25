@@ -1195,11 +1195,11 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         use_d4_canonical: Optional[bool] = True,
         rollout_horizon: int = 16,
         num_plies: int = 2,
-        time_budget_sec: float = 0.22,
+        time_budget_sec: float = 0.28,
         neural_value_weight: float = 0.70,
         reactive_mid_ply: bool = True,
         opponent_adaptive: bool = True,
-        adversarial_search: bool = False,
+        adversarial_search: bool = True,
         prior_bonus: float = 0.015,
         device: str = "cpu",
     ) -> None:
@@ -1717,7 +1717,8 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
             if fan_open:
                 raw_cands.append(fan_open)
 
-        if self.adversarial_search:
+        use_adv = self.adversarial_search and (n < 22)
+        if use_adv:
             ff_plan = self._build_focus_fire_plan(
                 sim, enc, probs, ms_probs=prior_ms, max_sources=4, base_redirs=base_redirs
             )
@@ -1767,16 +1768,16 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         if opp_enc.planet_ids and np.any(opp_enc.owned_mask):
             op, of, _, _, oms_p, oms_f = self._predict_all(opp_enc, use_d4_tta=False)
             opp_orders = self._predict_opponent_reply(sim, opp_enc, op, of, oms_p, oms_f)
-            if self.adversarial_search:
+            if use_adv:
                 opp_adv_orders = self._build_fanout_plan(
                     sim, opp_enc, op, max_targets_per_planet=4, reserve_ratio=0.10
                 )
                 if not opp_adv_orders:
                     opp_adv_orders = self._build_focus_fire_plan(sim, opp_enc, op, max_sources=3)
 
-        # Wave 8 map-adaptive lookahead: on Large (>=22pl) maps, extend rollout to 22 ticks and 3 reactive plies
-        # (enabled by 10.8x-19.0x vectorized features; jumps Large 22-28pl Paired Sparky 16.7% -> 50.0% while
-        # keeping Standard 18pl at exact 2-ply h=16 for 65.0% vs Sparky at ~60ms/tick).
+        # Wave 8/9 map-adaptive lookahead: on Large (>=22pl) maps, extend rollout to 22 ticks and 3 reactive plies
+        # (66.7% Large 24pl Asym / 50.0% Paired vs Sparky); on <22pl Std/Compact, pair 2-ply h=16 with
+        # adversarial focus-fire/soft-minimax (+10% Mixed, +2.5% 18pl Std -> 65.0% @ ~50ms/tick).
         eff_horizon = max(self.rollout_horizon, 22) if n >= 22 else self.rollout_horizon
         eff_plies = max(self.num_plies, 3) if (n >= 22 and self.reactive_mid_ply) else self.num_plies
         ply_steps = [
@@ -1866,9 +1867,9 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                 sc = self.neural_value_weight * nn_map[i] + (1.0 - self.neural_value_weight) * h_vals[i]
             scores.append(sc)
 
-        # Wave 5 adversarial soft-minimax check: stress-test top-4 candidates against aggressive enemy fan-out/focus-fire
+        # Wave 5/9 adversarial soft-minimax check (on <22pl Std/Compact): stress-test top-4 candidates against aggressive enemy fan-out/focus-fire
         if (
-            self.adversarial_search
+            use_adv
             and opp_adv_orders
             and len(eval_cands) > 1
             and time.perf_counter() < deadline - 0.015
@@ -1927,6 +1928,7 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
         checkpoint_paths: Sequence[str | Path],
         *,
         weights: Optional[Sequence[float]] = None,
+        value_weights: Optional[Sequence[float]] = None,
         **kwargs,
     ) -> None:
         paths = [Path(p) for p in checkpoint_paths]
@@ -1956,6 +1958,12 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
             w = np.array(weights, dtype=np.float32)
             w = w / float(np.sum(w))
         self.ensemble_weights = w
+        if value_weights is None:
+            vw = w.copy()
+        else:
+            vw = np.array(value_weights, dtype=np.float32)
+            vw = vw / float(np.sum(vw))
+        self.value_weights = vw
 
     @torch.no_grad()
     def _predict_all(
@@ -1971,6 +1979,9 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
         v_sum = 0.0
         for idx, ag in enumerate(self.ensemble_agents):
             w = float(self.ensemble_weights[idx])
+            vw = float(self.value_weights[idx])
+            if w <= 0.0 and vw <= 0.0:
+                continue
             if idx == 0:
                 p, f, v, r, msp, msf = super()._predict_all(
                     enc, redir_enc=redir_enc, use_d4_tta=use_d4_tta, use_d4_canonical=use_d4_canonical
@@ -1979,16 +1990,18 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
                 p, f, v, r, msp, msf = ag._predict_all(
                     enc, redir_enc=redir_enc, use_d4_tta=use_d4_tta, use_d4_canonical=use_d4_canonical
                 )
-            p_sum = w * p if p_sum is None else p_sum + w * p
-            f_sum = w * f if f_sum is None else f_sum + w * f
-            v_sum += w * float(v)
-            if r is not None:
-                r_sum = w * r if r_sum is None else r_sum + w * r
-                r_w += w
-            if msp is not None and msf is not None:
-                msp_sum = w * msp if msp_sum is None else msp_sum + w * msp
-                msf_sum = w * msf if msf_sum is None else msf_sum + w * msf
-                ms_w += w
+            if w > 0.0:
+                p_sum = w * p if p_sum is None else p_sum + w * p
+                f_sum = w * f if f_sum is None else f_sum + w * f
+                if r is not None:
+                    r_sum = w * r if r_sum is None else r_sum + w * r
+                    r_w += w
+                if msp is not None and msf is not None:
+                    msp_sum = w * msp if msp_sum is None else msp_sum + w * msp
+                    msf_sum = w * msf if msf_sum is None else msf_sum + w * msf
+                    ms_w += w
+            if vw > 0.0:
+                v_sum += vw * float(v)
         if r_sum is not None and r_w > 0.0:
             r_sum = r_sum / r_w
         if msp_sum is not None and msf_sum is not None and ms_w > 0.0:
@@ -2017,7 +2030,10 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
         ms_w = 0.0
         for idx, ag in enumerate(self.ensemble_agents):
             w = float(self.ensemble_weights[idx])
-            want_ms = isinstance(ag.model, GalconPlanetTransformer) and ag.model.enable_multi_send
+            vw = float(self.value_weights[idx])
+            if w <= 0.0 and vw <= 0.0:
+                continue
+            want_ms = (w > 0.0) and isinstance(ag.model, GalconPlanetTransformer) and ag.model.enable_multi_send
             if want_ms:
                 logits, fracs, vals, h = ag.model(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
                 ms_l, ms_f = ag.model.predict_multi_send(h, ef_t)
@@ -2029,13 +2045,15 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
                 ms_w += w
             else:
                 logits, fracs, vals = ag.model(pf_t, tf_t, ef_t, pm_t)
-            logits = logits.masked_fill(~mask, -1e9)
-            probs = F.softmax(logits, dim=-1).cpu().numpy()
-            fr_np = fracs.cpu().numpy()
-            v_np = vals.cpu().numpy()
-            p_sum = w * probs if p_sum is None else p_sum + w * probs
-            f_sum = w * fr_np if f_sum is None else f_sum + w * fr_np
-            v_sum = w * v_np if v_sum is None else v_sum + w * v_np
+            if w > 0.0:
+                logits = logits.masked_fill(~mask, -1e9)
+                probs = F.softmax(logits, dim=-1).cpu().numpy()
+                fr_np = fracs.cpu().numpy()
+                p_sum = w * probs if p_sum is None else p_sum + w * probs
+                f_sum = w * fr_np if f_sum is None else f_sum + w * fr_np
+            if vw > 0.0:
+                v_np = vals.cpu().numpy()
+                v_sum = vw * v_np if v_sum is None else v_sum + vw * v_np
         if msp_sum is not None and msf_sum is not None and ms_w > 0.0:
             msp_sum = msp_sum / ms_w
             msf_sum = msf_sum / ms_w
@@ -2054,8 +2072,11 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
         pm_t = torch.ones((k, n), dtype=torch.bool, device=self.device)
         v_tot = np.zeros((k,), dtype=np.float32)
         for idx, ag in enumerate(self.ensemble_agents):
+            vw = float(self.value_weights[idx])
+            if vw <= 0.0:
+                continue
             _, _, vals = ag.model(pf_t, tf_t, ef_t, pm_t)
-            v_tot += float(self.ensemble_weights[idx]) * vals.cpu().numpy()
+            v_tot += vw * vals.cpu().numpy()
         return v_tot
 
     @torch.no_grad()

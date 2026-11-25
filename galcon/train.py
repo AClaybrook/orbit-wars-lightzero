@@ -3148,7 +3148,9 @@ def _run_gen4_ppo_episode(
             if not sim.done:
                 sim.step({})
             new_pot = evaluate_galcon_state(sim, ours_pid)
-            step_rew = 0.05 * (new_pot - prev_pot)
+            # Wave 9 opening shaping: emphasize potential delta during ticks 0..20 to close early production gaps
+            pot_scale = 0.085 if cur_tick <= 20 else 0.05
+            step_rew = pot_scale * (new_pot - prev_pot)
             prev_pot = new_pot
             ep_steps.append((cur_tick, pad, a_pad, f_pad, total_lp, v_pred, step_rew))
         else:
@@ -3429,12 +3431,14 @@ def rl_mirror_league_ppo_gen4(
     *,
     redir_replay: Optional[Dict[str, np.ndarray]] = None,
     anchor_ckpt_path: Optional[Path] = None,
+    anchor2_ckpt_path: Optional[Path] = None,
     lua_opp_path: Optional[Path] = None,
     lua_opp2_path: Optional[Path] = None,
     iters: int = 12,
     pairs_per_iter: int = 8,
     lr: float = 4.5e-5,
     kl_coef: float = 0.030,
+    v_anchor_coef: float = 0.0,
     ema_tau: float = 0.07,
     gamma: float = 0.985,
     gae_lam: float = 0.95,
@@ -3477,7 +3481,6 @@ def rl_mirror_league_ppo_gen4(
 
     cpu_policy = _load_gen4_policy_from_ckpt(ckpt_path)
     policy = copy.deepcopy(cpu_policy).to(train_dev)
-
     ema_teacher = copy.deepcopy(cpu_policy).to(train_dev).eval()
     for p in ema_teacher.parameters():
         p.requires_grad_(False)
@@ -3488,6 +3491,11 @@ def rl_mirror_league_ppo_gen4(
         for p in a_m.parameters():
             p.requires_grad_(False)
         snapshot_pool.append(a_m)
+    if anchor2_ckpt_path is not None and anchor2_ckpt_path.is_file():
+        a_m2 = _load_gen4_policy_from_ckpt(anchor2_ckpt_path, allow_non_ms=True).eval()
+        for p in a_m2.parameters():
+            p.requires_grad_(False)
+        snapshot_pool.append(a_m2)
     snapshot_pool.append(copy.deepcopy(cpu_policy).eval())
     for p in snapshot_pool[-1].parameters():
         p.requires_grad_(False)
@@ -3796,7 +3804,7 @@ def rl_mirror_league_ppo_gen4(
                     ent_mean = (ent * edge_f).sum() / edge_sum
 
                     with torch.no_grad():
-                        _, _, _, e_h = ema_teacher(pf, tf, ef, pm, return_hidden=True)
+                        _, _, e_val, e_h = ema_teacher(pf, tf, ef, pm, return_hidden=True)
                         e_ms_l, _ = ema_teacher.predict_multi_send(e_h, ef)
                         e_p = torch.sigmoid(e_ms_l.masked_fill(~edge_m, -1e9)).clamp(1e-5, 1.0 - 1e-5)
                     cur_p = torch.sigmoid(ms_l).clamp(1e-5, 1.0 - 1e-5)
@@ -3804,6 +3812,7 @@ def rl_mirror_league_ppo_gen4(
                     kl_mean = (kl * edge_f).sum() / edge_sum
 
                     v_loss = F.mse_loss(val, ret)
+                    v_anc = F.mse_loss(val, e_val) if v_anchor_coef > 0.0 else 0.0
                     pm_f = pm.float()
                     pm_sum = pm_f.sum().clamp_min(1.0)
                     aux_ce = F.cross_entropy(
@@ -3814,7 +3823,7 @@ def rl_mirror_league_ppo_gen4(
                     aux_own_loss = (aux_ce * pm_f).sum() / pm_sum
                     aux_shp_loss = (F.smooth_l1_loss(aux_pred[..., 3], aux_s, reduction="none") * pm_f).sum() / pm_sum
                     aux_loss = aux_own_loss + 0.5 * aux_shp_loss
-                    loss = -surr + 0.40 * v_loss + kl_coef * kl_mean - ent_coef * ent_mean + 0.14 * aux_loss
+                    loss = -surr + 0.40 * v_loss + v_anchor_coef * v_anc + kl_coef * kl_mean - ent_coef * ent_mean + 0.14 * aux_loss
 
                     if r_iter is not None and (b_idx % 4 == 0):
                         try:
@@ -3975,7 +3984,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stage", choices=["all", "ei", "ppo", "mirror_ppo", "gen4_ei", "gen4_ppo", "eval"], default="all")
     parser.add_argument("--resume", default="")
     parser.add_argument("--resume2", default="")
+    parser.add_argument("--student-init", default="")
     parser.add_argument("--gen2-anchor", default="checkpoints/galcon_gen2_champion.pt")
+    parser.add_argument("--gen2-anchor2", default="")
     parser.add_argument("--lua-opp", default="")
     parser.add_argument("--lua-opp2", default="")
     parser.add_argument("--boss-draw-penalty", type=float, default=0.10)
@@ -3983,6 +3994,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--esparan-share", type=float, default=0.17)
     parser.add_argument("--large-map-prob", type=float, default=0.30)
     parser.add_argument("--kl-coef", type=float, default=0.030)
+    parser.add_argument("--v-anchor-coef", type=float, default=0.0)
     parser.add_argument("--eval-every", type=int, default=4)
     parser.add_argument("--redir-npz", default="checkpoints/galcon_gen2_redir.npz")
     parser.add_argument("--bc-games", type=int, default=80)
@@ -4098,6 +4110,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.stage == "gen4_ei":
         resume_p = Path(args.resume) if args.resume else Path("checkpoints/galcon_transformer_best.pt")
         resume_p2 = Path(args.resume2) if args.resume2 else None
+        student_p = Path(args.student_init) if args.student_init else resume_p
         lua_p = Path(args.lua_opp) if args.lua_opp else None
         lua_p2 = Path(args.lua_opp2) if args.lua_opp2 else None
         g4_data, g4_redir = collect_gen4_multisend_ei_dataset(
@@ -4116,7 +4129,7 @@ def main(argv: list[str] | None = None) -> int:
         train_gen4_multisend_supervised(
             g4_data,
             merged_r,
-            resume_from=resume_p,
+            resume_from=student_p,
             out_path=out_path,
             epochs=args.epochs,
             lr=args.lr if args.lr > 0 else 3.5e-4,
@@ -4134,12 +4147,14 @@ def main(argv: list[str] | None = None) -> int:
             out_path,
             redir_replay=redir_replay,
             anchor_ckpt_path=Path(args.gen2_anchor) if args.gen2_anchor else None,
+            anchor2_ckpt_path=Path(args.gen2_anchor2) if args.gen2_anchor2 else None,
             lua_opp_path=Path(args.lua_opp) if args.lua_opp else None,
             lua_opp2_path=Path(args.lua_opp2) if args.lua_opp2 else None,
             iters=args.ppo_iters,
             pairs_per_iter=args.mirror_pairs,
             lr=args.lr if args.lr > 0 else 4.5e-5,
             kl_coef=args.kl_coef,
+            v_anchor_coef=args.v_anchor_coef,
             boss_draw_penalty=args.boss_draw_penalty,
             sparky_share=args.sparky_share,
             esparan_share=args.esparan_share,

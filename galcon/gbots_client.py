@@ -235,6 +235,8 @@ def _build_bot(
             ckpt = checkpoint
         elif bot_kind == "transformer" and Path("checkpoints/galcon_wave8_pure.pt").is_file():
             ckpt = "checkpoints/galcon_wave8_pure.pt"
+        elif bot_kind == "search" and Path("checkpoints/galcon_wave9_search.pt").is_file():
+            ckpt = "checkpoints/galcon_wave9_search.pt"
         else:
             ckpt = "checkpoints/galcon_transformer_best.pt"
         if not Path(ckpt).is_file():

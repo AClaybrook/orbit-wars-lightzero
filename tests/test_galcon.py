@@ -674,4 +674,53 @@ def test_wave8_vectorized_futures_and_adaptive_large_horizon(tmp_path: Path):
     assert -1.0 <= best_sc <= 1.0
 
 
+def test_wave9_map_adaptive_adversarial_and_decoupled_ensemble_value_weights(tmp_path: Path):
+    from galcon.transformer_bot import EnsembleGalconSearchAgent, build_galcon_gen4_transformer
+
+    ckpts = []
+    for idx, sd in enumerate((101, 202)):
+        torch.manual_seed(sd)
+        m = build_galcon_gen4_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
+        p = tmp_path / f"w9_m{idx}.pt"
+        torch.save(
+            {
+                "model_config": m.config,
+                "model_state_dict": m.state_dict(),
+                "has_trained_redir": True,
+                "has_trained_multi_send": True,
+                "use_canonical_d4": True,
+            },
+            p,
+        )
+        ckpts.append(p)
+
+    sim = GalconSim.create(seed=14000, num_planets=18, width=400.0, height=240.0, symmetric=True)
+    enc = extract_galcon_features(sim, player=1, feature_version=2)
+
+    # 1. Map-adaptive adversarial_search is enabled by default for <22pl and runs cleanly on both Std & Large
+    ag0 = GalconSearchTransformerAgent(ckpts[0], use_d4_canonical=True, use_d4_tta=False)
+    assert ag0.adversarial_search is True
+    plan_std, cands_std, scores_std, sc_std = ag0.act_with_search_info(sim, 1)
+    assert isinstance(plan_std, list) and len(cands_std) == len(scores_std) >= 1 and -1.0 <= sc_std <= 1.0
+
+    # 2. Decoupled policy weights [1, 0] and value weights [0, 1] route policy to m0 and value to m1
+    ag1 = GalconSearchTransformerAgent(ckpts[1], use_d4_canonical=True, use_d4_tta=False)
+    p0, _, v0, _, ms0, _ = ag0._predict_all(enc)
+    _, _, v1, _, _, _ = ag1._predict_all(enc)
+    ens = EnsembleGalconSearchAgent(
+        ckpts,
+        weights=[1.0, 0.0],
+        value_weights=[0.0, 1.0],
+        use_d4_canonical=True,
+        use_d4_tta=False,
+    )
+    pe, _, ve, _, mse, _ = ens._predict_all(enc)
+    assert np.allclose(pe, p0, atol=1e-5)
+    assert mse is not None and ms0 is not None and np.allclose(mse, ms0, atol=1e-5)
+    assert abs(ve - v1) < 1e-5
+    leaf_v = ens._batch_evaluate_leaves([enc])
+    assert abs(float(leaf_v[0]) - v1) < 1e-5
+
+
+
 

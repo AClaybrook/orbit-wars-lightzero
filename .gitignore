@@ -26,6 +26,7 @@ checkpoints/*
 !checkpoints/galcon_transformer_best.pt
 !checkpoints/galcon_wave7_p1.pt
 !checkpoints/galcon_wave8_pure.pt
+!checkpoints/galcon_wave9_search.pt
 !checkpoints/galcon_gen3_champion.pt
 !checkpoints/galcon_gen4_ppo_s2.pt
 !checkpoints/planet_transformer_best.pt
@@ -39,6 +40,7 @@ ckpts/
 !checkpoints/galcon_transformer_best.pt
 !checkpoints/galcon_wave7_p1.pt
 !checkpoints/galcon_wave8_pure.pt
+!checkpoints/galcon_wave9_search.pt
 !checkpoints/galcon_gen3_champion.pt
 !checkpoints/galcon_gen4_ppo_s2.pt
 !checkpoints/planet_transformer_best.pt
