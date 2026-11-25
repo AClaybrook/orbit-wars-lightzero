@@ -17,6 +17,7 @@ from galcon.sim import (
     Planet,
     RedirOrder,
     SendOrder,
+    project_all_planet_futures,
     project_planet_future,
 )
 
@@ -78,8 +79,11 @@ class GalconTacticalBot:
             return orders
 
         horizon = 28
+        my_arrs, en_arrs, po_all, ps_all = project_all_planet_futures(
+            sim, planets, player, horizon=horizon
+        )
         futures: Dict[int, Tuple] = {
-            p.id: project_planet_future(sim, p.id, player, horizon=horizon) for p in planets
+            p.id: (my_arrs[i], en_arrs[i], po_all[i], ps_all[i]) for i, p in enumerate(planets)
         }
 
         # 1. Exact safe surplus per owned planet (protect against incoming waves AND enemy home-rush!)
@@ -409,8 +413,11 @@ class GalconRusherBot:
             return orders
 
         horizon = 24
+        my_arrs, en_arrs, po_all, ps_all = project_all_planet_futures(
+            sim, planets, player, horizon=horizon
+        )
         futures: Dict[int, Tuple] = {
-            p.id: project_planet_future(sim, p.id, player, horizon=horizon) for p in planets
+            p.id: (my_arrs[i], en_arrs[i], po_all[i], ps_all[i]) for i, p in enumerate(planets)
         }
 
         # 1. Aggressive mid-flight redirect: pivot wasted/doomed fleets onto vulnerable enemy planets
@@ -587,7 +594,12 @@ class GalconMacroBot:
             return orders
 
         horizon = 24
-        futures = {p.id: project_planet_future(sim, p.id, player, horizon=horizon) for p in planets}
+        my_arrs, en_arrs, po_all, ps_all = project_all_planet_futures(
+            sim, planets, player, horizon=horizon
+        )
+        futures = {
+            p.id: (my_arrs[i], en_arrs[i], po_all[i], ps_all[i]) for i, p in enumerate(planets)
+        }
         opp = 2 if player == 1 else 1
         my_prod = sim.total_production(player)
         en_prod = sim.total_production(opp)

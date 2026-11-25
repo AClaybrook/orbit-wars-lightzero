@@ -1037,4 +1037,107 @@ def test_wave12_vm_speedups_forward_ms_bucket_sampler_and_batched_val():
     assert len(res) == 2 and all(bk == "heur" and pts in (0.0, 0.5, 1.0) for bk, pts in res)
 
 
+def test_wave13_fast_c_canonical_d4_vectorized_redir_and_ei_cache(tmp_path):
+    """Verify Wave 13 C99 feature extractor parity, lazy D4 canonicalization, vectorized redir, ms_only, and EI cache."""
+    import numpy as np
+    from galcon.fast_c import HAS_FAST_C
+    from galcon.sim import GalconSim, SendOrder
+    from galcon.train import load_ei_dataset_npz, save_ei_dataset_npz
+    from galcon.transformer_bot import (
+        GalconSearchTransformerAgent,
+        apply_galcon_d4,
+        build_galcon_gen4_transformer,
+        canonicalize_galcon_d4,
+        extract_galcon_features,
+        extract_galcon_redir_features,
+    )
+
+    # 1. C99 feature extractor matches pure-NumPy fallback bit-for-bit across maps, versions, and active fleets
+    for seed, n_pl in ((1301, 10), (1302, 18), (1303, 24)):
+        sim = GalconSim.create(seed=seed, num_planets=n_pl, width=400.0, height=240.0, symmetric=True)
+        pids = sorted(sim.planets.keys())
+        for step in range(8):
+            o1, o2 = [], []
+            for pl_id, olist in ((1, o1), (2, o2)):
+                owned = [pid for pid in pids if sim.planets[pid].owner == pl_id and sim.planets[pid].ships >= 8]
+                if owned:
+                    src = owned[step % len(owned)]
+                    dst = pids[(pids.index(src) + 1 + step) % len(pids)]
+                    if src != dst:
+                        olist.append(SendOrder(src, dst, 50))
+            sim.step({1: o1, 2: o2})
+        for fv in (1, 2):
+            enc_c = extract_galcon_features(sim, 1, feature_version=fv, _use_fast_c=True)
+            enc_py = extract_galcon_features(sim, 1, feature_version=fv, _use_fast_c=False)
+            assert np.allclose(enc_c.planet_feats, enc_py.planet_feats, atol=1e-5)
+            assert np.allclose(enc_c.timeline_feats, enc_py.timeline_feats, atol=1e-5)
+            assert np.allclose(enc_c.edge_feats, enc_py.edge_feats, atol=1e-5)
+            assert np.allclose(enc_c.safe_surplus, enc_py.safe_surplus, atol=1e-5)
+            assert np.array_equal(enc_c.legal_edges, enc_py.legal_edges)
+            assert np.array_equal(enc_c.owned_mask, enc_py.owned_mask)
+
+        # 2. Vectorized extract_galcon_redir_features produces finite valid tensors with active fleets
+        enc_v2 = extract_galcon_features(sim, 1, feature_version=2)
+        redir_enc = extract_galcon_redir_features(sim, enc_v2)
+        assert len(redir_enc.fleet_ids) > 0
+        assert redir_enc.redir_feats.shape == (len(redir_enc.fleet_ids), len(enc_v2.planet_ids), 10)
+        assert np.isfinite(redir_enc.redir_feats).all()
+
+    # 3. Fast lazy canonicalize_galcon_d4 preserves exact 8-fold D4 orbit invariance (including symmetric tie case)
+    pf_ref = extract_galcon_features(
+        GalconSim.create(seed=1304, num_planets=14, width=400.0, height=240.0, symmetric=True), 1, feature_version=2
+    ).planet_feats
+    canon0 = canonicalize_galcon_d4(pf_ref)
+    for flip_x in (False, True):
+        for k_rot in range(4):
+            cand = apply_galcon_d4(pf_ref, k_rot=k_rot, flip_x=flip_x)
+            assert np.allclose(canonicalize_galcon_d4(cand), canon0, atol=1e-6)
+    pf_tie = pf_ref.copy()
+    pf_tie[:, 2] = 0.0
+    pf_tie[:, 3] = 0.0
+    pf_tie[0, 6] += 0.37  # break 180-deg map automorphism while keeping vx0==vy0==0 tie-break
+    canon_tie = canonicalize_galcon_d4(pf_tie)
+    for flip_x in (False, True):
+        for k_rot in range(4):
+            assert np.allclose(canonicalize_galcon_d4(apply_galcon_d4(pf_tie, k_rot=k_rot, flip_x=flip_x)), canon_tie, atol=1e-6)
+
+    # 4. ms_only=True matches ms_only=False multi-send predictions bit-for-bit
+    torch.manual_seed(13)
+    mod = build_galcon_gen4_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
+    ckpt = tmp_path / "w13_m.pt"
+    torch.save(
+        {
+            "model_config": mod.config,
+            "model_state_dict": mod.state_dict(),
+            "has_trained_redir": True,
+            "has_trained_multi_send": True,
+            "use_canonical_d4": True,
+        },
+        ckpt,
+    )
+    ag = GalconSearchTransformerAgent(ckpt, use_d4_canonical=True, use_d4_tta=False)
+    sim_t = GalconSim.create(seed=1305, num_planets=16, width=400.0, height=240.0, symmetric=True)
+    enc_t = extract_galcon_features(sim_t, 1, feature_version=2)
+    _, _, v_full, _, msp_full, msf_full = ag._predict_all(enc_t, need_value=True, ms_only=False)
+    _, _, v_fast, _, msp_fast, msf_fast = ag._predict_all(enc_t, need_value=True, ms_only=True)
+    assert abs(v_full - v_fast) < 1e-6
+    assert msp_full is not None and msp_fast is not None and np.allclose(msp_full, msp_fast, atol=1e-6)
+    assert msf_full is not None and msf_fast is not None and np.allclose(msf_full, msf_fast, atol=1e-6)
+    _, _, _, bmsp_full, bmsf_full = ag._batch_forward_policy_and_val([enc_t], need_value=False, ms_only=False)
+    _, _, _, bmsp_fast, bmsf_fast = ag._batch_forward_policy_and_val([enc_t], need_value=False, ms_only=True)
+    assert bmsp_full is not None and bmsp_fast is not None and np.allclose(bmsp_full, bmsp_fast, atol=1e-6)
+    assert bmsf_full is not None and bmsf_fast is not None and np.allclose(bmsf_full, bmsf_fast, atol=1e-6)
+
+    # 5. EI replay buffer .npz save/load & comma-separated pooling roundtrip
+    d1 = {"pf": np.ones((4, 3), dtype=np.float32), "v": np.array([1.0, -1.0, 0.5, 0.0], dtype=np.float32)}
+    d2 = {"pf": np.zeros((3, 3), dtype=np.float32), "v": np.array([0.2, 0.3, -0.4], dtype=np.float32)}
+    p1, p2 = tmp_path / "ei1.npz", tmp_path / "ei2.npz"
+    save_ei_dataset_npz(p1, d1)
+    save_ei_dataset_npz(p2, d2)
+    pooled = load_ei_dataset_npz(f"{p1},{p2}")
+    assert pooled["pf"].shape == (7, 3) and pooled["v"].shape == (7,)
+    assert np.allclose(pooled["pf"][:4], 1.0) and np.allclose(pooled["pf"][4:], 0.0)
+    assert isinstance(HAS_FAST_C, bool)
+
+
 

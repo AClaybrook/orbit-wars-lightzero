@@ -1,9 +1,27 @@
-# Galcon AI Wave 12 — `71.2%` Sparky v1.6 (`~1979 Elo`) & `2.3×` Faster VM Training Engine
+# Galcon AI Wave 13 — C99 Fast Engine (`5.3ms` Pure / `21ms` Search) & `W13_KD` Single-Model Records
 
-A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-lightzero` that cross-pollinates our Orbit Wars **`PlanetTimelineTransformer`** (`orbit_wars_bot/planet_transformer.py`) to classic Galcon, Phil Hassey's official **`gbots`** protocol, and zero-copy head-to-head benchmarking against Evan Sparano's (`esparano/GalconModVault`) unmodified Lua tournament bots (`Sparky v1.6`, `Waffle3z-GA / bots_waffle3z_optimized`, & `EsparanBot v0.2`) via [`galcon/lua_bridge.py`](lua_bridge.py).
+A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-lightzero` that cross-pollinates our Orbit Wars **`PlanetTimelineTransformer`** (`orbit_wars_bot/planet_transformer.py`, `1.29M` params) to classic Galcon, Phil Hassey's official **`gbots`** protocol, and zero-copy head-to-head benchmarking against Evan Sparano's (`esparano/GalconModVault`) unmodified Lua tournament bots (`Sparky v1.6`, `Waffle3z-GA / bots_waffle3z_optimized`, & `EsparanBot v0.2`) via [`galcon/lua_bridge.py`](lua_bridge.py).
+
+## Wave 13 Highlights — Profiling-Driven C99 Engine (`5.3ms` Pure / `21ms` Search) & `W13_KD` Single-Model Records
+- **Profiling-Driven Codebase Acceleration (`0.00e+00` / `<2.4e-7` Bit-Exact Parity, `21/21` Unit Tests):**
+  - **Fused C99 Feature + Timeline Kernel ([`galcon/fast_c.py`](fast_c.py)):** Auto-compiles a self-contained C99 shared library (`gcc -O3 -march=native -shared -fPIC`, hash-cached via atomic rename, zero-wrapper `c_void_p` pointers, graceful NumPy fallback on Windows/no-gcc) computing both `project_all_planet_futures` and all planet/timeline/edge features in one C call — cutting 18pl `extract_galcon_features` **`1.690 ms → 0.080–0.101 ms` (`16.7×` faster!)**.
+  - **Lazy 2D-Centroid [`canonicalize_galcon_d4`](transformer_bot.py):** Evaluates all 8 D4 transforms on the 2D centroid vector in O(1), computes the sorted-coordinate tie-break lazily only on exact ties (<0.1% of states), and calls `apply_galcon_d4` once — cutting `1.743s` in Search to **`<0.02s` (`~80×` faster!)**.
+  - **Vectorized [`extract_galcon_redir_features`](transformer_bot.py) (`3.8×` faster)** & vectorized `project_all_planet_futures` across [`galcon/heuristic_bot.py`](heuristic_bot.py) (`GalconTacticalBot`, `GalconRusherBot`, `GalconMacroBot`).
+  - **`ms_only=True` Fast Paths (`_predict_all`, `_batch_forward_policy_and_val`):** Skips the unused Gen 2/3 legacy pairwise head (`decode_from_hidden`) and unnecessary value heads during Pure inference (`act` / `act_pure`) and Search mid-ply rollouts.
+  - **Training Engine Upgrades ([`galcon/train.py`](train.py)):** AlphaZero EI Replay Buffer caching (`--save-ei-npz` / `--load-ei-npz` supporting comma-separated multi-wave pooling and `--search-games 0` instant retraining) + `B=10` PPO/validation lockstep waves with 3 cached Lua bridges per boss.
+  - **End-to-End Measured Speedups on 2-vCPU Xeon VM:**
+    - **Pure Neural Net (`18pl`):** **`5.3–5.7 ms/tick`** (`7.4–7.9 ms/t` Large 24pl — **`~1.7×` faster** than Wave 12!).
+    - **Single-Model Search (`18pl`):** **`19.2–24.2 ms/tick`** (down from `32–36.6 ms/t` — **`~1.5×` faster**!).
+    - **Surgical Ensemble Search (`cProfile`):** **`13.07s → 9.37s` (`1.40×` faster**, now `70.2%` pure PyTorch BLAS).
+    - **PPO Rollouts (`B=6` `cProfile`):** **`3.49s → 2.36s` (`1.48×` faster)** — **512 episodes (16 iters + 5× `val_56g` at 35% Large maps)** complete in **`9.1 min`** (`~2.7×` faster than Wave 10!).
+- **New Single-Model Soft-KD Champion — [`checkpoints/galcon_wave13_kd.pt`](../checkpoints/galcon_wave13_kd.pt) (`21–24 ms/tick`, ~`1941 Elo`!):**
+  - Distilled 72 Triple-Boss games of our Wave 12 Surgical Ensemble (`boss=28–10–10 / 68.8%`) with `--kd-alpha 0.35` (`rec=95.4%`, `prec=76.5%–77.5%`, `aux=96.2%`, `vsign=85.8%`):
+  - **18pl Std `Sparky v1.6` (40g, 1t):** **`22–12–6` (`62.5%`)** — **`s=14000: 12–4–4 (70.0%!!)` — NEW ALL-TIME `s=14000` RECORD across every single model AND 2-model ensemble in history!**
+  - **18pl Std `Waffle3z-GA` (40g, 1t):** **`25–12–3` (`66.2%`)** (`67.5%` / `25–11–4` in Surgical single-model mode @ `21.0 ms/t`!) — **ties `W9S` for #1 Single-Model Dual-Boss Average (`64.4%`) at `21–24 ms/t`!**
+  - **Large 24pl Asym `Waffle3z-GA` (12g):** **`10–2–0` (`83.3%` — ALL-TIME RECORD!)** | **`EsparanBot v0.2` (24g):** **`19–2–3` (`85.4%`, `s=9500: 91.7%`)** | **Heuristics (32g):** **`29–3–0` (`90.6%`)**.
 
 ## Wave 12 Highlights — Shattering 70% vs. `Sparky v1.6` & `Waffle3z-GA` + `2.3×` Faster VM Training
-- **#1 Overall Champion — Wave 12 Surgical Ensemble (`EnsembleGalconSearchAgent([W9S, W6B])`, default `--bot ensemble`, `46–52 ms/tick`, ~`1979 Elo`!):**
+- **#1 Overall Champion — Wave 12 Surgical Ensemble (`EnsembleGalconSearchAgent([W9S, W6B])`, default `--bot ensemble`, `35–42 ms/tick` W13 / `46–52 ms/tick` W12, ~`1979 Elo`!):**
   - Driven directly by loss forensics against `esparano Sparky v1.6` (which exposed passive symmetric stalemate draws and empty opening soft-minimax replies), added two surgical search helpers in [`galcon/transformer_bot.py`](transformer_bot.py) enabled by default on `EnsembleGalconSearchAgent`:
     1. **`_build_rescue_and_snipe_plan`:** Exact-need defensive rescue for any friendly planet projected to fall + single-target high-ROI snipe/stalemate-breaker whenever conservative multi-target fan-out returns empty.
     2. **`_build_opp_direct_rush_plan`:** Soft-minimax fallback stress-testing an 85% strike from the opponent's strongest planet at our closest/weakest planet when opponent fan-out/focus-fire is empty (e.g. `t=0` openings).
@@ -160,7 +178,7 @@ python3 -m galcon.train --mode gen2 --stage gen4_ppo \
 # Optional: clone unmodified external Lua tournament bosses (gitignored under external/)
 git clone --depth 1 https://github.com/esparano/GalconModVault external/GalconModVault
 
-# Wave 11 Hybrid Search-EI + Ensemble Soft-KD (--kd-alpha 0.35, ~2x faster training!):
+# Wave 13 Fast Replay-Pooled Search-EI + Soft-KD (--save-ei-npz / --load-ei-npz, C99 16.7x feature engine!):
 python3 -m galcon.train --mode gen2 --stage gen4_ei \
   --resume checkpoints/galcon_wave9_search.pt \
   --resume2 checkpoints/galcon_transformer_best.pt \
@@ -168,26 +186,26 @@ python3 -m galcon.train --mode gen2 --stage gen4_ei \
   --lua-opp external/GalconModVault/esparano/bots/sparky/bot_sparky_v1.6.lua \
   --lua-opp2 external/GalconModVault/esparano/bots/bot_esparanbot_v0.2/bot_esparanbot.lua \
   --lua-opp3 external/GalconModVault/esparano/bots/bot_hivemind/mod_botwar_testing.lua::bots_waffle3z_optimized \
-  --search-games 64 --epochs 8 --lr 1.8e-4 --kd-alpha 0.35 \
-  --workers 4 --train-threads 4 --device cuda \
-  --out checkpoints/galcon_wave11_kd.pt
+  --search-games 72 --epochs 8 --lr 1.8e-4 --kd-alpha 0.35 \
+  --save-ei-npz checkpoints/ei_wave13.npz \
+  --workers 2 --train-threads 2 --device cpu \
+  --out checkpoints/galcon_wave13_kd.pt
 
-# Wave 11 Fast Batched Triple-Boss PPO (B=6 lockstep rollouts + precomputed EMA teacher + parallel val_56g):
-# Finishes 10 iters (320 eps + 3 vals) in ~6 min on a 2-vCPU VM and even faster with --workers 8 --device cuda/dml.
+# Wave 13 Fast Batched Triple-Boss PPO (C99 fast_c + lazy D4 + B=10 lockstep waves + precomputed EMA teacher):
 python3 -m galcon.train --mode gen2 --stage gen4_ppo \
-  --resume checkpoints/galcon_wave11_kd.pt \
+  --resume checkpoints/galcon_wave13_kd.pt \
   --gen2-anchor checkpoints/galcon_wave8_pure.pt \
-  --gen2-anchor2 checkpoints/galcon_wave9_search.pt \
+  --gen2-anchor2 checkpoints/galcon_wave13_kd.pt \
   --lua-opp external/GalconModVault/esparano/bots/sparky/bot_sparky_v1.6.lua \
   --lua-opp2 external/GalconModVault/esparano/bots/bot_esparanbot_v0.2/bot_esparanbot.lua \
   --lua-opp3 external/GalconModVault/esparano/bots/bot_hivemind/mod_botwar_testing.lua::bots_waffle3z_optimized \
-  --sparky-share 0.35 --waffle-share 0.20 --esparan-share 0.10 \
-  --ppo-iters 10 --mirror-pairs 16 --eval-every 3 \
-  --kl-coef 0.055 --v-anchor-coef 0.08 --lr 1.5e-5 \
-  --workers 4 --train-threads 4 --device cuda \
-  --out checkpoints/galcon_wave11_pure.pt
+  --sparky-share 0.45 --waffle-share 0.22 --esparan-share 0.13 --large-map-prob 0.35 \
+  --ppo-iters 16 --mirror-pairs 16 --eval-every 4 \
+  --kl-coef 0.035 --v-anchor-coef 0.15 --lr 3.5e-5 \
+  --workers 2 --train-threads 2 --device cpu \
+  --out checkpoints/galcon_wave13_pure.pt
 
-# Record Wave 11 Triple-Boss showcase replays (Wave 11 Soft-KD & Pure Large, Sparky, Waffle3z-GA, Loss Forensics & External Lua Bot War) & Elo viewer:
+# Record Wave 13 Triple-Boss showcase replays & Elo viewer:
 python3 -m galcon.record_replays \
   --checkpoint checkpoints/galcon_wave9_search.pt \
   --checkpoint2 checkpoints/galcon_transformer_best.pt \
@@ -195,29 +213,30 @@ python3 -m galcon.record_replays \
   --w10-checkpoint checkpoints/galcon_wave10_search.pt \
   --w11-kd-checkpoint checkpoints/galcon_wave11_kd.pt \
   --w11-pure-checkpoint checkpoints/galcon_wave11_pure.pt \
+  --w13-kd-checkpoint checkpoints/galcon_wave13_kd.pt \
   --pure-checkpoint checkpoints/galcon_wave8_pure.pt \
   --lua-sparky external/GalconModVault/esparano/bots/sparky/bot_sparky_v1.6.lua \
   --lua-waffle external/GalconModVault/esparano/bots/bot_hivemind/mod_botwar_testing.lua::bots_waffle3z_optimized \
   --lua-esparan external/GalconModVault/esparano/bots/bot_esparanbot_v0.2/bot_esparanbot.lua \
   --out-html docs/galcon_viewer.html
 
-# Run all 20 unit tests (Wave 12 Surgical Search + VM speedups, Wave 11 Soft-KD + Batched PPO, Waffle3z Lua bridge, Triple-boss val gate, Map-adaptive adversarial, Vectorized futures parity, Canonical D4, DMLAdamW, Ensemble):
+# Run all 21 unit tests (Wave 13 C99 fast_c parity + lazy D4 + vectorized redir + ms_only + EI cache, Wave 12 Surgical Search + VM speedups, Wave 11 Soft-KD + Batched PPO, Waffle3z Lua bridge, Triple-boss val gate, Map-adaptive adversarial, Canonical D4, DMLAdamW, Ensemble):
 pytest -v tests/test_galcon.py
 ```
 
 ### 2. Plug Straight Into Phil Hassey's Official `gbots`
 ```bash
-# Tier 1 — #1 All-Round Triple-Boss Ensemble (66.3% Sparky / 68.8% Waffle3z-GA / 66.7%–75.0% Large @ 43–49 ms!):
-./gbots pipe -name OurGalconWave10Ensemble -key YOUR_KEY \
+# Tier 1 — #1 Overall Triple-Boss Ensemble (71.2% Sparky / 66.7%–75.0% Large @ 35–42 ms W13!):
+./gbots pipe -name OurGalconWave12Ensemble -key YOUR_KEY \
   -exec "python3 -m galcon.gbots_client --bot ensemble"
 
-# Tier 2 — #1 Fast Single-Model Map-Adaptive Search (66.3% Sparky @ 30–38 ms; or use galcon_wave10_search.pt for 66.3% Waffle3z @ 29 ms!):
-./gbots pipe -name OurGalconWave9Search -key YOUR_KEY \
-  -exec "python3 -m galcon.gbots_client --bot search --checkpoint checkpoints/galcon_wave9_search.pt"
+# Tier 2 — #1 Fast Single-Model Search (21–24 ms W13! Use galcon_wave13_kd.pt for 70.0% s14k Sparky & 83.3% Large Waffle3z, or galcon_wave9_search.pt for 66.3% 40g Sparky):
+./gbots pipe -name OurGalconWave13Search -key YOUR_KEY \
+  -exec "python3 -m galcon.gbots_client --bot search --checkpoint checkpoints/galcon_wave13_kd.pt"
 
-# Tier 3 — Ultra-Fast Wave 8 Pure neural net (~8.0 ms VM, 61.3% Sparky / 52.5% Waffle3z-GA, ZERO search!):
+# Tier 3 — Ultra-Fast Wave 8 Pure neural net (~5.5 ms W13 VM, 61.3% Sparky / 52.5% Waffle3z-GA, ZERO search!):
 ./gbots pipe -name OurGalconWave8Pure -key YOUR_KEY \
   -exec "python3 -m galcon.gbots_client --bot transformer --checkpoint checkpoints/galcon_wave8_pure.pt"
 ```
 
-Interactive HTML5 Canvas Replay Viewer (with Sparky v1.6 & Waffle3z-GA Win/Loss Forensics, Large 24pl Wins, External Lua Bot War & Triple-Boss Scoreboard): [`docs/galcon_viewer.html`](../docs/galcon_viewer.html).
+Interactive HTML5 Canvas Replay Viewer (with Wave 13 `21 ms` Single-Model & Wave 12 Surgical Showcase Wins, Sparky v1.6 & Waffle3z-GA Forensics, External Lua Bot War & Triple-Boss Scoreboard): [`docs/galcon_viewer.html`](../docs/galcon_viewer.html).

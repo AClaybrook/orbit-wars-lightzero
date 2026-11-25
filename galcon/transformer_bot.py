@@ -27,6 +27,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from galcon.fast_c import HAS_FAST_C, extract_features_fast_c
 from galcon.sim import (
     PRODUCTION_DIVISOR,
     GalconSim,
@@ -111,26 +112,38 @@ def canonicalize_galcon_d4(planet_feats: np.ndarray) -> np.ndarray:
     is_en = planet_feats[:, 3]
     ships = planet_feats[:, 5]
     prod = planet_feats[:, 6]
-    w_me = is_me * (0.25 + prod + ships)
-    w_en = is_en * (0.25 + prod + ships)
+    base_w = 0.25 + prod + ships
+    w_me = is_me * base_w
+    w_en = is_en * base_w
     sum_me = float(w_me.sum())
     sum_en = float(w_en.sum())
 
-    best_key = None
-    best_arr = None
+    x0 = planet_feats[:, 0]
+    y0 = planet_feats[:, 1]
+    mx0 = float((w_me * x0).sum() / sum_me) if sum_me > 1e-6 else 0.0
+    my0 = float((w_me * y0).sum() / sum_me) if sum_me > 1e-6 else 0.0
+    ex0 = float((w_en * x0).sum() / sum_en) if sum_en > 1e-6 else 0.0
+    ey0 = float((w_en * y0).sum() / sum_en) if sum_en > 1e-6 else 0.0
+    vx0, vy0 = mx0 - ex0, my0 - ey0
+    if math.hypot(vx0, vy0) < 1e-4:
+        vx0, vy0 = mx0, my0
+
+    # Evaluate all 8 D4 transforms on the 2D centroid vector first (O(1)), avoiding 8x array copies
+    # and computing the coordinate tie-break lazily only on exact oct_key ties (<0.1% of states).
+    best_oct = None
+    tied: List[Tuple[bool, int]] = []
     for flip_x in (False, True):
+        fx = -vx0 if flip_x else vx0
+        fy = vy0
         for k_rot in range(4):
-            cand = apply_galcon_d4(planet_feats, k_rot=k_rot, flip_x=flip_x)
-            cx = cand[:, 0]
-            cy = cand[:, 1]
-            mx = float((w_me * cx).sum() / sum_me) if sum_me > 1e-6 else 0.0
-            my = float((w_me * cy).sum() / sum_me) if sum_me > 1e-6 else 0.0
-            ex = float((w_en * cx).sum() / sum_en) if sum_en > 1e-6 else 0.0
-            ey = float((w_en * cy).sum() / sum_en) if sum_en > 1e-6 else 0.0
-            vx, vy = mx - ex, my - ey
-            if math.hypot(vx, vy) < 1e-4:
-                vx, vy = mx, my
-            # Canonical octant: vx <= 0, vy <= 0, |vx| >= |vy|; exact tie-break via sorted planet coords
+            if k_rot == 0:
+                vx, vy = fx, fy
+            elif k_rot == 1:
+                vx, vy = -fy, fx
+            elif k_rot == 2:
+                vx, vy = -fx, -fy
+            else:
+                vx, vy = fy, -fx
             oct_key = (
                 0 if vx <= 1e-5 else 1,
                 0 if vy <= 1e-5 else 1,
@@ -138,16 +151,32 @@ def canonicalize_galcon_d4(planet_feats: np.ndarray) -> np.ndarray:
                 round(vx, 4),
                 round(vy, 4),
             )
-            tie_key = tuple(
-                sorted(
-                    (round(float(cx[i]), 3), round(float(cy[i]), 3), round(float(is_me[i] - is_en[i]), 1), round(float(prod[i]), 2))
-                    for i in range(cand.shape[0])
-                )
+            if best_oct is None or oct_key < best_oct:
+                best_oct = oct_key
+                tied = [(flip_x, k_rot)]
+            elif oct_key == best_oct:
+                tied.append((flip_x, k_rot))
+
+    if len(tied) == 1:
+        flip_x, k_rot = tied[0]
+        return apply_galcon_d4(planet_feats, k_rot=k_rot, flip_x=flip_x)
+
+    best_tie = None
+    best_arr = None
+    n_p = planet_feats.shape[0]
+    for flip_x, k_rot in tied:
+        cand = apply_galcon_d4(planet_feats, k_rot=k_rot, flip_x=flip_x)
+        cx = cand[:, 0]
+        cy = cand[:, 1]
+        tie_key = tuple(
+            sorted(
+                (round(float(cx[i]), 3), round(float(cy[i]), 3), round(float(is_me[i] - is_en[i]), 1), round(float(prod[i]), 2))
+                for i in range(n_p)
             )
-            full_key = (oct_key, tie_key)
-            if best_key is None or full_key < best_key:
-                best_key = full_key
-                best_arr = cand
+        )
+        if best_tie is None or tie_key < best_tie:
+            best_tie = tie_key
+            best_arr = cand
     assert best_arr is not None
     return best_arr
 
@@ -157,6 +186,7 @@ def extract_galcon_features(
     player: int,
     *,
     feature_version: int = 1,
+    _use_fast_c: bool = True,
 ) -> EncodedGalconState:
     """Extract lossless, scale-invariant entity + arrival-timeline + edge features for Galcon."""
     planets = sorted(sim.planets.values(), key=lambda p: p.id)[:GALCON_MAX_PLANETS]
@@ -179,6 +209,27 @@ def extract_galcon_features(
             feature_version=feature_version,
             futures=[],
         )
+
+    if _use_fast_c and HAS_FAST_C and len(sim.planets) <= GALCON_MAX_PLANETS:
+        res_c = extract_features_fast_c(
+            sim, planets, player, GALCON_TIMELINE_HORIZON, feature_version, PRODUCTION_DIVISOR
+        )
+        if res_c is not None:
+            my_arrs, en_arrs, po_all, ps_all, pf, tf, ef, legal, owned_mask, safe_surplus = res_c
+            futures = [(my_arrs[i], en_arrs[i], po_all[i], ps_all[i]) for i in range(n)]
+            return EncodedGalconState(
+                player=player,
+                planet_ids=planet_ids,
+                planets=planets,
+                planet_feats=pf,
+                timeline_feats=tf,
+                edge_feats=ef,
+                legal_edges=legal,
+                owned_mask=owned_mask,
+                safe_surplus=safe_surplus,
+                feature_version=feature_version,
+                futures=futures,
+            )
 
     # Scale-invariant centering works identically on 200x125, 400x240, or 600x400 gbots maps
     xs64 = np.array([p.x for p in planets], dtype=np.float64)
@@ -376,19 +427,6 @@ def extract_galcon_redir_features(sim: GalconSim, enc: EncodedGalconState) -> En
         )
 
     id_to_idx = {pid: idx for idx, pid in enumerate(enc.planet_ids)}
-    futures = enc.futures or [
-        project_planet_future(sim, p.id, enc.player, horizon=GALCON_TIMELINE_HORIZON) for p in enc.planets
-    ]
-
-    # Precompute threatened status per planet
-    threat_eta = np.full((n,), -1, dtype=np.int32)
-    for j, p in enumerate(enc.planets):
-        if p.owner == enc.player:
-            _, _, po, _ = futures[j]
-            lost = next((t for t in range(GALCON_TIMELINE_HORIZON) if po[t] <= 0), -1)
-            if lost >= 0:
-                threat_eta[j] = lost + 1
-
     my_fleets = sorted(
         (fl for fl in sim.fleets.values() if fl.owner == enc.player and fl.target in id_to_idx),
         key=lambda f: f.id,
@@ -400,51 +438,68 @@ def extract_galcon_redir_features(sim: GalconSim, enc: EncodedGalconState) -> En
             redir_feats=np.zeros((0, n, GALCON_REDIR_DIM), dtype=np.float32),
         )
 
+    if enc.futures:
+        po_all = np.stack([f[2] for f in enc.futures], axis=0)
+        ps_all = np.stack([f[3] for f in enc.futures], axis=0)
+    else:
+        _, _, po_all, ps_all = project_all_planet_futures(
+            sim, enc.planets, enc.player, horizon=GALCON_TIMELINE_HORIZON
+        )
+
+    px = np.fromiter((p.x for p in enc.planets), dtype=np.float64, count=n)
+    py = np.fromiter((p.y for p in enc.planets), dtype=np.float64, count=n)
+    pr = np.fromiter((p.radius for p in enc.planets), dtype=np.float64, count=n)
+    pprod = np.fromiter((p.production for p in enc.planets), dtype=np.float64, count=n)
+    is_mine = np.fromiter((p.owner == enc.player for p in enc.planets), dtype=np.bool_, count=n)
+
+    lost_mask = po_all <= 0.0
+    any_lost = lost_mask.any(axis=1)
+    first_lost = np.argmax(lost_mask, axis=1)
+    threat_eta = np.where(is_mine & any_lost, first_lost + 1, -1).astype(np.int32)
+
     f_cnt = len(my_fleets)
-    fleet_ids: List[int] = []
-    cur_dst_idx = np.zeros((f_cnt,), dtype=np.int64)
-    rf = np.zeros((f_cnt, n, GALCON_REDIR_DIM), dtype=np.float32)
+    fleet_ids = [fl.id for fl in my_fleets]
+    cur_dst_idx = np.fromiter((id_to_idx[fl.target] for fl in my_fleets), dtype=np.int64, count=f_cnt)
+    fx = np.fromiter((fl.x for fl in my_fleets), dtype=np.float64, count=f_cnt)
+    fy = np.fromiter((fl.y for fl in my_fleets), dtype=np.float64, count=f_cnt)
+    fsh = np.fromiter((fl.ships for fl in my_fleets), dtype=np.float32, count=f_cnt)
 
-    for fi, fl in enumerate(my_fleets):
-        fleet_ids.append(fl.id)
-        c_idx = id_to_idx[fl.target]
-        cur_dst_idx[fi] = c_idx
-        c_dst = enc.planets[c_idx]
-        eta_cur = float(sim.eta_ticks(fl.x, fl.y, c_dst))
-        _, _, c_po, c_ps = futures[c_idx]
-        t_cur = min(GALCON_TIMELINE_HORIZON - 1, max(0, int(eta_cur) - 1))
-        wasted_friendly = c_dst.owner == enc.player and c_po[-1] > 0 and c_ps[-1] > fl.ships + 15.0
-        doomed_attack = c_dst.owner != enc.player and c_po[t_cur] <= 0 and fl.ships < c_ps[t_cur] * 0.80
-        cur_wasted = 1.0 if (wasted_friendly or doomed_attack) else 0.0
-        ships_log = math.log1p(max(0.0, fl.ships)) / 5.5
+    step_dist = max(1e-6, sim.fleet_speed * sim.tick_dt)
+    dist = np.maximum(0.0, np.hypot(px[None, :] - fx[:, None], py[None, :] - fy[:, None]) - pr[None, :])
+    eta_mat = np.maximum(1.0, np.ceil(dist / step_dist)).astype(np.float32)  # (F, N)
+    t_mat = np.clip(eta_mat.astype(np.int64) - 1, 0, GALCON_TIMELINE_HORIZON - 1)  # (F, N)
+    j_grid = np.broadcast_to(np.arange(n)[None, :], (f_cnt, n))
+    owner_eta = po_all[j_grid, t_mat]  # (F, N)
+    ships_eta = ps_all[j_grid, t_mat]  # (F, N)
 
-        for j, cand in enumerate(enc.planets):
-            eta_j = float(sim.eta_ticks(fl.x, fl.y, cand))
-            _, _, po_j, ps_j = futures[j]
-            t_j = min(GALCON_TIMELINE_HORIZON - 1, max(0, int(eta_j) - 1))
-            owner_eta = float(po_j[t_j])
-            ships_eta = float(ps_j[t_j])
-            need_j = ships_eta + 1.5
-            can_cap = 1.0 if (owner_eta <= 0 and fl.ships > need_j) else 0.0
-            can_save = 1.0 if (threat_eta[j] > 0 and eta_j <= threat_eta[j]) else 0.0
-            prod_rate = cand.production / PRODUCTION_DIVISOR
-            roi_j = (prod_rate * 20.0) / max(3.0, need_j + 0.45 * eta_j * max(0.3, prod_rate))
+    f_arange = np.arange(f_cnt)
+    eta_cur = eta_mat[f_arange, cur_dst_idx]  # (F,)
+    t_cur = np.clip(eta_cur.astype(np.int64) - 1, 0, GALCON_TIMELINE_HORIZON - 1)
+    c_po_end = po_all[cur_dst_idx, -1]
+    c_ps_end = ps_all[cur_dst_idx, -1]
+    c_po_cur = po_all[cur_dst_idx, t_cur]
+    c_ps_cur = ps_all[cur_dst_idx, t_cur]
+    c_is_mine = is_mine[cur_dst_idx]
+    wasted_friendly = c_is_mine & (c_po_end > 0.0) & (c_ps_end > fsh + 15.0)
+    doomed_attack = (~c_is_mine) & (c_po_cur <= 0.0) & (fsh < c_ps_cur * 0.80)
+    cur_wasted = (wasted_friendly | doomed_attack).astype(np.float32)[:, None]
 
-            rf[fi, j] = np.array(
-                [
-                    1.0 if j == c_idx else 0.0,
-                    min(1.0, eta_j / 35.0),
-                    math.tanh((eta_j - eta_cur) / 10.0),
-                    ships_log,
-                    min(2.0, fl.ships / max(1.0, need_j)),
-                    can_cap,
-                    can_save,
-                    cur_wasted,
-                    min(2.0, roi_j),
-                    owner_eta,
-                ],
-                dtype=np.float32,
-            )
+    fsh_col = fsh[:, None]
+    need_mat = ships_eta + 1.5
+    prod_rate = (pprod / PRODUCTION_DIVISOR).astype(np.float32)[None, :]
+    roi_mat = (prod_rate * 20.0) / np.maximum(3.0, need_mat + 0.45 * eta_mat * np.maximum(0.3, prod_rate))
+
+    rf = np.empty((f_cnt, n, GALCON_REDIR_DIM), dtype=np.float32)
+    rf[:, :, 0] = (j_grid == cur_dst_idx[:, None]).astype(np.float32)
+    rf[:, :, 1] = np.minimum(1.0, eta_mat / 35.0)
+    rf[:, :, 2] = np.tanh((eta_mat - eta_cur[:, None]) / 10.0)
+    rf[:, :, 3] = (np.log1p(np.maximum(0.0, fsh)) / 5.5)[:, None]
+    rf[:, :, 4] = np.minimum(2.0, fsh_col / np.maximum(1.0, need_mat))
+    rf[:, :, 5] = ((owner_eta <= 0.0) & (fsh_col > need_mat)).astype(np.float32)
+    rf[:, :, 6] = ((threat_eta[None, :] > 0) & (eta_mat <= threat_eta[None, :])).astype(np.float32)
+    rf[:, :, 7] = cur_wasted
+    rf[:, :, 8] = np.minimum(2.0, roi_mat)
+    rf[:, :, 9] = owner_eta
 
     return EncodedRedirState(fleet_ids=fleet_ids, cur_dst_idx=cur_dst_idx, redir_feats=rf)
 
@@ -968,6 +1023,7 @@ class GalconTransformerAgent:
         use_d4_tta: Optional[bool] = None,
         use_d4_canonical: Optional[bool] = None,
         need_value: bool = True,
+        ms_only: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray, float, Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
         n = len(enc.planet_ids)
         if n == 0:
@@ -999,6 +1055,34 @@ class GalconTransformerAgent:
             isinstance(self.model, GalconPlanetTransformer)
             and self.model.enable_multi_send
         )
+        if ms_only and want_ms:
+            h = self.model.encode_planets(pf_t, tf_t, ef_t, pm_t)
+            ms_logits, ms_fr = self.model.predict_multi_send(h, ef_t)
+            legal_t = torch.from_numpy(enc.legal_edges).to(self.device)
+            ms_logits = ms_logits.masked_fill(~legal_t.unsqueeze(0), -1e9)
+            ms_probs = torch.sigmoid(ms_logits).mean(dim=0).cpu().numpy()
+            ms_fracs = ms_fr.mean(dim=0).cpu().numpy()
+            redir_probs = None
+            if want_redir and redir_enc is not None:
+                f_cnt = len(redir_enc.fleet_ids)
+                cd_t = torch.from_numpy(
+                    np.broadcast_to(redir_enc.cur_dst_idx[None], (k_b, f_cnt)).copy()
+                ).to(self.device)
+                rf_t = torch.from_numpy(
+                    np.broadcast_to(redir_enc.redir_feats[None], (k_b, f_cnt, n, GALCON_REDIR_DIM)).copy()
+                ).to(self.device)
+                r_logits = self.model.predict_redir_logits(h, cd_t, rf_t, pm_t)
+                redir_probs = F.softmax(r_logits, dim=-1).mean(dim=0).cpu().numpy()
+            val_f = float(self.model.decode_value_from_hidden(h, pm_t).mean().item()) if need_value else 0.0
+            return (
+                np.zeros((n, n + 1), dtype=np.float32),
+                np.zeros((n, n), dtype=np.float32),
+                val_f,
+                redir_probs,
+                ms_probs,
+                ms_fracs,
+            )
+
         if want_redir or want_ms:
             logits, fracs, vals, h = self.model(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
             redir_probs = None
@@ -1176,7 +1260,10 @@ class GalconTransformerAgent:
             if (self.use_native_redir and self.has_trained_redir and sim.allow_redirect and sim.fleets)
             else None
         )
-        probs, mean_fracs, _, redir_probs, ms_probs, ms_fracs = self._predict_all(enc, redir_enc=redir_enc)
+        want_ms_only = bool(self.use_multi_send and self.has_trained_multi_send)
+        probs, mean_fracs, _, redir_probs, ms_probs, ms_fracs = self._predict_all(
+            enc, redir_enc=redir_enc, need_value=False, ms_only=want_ms_only
+        )
         if self.use_multi_send and self.has_trained_multi_send and ms_probs is not None and ms_fracs is not None:
             return self._decode_multi_send_orders(
                 sim,
@@ -1288,7 +1375,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
 
     @torch.no_grad()
     def _batch_forward_policy_and_val(
-        self, encs: Sequence[EncodedGalconState], *, need_value: bool = True
+        self, encs: Sequence[EncodedGalconState], *, need_value: bool = True, ms_only: bool = False
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
         """Run ONE batched 1x forward pass over a list of same-N encoded states."""
         k = len(encs)
@@ -1313,6 +1400,25 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         le_t = torch.from_numpy(le_b).to(self.device)
 
         want_ms = isinstance(self.model, GalconPlanetTransformer) and self.model.enable_multi_send
+        if ms_only and want_ms:
+            h = self.model.encode_planets(pf_t, tf_t, ef_t, pm_t)
+            ms_l, ms_f = self.model.predict_multi_send(h, ef_t)
+            ms_l = ms_l.masked_fill(~le_t, -1e9)
+            ms_p = torch.sigmoid(ms_l).cpu().numpy()
+            ms_f_np = ms_f.cpu().numpy()
+            vals_np = (
+                self.model.decode_value_from_hidden(h, pm_t).cpu().numpy()
+                if need_value
+                else np.zeros((k,), dtype=np.float32)
+            )
+            return (
+                np.zeros((k, n, n + 1), dtype=np.float32),
+                np.zeros((k, n, n), dtype=np.float32),
+                vals_np,
+                ms_p,
+                ms_f_np,
+            )
+
         if want_ms:
             logits, fracs, vals, h = self.model(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
             ms_l, ms_f = self.model.predict_multi_send(h, ef_t)
@@ -1931,7 +2037,9 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         opp_orders: List[Order] = []
         opp_adv_orders: List[Order] = []
         if opp_enc.planet_ids and np.any(opp_enc.owned_mask):
-            op, of, _, _, oms_p, oms_f = self._predict_all(opp_enc, use_d4_tta=False, need_value=False)
+            op, of, _, _, oms_p, oms_f = self._predict_all(
+                opp_enc, use_d4_tta=False, need_value=False, ms_only=(using_ms and not use_adv)
+            )
             opp_orders = self._predict_opponent_reply(sim, opp_enc, op, of, oms_p, oms_f)
             if use_adv:
                 opp_adv_orders = self._build_fanout_plan(
@@ -1982,7 +2090,9 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
             for i in live_indices:
                 mid_encs.append(extract_galcon_features(rolls[i], player, feature_version=self.feature_version))
                 mid_encs.append(extract_galcon_features(rolls[i], opp, feature_version=self.feature_version))
-            m_probs, m_fracs, _, m_msp, m_msf = self._batch_forward_policy_and_val(mid_encs, need_value=False)
+            m_probs, m_fracs, _, m_msp, m_msf = self._batch_forward_policy_and_val(
+                mid_encs, need_value=False, ms_only=using_ms
+            )
             for k_idx, r_idx in enumerate(live_indices):
                 r = rolls[r_idx]
                 p_enc = mid_encs[2 * k_idx]
@@ -2148,6 +2258,7 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
         use_d4_tta: Optional[bool] = None,
         use_d4_canonical: Optional[bool] = None,
         need_value: bool = True,
+        ms_only: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray, float, Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
         p_sum = f_sum = r_sum = msp_sum = msf_sum = None
         r_w = ms_w = 0.0
@@ -2157,13 +2268,24 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
             vw = float(self.value_weights[idx]) if need_value else 0.0
             if w <= 0.0 and vw <= 0.0:
                 continue
+            ag_need_v = vw > 0.0
             if idx == 0:
                 p, f, v, r, msp, msf = super()._predict_all(
-                    enc, redir_enc=redir_enc, use_d4_tta=use_d4_tta, use_d4_canonical=use_d4_canonical
+                    enc,
+                    redir_enc=redir_enc,
+                    use_d4_tta=use_d4_tta,
+                    use_d4_canonical=use_d4_canonical,
+                    need_value=ag_need_v,
+                    ms_only=ms_only,
                 )
             else:
                 p, f, v, r, msp, msf = ag._predict_all(
-                    enc, redir_enc=redir_enc, use_d4_tta=use_d4_tta, use_d4_canonical=use_d4_canonical
+                    enc,
+                    redir_enc=redir_enc,
+                    use_d4_tta=use_d4_tta,
+                    use_d4_canonical=use_d4_canonical,
+                    need_value=ag_need_v,
+                    ms_only=ms_only,
                 )
             if w > 0.0:
                 p_sum = w * p if p_sum is None else p_sum + w * p
@@ -2187,12 +2309,12 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
 
     @torch.no_grad()
     def _batch_forward_policy_and_val(
-        self, encs: Sequence[EncodedGalconState], *, need_value: bool = True
+        self, encs: Sequence[EncodedGalconState], *, need_value: bool = True, ms_only: bool = False
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
         """Run one batched forward pass per ensemble member and blend predictions."""
         k = len(encs)
         if k == 0:
-            return super()._batch_forward_policy_and_val(encs, need_value=need_value)
+            return super()._batch_forward_policy_and_val(encs, need_value=need_value, ms_only=ms_only)
         n = len(encs[0].planet_ids)
         pf_t = torch.from_numpy(np.stack([self._prep_pf(e) for e in encs], axis=0)).to(self.device)
         tf_t = torch.from_numpy(np.stack([e.timeline_feats for e in encs], axis=0)).to(self.device)
@@ -2210,6 +2332,18 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
             if w <= 0.0 and vw <= 0.0:
                 continue
             want_ms = (w > 0.0) and isinstance(ag.model, GalconPlanetTransformer) and ag.model.enable_multi_send
+            if ms_only and want_ms:
+                h = ag.model.encode_planets(pf_t, tf_t, ef_t, pm_t)
+                ms_l, ms_f = ag.model.predict_multi_send(h, ef_t)
+                ms_l = ms_l.masked_fill(~le_t, -1e9)
+                ms_p = torch.sigmoid(ms_l).cpu().numpy()
+                ms_f_np = ms_f.cpu().numpy()
+                msp_sum = w * ms_p if msp_sum is None else msp_sum + w * ms_p
+                msf_sum = w * ms_f_np if msf_sum is None else msf_sum + w * ms_f_np
+                ms_w += w
+                if vw > 0.0:
+                    v_sum += vw * ag.model.decode_value_from_hidden(h, pm_t).cpu().numpy()
+                continue
             if want_ms:
                 logits, fracs, vals, h = ag.model(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
                 ms_l, ms_f = ag.model.predict_multi_send(h, ef_t)
@@ -2232,7 +2366,10 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
         if msp_sum is not None and msf_sum is not None and ms_w > 0.0:
             msp_sum = msp_sum / ms_w
             msf_sum = msf_sum / ms_w
-        assert p_sum is not None and f_sum is not None
+        if p_sum is None:
+            p_sum = np.zeros((k, n, n + 1), dtype=np.float32)
+        if f_sum is None:
+            f_sum = np.zeros((k, n, n), dtype=np.float32)
         return p_sum, f_sum, v_sum, msp_sum, msf_sum
 
     @torch.no_grad()
@@ -2269,7 +2406,10 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
             if (self.use_native_redir and self.has_trained_redir and sim.allow_redirect and sim.fleets)
             else None
         )
-        probs, mean_fracs, _, redir_probs, ms_probs, ms_fracs = self._predict_all(enc, redir_enc=redir_enc)
+        want_ms_only = bool(self.use_multi_send and self.has_trained_multi_send)
+        probs, mean_fracs, _, redir_probs, ms_probs, ms_fracs = self._predict_all(
+            enc, redir_enc=redir_enc, need_value=False, ms_only=want_ms_only
+        )
         if self.use_multi_send and self.has_trained_multi_send and ms_probs is not None and ms_fracs is not None:
             return self._decode_multi_send_orders(
                 sim, enc, ms_probs, ms_fracs, threshold=self.multi_send_threshold, redir_enc=redir_enc, redir_probs=redir_probs
