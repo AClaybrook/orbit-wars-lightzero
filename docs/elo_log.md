@@ -197,3 +197,29 @@ This log tracks calibrated **Kaggle-equivalent Elo** estimates (anchored against
     - Ship tipping point delayed **`t = 16.3 → t = 27.8`** (`+11.5` ticks; seed `200` held even until **`t = 59`**), `t = 50` ship deficit narrowed `-131.8 → -112.5`, premature reinforces cut **`-21%`** (`94 → 74`; `-34%` on Hold-Boost), impulsive solo bounces cut **`-55%`** (`29 → 13`), and total bounced ships dropped below `#2` (`2,785 vs 3,100`)!
 - **Estimated Kaggle Skill Rating (`1.89M PT-Gen9` 2P Specialist + `Gen 7` 4P Specialist):**
   - **Pure (`~98 ms/turn`):** **~1,750–1,790** (`5–3` / `+90 Elo` over `PT-Gen8`, solidly past `#5 TonyK = 1754.6` into **Kaggle Top-5** territory, with zero copied weights and <10% of the turn budget!).
+
+### Generation 10 — `4.35M PT-Gen10` (RX 6950 XT DirectML Soft-KD + Paired-Seed League PPO)
+- **Date:** 2026-11-24
+- **Architecture & GPU Pipeline ([`orbit_wars_bot/dml_utils.py`](../orbit_wars_bot/dml_utils.py), [`scripts/distill_ensemble_4m.py`](../scripts/distill_ensemble_4m.py), [`scripts/rl_finetune_transformer.py`](../scripts/rl_finetune_transformer.py)):**
+  - Scaled `PlanetTimelineTransformer` from `1.89M` to **`4.35M` parameters** (`d_model=256, n_heads=8, n_layers=7, dim_ff=640, use_aux_future=True`) matching `#2 Hober Malloc`'s `4.3M` ModernBERT capacity, promoted at **`34.23 ms/turn` mean** (`49.40 ms` p95 — **< 4% of Kaggle's 1,000 ms budget**).
+  - Zero-fallback AMD RX 6950 XT DirectML training via `DMLAdamW`, scatter-free `one_hot_no_scatter`, and GPU scalar accumulators (`B=256`): **`5.75×` faster PPO updates** (`8.1–8.4s` vs Ryzen 7 5800X `46.6–48.2s`) with **0 DirectML fallback warnings**.
+- **Two-Stage Training (`PT-Gen9` Distillation → DirectML League PPO):**
+  1. **Stage 1 Ensemble Soft-KD (`4m_base`):** Collected `24,678` 2P boards across 120 `FastOrbitSim` games (`69.8s`), GPU-labeled with `8× D4 TTA × 2` Gen 9 teachers (`43.1s`), and trained 14 epochs (`B=256, lr=8e-4`, `~25s/ep`) → `val_kl = 0.052`, `val_all = 89.0%`, `val_launch = 74.3%`, `val_tgt = 88.2%`, `aux_own = 96.4%`, `vsign = 83.8%`.
+  2. **Stage 2 Paired-Seed DirectML League PPO:** 30 iterations × 24 mirror pairs (`1,440` games / `~186K` boards in `31.4 min`, `clip=0.15, kl=0.06, akl=0.025, ema=0.06, aux=0.15`). No-TTA 36g eval progressed `44.4%` → **`61.1%`** at iter 15 (`*BEST*`, `planet_transformer_gen10_4m_ppo.pt`) and ended at `52.8%` at iter 30 (`planet_transformer_gen10_4m_ppo_latest.pt`).
+- **Unseen-Seed `8× D4 TTA` Benchmarks (`FastOrbitSim`, seeds `990–999` × 2 seats = `20g`/matchup):**
+  - `4m_ppo_best` vs `PT-Gen9`: **`40–20` (`66.7%`, ~+120 Elo overall — zero losing matchups!)** (`12–8 / 60.0%` vs `PT-Gen9 Ens-2x`, `16–4 / 80.0%` vs `Gen9-Balanced`, `12–8 / 60.0%` vs `Gen9-SoftKD`; up from `4m_base`'s `14–46 / 23.3%`).
+  - `4m_ppo_latest` vs `PT-Gen9`: **`38–22` (`63.3%`)** (`14–6 / 70.0%` vs `PT-Gen9 Ens-2x`, `8–12 / 40.0%` vs `Gen9-Balanced`, `16–4 / 80.0%` vs `Gen9-SoftKD`).
+  - **Direct Head-to-Head (`4m_ppo_best` vs `4m_ppo_latest`):** **`14–6–0` (`70.0%`, ~+147 Elo, `300.5t`)** — establishing `planet_transformer_gen10_4m_ppo.pt` as the clear single-model promotion to [`checkpoints/planet_transformer_best.pt`](../checkpoints/planet_transformer_best.pt) (while preserving `planet_transformer_gen10_4m_ppo_latest.pt` alongside it; 4P specialist remains [`checkpoints/planet_transformer_4p_best.pt`](../checkpoints/planet_transformer_4p_best.pt)).
+  - `4m_ppo_ens (0.5 best + 0.5 latest)`: **`12–8–0` (`60.0%`, `267.4t`)** vs `PT-Gen9 Ens-2x` and **`10–10–0` (`50.0%`, `369.3t`)** vs `4m_ppo_best`.
+- **Official Kaggle Benchmarks & `#2 Hober Malloc (1800.1)` Boss Forensics:**
+  - `4m_ppo_best` vs `subham_v14` (`4 games`, seed `100`): **`4–0–0` (`100.0%`, rank `1.00`, `128.0t`, `37.81 ms` mean)**.
+  - **2P Boss Gauntlet vs `#2 Hober Malloc (1800.1)` (`seeds 200–205`, prebuilt `submission1.tar.gz`):**
+    - `4m_ppo_best` (`34.23 ms` mean): `0–0–6` (`107.0t` avg)
+    - `4m_ppo_latest` (`34.50 ms` mean): `0–0–6` (`115.3t` avg)
+    - `4m_ppo_ens (best + latest, 60.78 ms mean)`: `0–0–6` (**`115.7t` avg** — edges `PT-Gen9 Ens-2x`'s `115.2t` record at < 6.5% turn budget).
+  - **Midgame Forensics (`scripts/analyze_boss_gap.py`, `4m_ppo_best` vs `#2`, seeds `200–205`):**
+    - Ship tipping point delayed further **`t = 27.8 → t = 29.5`** (held seed `204` to **`t = 60`**, `t=10` `+1.0`, `t=20` `+0.8`), and **`t = 50` ship deficit narrowed `-25%` (`-112.5 → -84.5`, `434.7` vs `519.2`)**.
+    - **Overkill & Bounce Efficiency Breakthrough:** Neutral overkill slashed **`-57%`** vs `Gen9 Ens-2x` (`1,890 → 818` ships), total bounced ships cut **`-31%`** (`2,785 → 1,922` vs `#2`'s `4,303`), and impulsive midgame bounces dropped `29 (Gen 8) → 13 (Gen 9) → 8`.
+    - **Diagnosed Gen 11 Bottleneck:** Because Stage 1–2 distilled strictly from `PT-Gen9` and self-play League PPO without `#2 Hober Malloc` supervision, `4m_ppo_best` under-expanded and conserved too passively (`49.0%` vs `77.1%` active turns, `8.0` vs `10.67` neutral captures, `28.1%` vs `56.1%` `InFlight%` at `t=40`, `40` `ours_HOLD_hober_NEUTRAL` misses across `t=0..65`, `1 vs 5` comets). Next: direct Full-TTA `#2 Hober Malloc` Soft-KD + dense sparring DAgger into the `4.35M` network on RX 6950 XT, followed by Wave 2 DirectML PPO.
+- **Estimated Kaggle Skill Rating (`4.35M PT-Gen10` 2P Specialist + `Gen 7` 4P Specialist):**
+  - **Pure (`34.23 ms/turn`):** **~1,760–1,795** (`+120 Elo` / `66.7%` over `PT-Gen9` across 60 unseen games; still `0–6` below `#2 Hober Malloc = 1800.1` due to lower expansion tempo & comet rate — motivating direct `#2` Soft-KD on RX 6950 XT next).

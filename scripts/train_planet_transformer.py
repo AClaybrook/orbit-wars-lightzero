@@ -38,6 +38,12 @@ if str(REPO_ROOT) not in sys.path:
 if str(REPO_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+from orbit_wars_bot.dml_utils import (  # noqa: E402
+    build_optimizer,
+    cpu_state_dict,
+    one_hot_no_scatter,
+    resolve_train_device,
+)
 from orbit_wars_bot.planet_transformer import (  # noqa: E402
     EDGE_FEAT_DIM,
     MAX_PLANETS,
@@ -649,34 +655,37 @@ def _compute_batch_loss(
     # Masked per-planet cross-entropy over owned planets that have >= 1 legal route
     has_route = le.any(dim=-1)
     valid_dec = om & has_route  # (B, N)
-    if valid_dec.any():
-        flat_logits = logits[valid_dec]  # (M, N+1)
-        flat_tcls = tcls[valid_dec]  # (M,)
-        per_loss = F.cross_entropy(flat_logits, flat_tcls, reduction="none")
-        weights = torch.where(flat_tcls > 0, launch_weight, 1.0)
+    valid_f = valid_dec.float()
+    valid_cnt = float(valid_f.sum().item())
+    if valid_cnt > 0.0:
+        logp_all = F.log_softmax(logits, dim=-1)
+        tcls_oh = one_hot_no_scatter(tcls.clamp(0, N), N + 1, dtype=logp_all.dtype)
+        per_loss = -(logp_all * tcls_oh).sum(dim=-1)
+        weights = torch.where(tcls > 0, float(launch_weight), 1.0) * valid_f
         policy_loss = (per_loss * weights).sum() / weights.sum().clamp_min(1.0)
 
-        preds = flat_logits.argmax(dim=-1)
-        acc_all = float((preds == flat_tcls).float().mean().item())
-        launch_mask = flat_tcls > 0
-        if launch_mask.any():
-            acc_launch = float((preds[launch_mask] == flat_tcls[launch_mask]).float().mean().item())
-            # Target accuracy conditioned on launching (argmax over 1..N)
-            tgt_preds = 1 + flat_logits[launch_mask, 1:].argmax(dim=-1)
-            acc_target = float((tgt_preds == flat_tcls[launch_mask]).float().mean().item())
-        else:
-            acc_launch = 0.0
-            acc_target = 0.0
+        with torch.no_grad():
+            preds = logits.argmax(dim=-1)
+            acc_all = float(((preds == tcls).float() * valid_f).sum().item() / valid_cnt)
+            lm_f = (valid_dec & (tcls > 0)).float()
+            lm_cnt = float(lm_f.sum().item())
+            if lm_cnt > 0.0:
+                acc_launch = float(((preds == tcls).float() * lm_f).sum().item() / lm_cnt)
+                tgt_preds = 1 + logits[..., 1:].argmax(dim=-1)
+                acc_target = float(((tgt_preds == tcls).float() * lm_f).sum().item() / lm_cnt)
+            else:
+                acc_launch = acc_target = 0.0
     else:
         policy_loss = logits.sum() * 0.0
         acc_all = acc_launch = acc_target = 0.0
 
     # Fraction regression loss on actual launch pairs
-    launch_dec = valid_dec & (tcls > 0)
-    if launch_dec.any():
-        dst_idx = (tcls[launch_dec] - 1).clamp(min=0, max=N - 1)
-        pred_f = fracs[launch_dec].gather(1, dst_idx.unsqueeze(1)).squeeze(1)
-        frac_loss = F.smooth_l1_loss(pred_f, tfrac[launch_dec])
+    ldec_f = (valid_dec & (tcls > 0)).float()
+    if float(ldec_f.sum().item()) > 0.0:
+        dst_idx = (tcls - 1).clamp(min=0, max=N - 1)
+        dst_oh = one_hot_no_scatter(dst_idx, N, dtype=fracs.dtype)
+        pred_f = (fracs * dst_oh).sum(dim=-1)
+        frac_loss = (F.smooth_l1_loss(pred_f, tfrac, reduction="none") * ldec_f).sum() / ldec_f.sum().clamp_min(1.0)
     else:
         frac_loss = fracs.sum() * 0.0
 
@@ -708,10 +717,14 @@ def train_model(
     out_path: Path,
     seed: int = 42,
     resume_from: str | None = None,
+    device: str = "cpu",
+    train_threads: int = 4,
 ) -> Path:
+    torch.set_num_threads(max(1, int(train_threads)))
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
+    train_dev, use_dml = resolve_train_device(device)
 
     n = len(data["val_targets"])
     perm = np.random.permutation(n)
@@ -745,15 +758,17 @@ def train_model(
         model = PlanetTimelineTransformer(
             d_model=d_model, n_heads=n_heads, n_layers=n_layers, dim_ff=dim_ff
         )
+    model = model.to(train_dev)
     n_params = sum(p.numel() for p in model.parameters())
+    dev_tag = "dml" if use_dml else str(train_dev)
     print(
-        f"[Train] PlanetTimelineTransformer ({n_params/1e3:.1f}K params) | "
+        f"[Train] PlanetTimelineTransformer ({n_params/1e3:.1f}K params, device={dev_tag}) | "
         f"train={len(tr_idx)} val={len(val_idx)} | epochs={epochs} batch={batch_size} "
         f"lr={lr} launch_w={launch_weight:.2f}",
         flush=True,
     )
 
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    opt = build_optimizer(model.parameters(), lr=lr, weight_decay=1e-4, use_dml=use_dml)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs), eta_min=lr * 0.05)
 
     best_val_loss = float("inf")
@@ -768,14 +783,17 @@ def train_model(
             # Exact 8x D4 dihedral symmetry augmentation on every batch!
             k_rot = random.randrange(4)
             flip_x = bool(random.randrange(2))
-            pf_aug = torch.from_numpy(apply_d4_planet_feats(pf.numpy(), k_rot=k_rot, flip_x=flip_x))
+            pf_aug = torch.from_numpy(apply_d4_planet_feats(pf.numpy(), k_rot=k_rot, flip_x=flip_x)).to(train_dev)
+            tf, ef, le, om, pm, tcls, tfrac, vtar = (
+                t.to(train_dev) for t in (tf, ef, le, om, pm, tcls, tfrac, vtar)
+            )
 
             opt.zero_grad(set_to_none=True)
             loss, m = _compute_batch_loss(
                 model, pf_aug, tf, ef, le, om, pm, tcls, tfrac, vtar, launch_weight=launch_weight
             )
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0, foreach=not use_dml)
             opt.step()
             tr_metrics.append(m)
         sched.step()
@@ -784,7 +802,7 @@ def train_model(
         val_metrics: List[Dict[str, float]] = []
         with torch.no_grad():
             for batch in val_loader:
-                pf, tf, ef, le, om, pm, tcls, tfrac, vtar = batch
+                pf, tf, ef, le, om, pm, tcls, tfrac, vtar = (t.to(train_dev) for t in batch)
                 _, m = _compute_batch_loss(
                     model, pf, tf, ef, le, om, pm, tcls, tfrac, vtar, launch_weight=launch_weight
                 )
@@ -800,7 +818,7 @@ def train_model(
             torch.save(
                 {
                     "model_config": model.config,
-                    "model_state_dict": model.state_dict(),
+                    "model_state_dict": cpu_state_dict(model),
                     "epoch": ep,
                     "val_loss": v_loss,
                     "val_pol_loss": v_pol,
@@ -855,6 +873,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dim-ff", type=int, default=256)
     parser.add_argument("--out", default="checkpoints/planet_transformer_best.pt")
     parser.add_argument("--seed", type=int, default=7000)
+    parser.add_argument("--device", choices=["cpu", "dml", "cuda", "auto"], default="cpu")
+    parser.add_argument("--train-threads", type=int, default=4)
     args = parser.parse_args(argv)
 
     cache = Path(args.dataset_cache) if args.dataset_cache else None
@@ -934,6 +954,8 @@ def main(argv: list[str] | None = None) -> int:
         out_path=Path(args.out),
         seed=args.seed,
         resume_from=args.resume,
+        device=args.device,
+        train_threads=args.train_threads,
     )
     return 0
 
