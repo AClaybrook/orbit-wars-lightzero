@@ -3704,13 +3704,13 @@ def _gen4_ppo_rollout_worker(args_tuple):
     need_b2 = any(j[5] == "boss2" for j in pair_jobs)
     need_b3 = any(j[5] == "boss3" for j in pair_jobs)
     if lua_opp_str and need_b1:
-        lua_pools["boss"] = _get_worker_lua_pool(lua_opp_str, 2)
+        lua_pools["boss"] = _get_worker_lua_pool(lua_opp_str, 3)
     if lua_opp2_str and need_b2:
-        lua_pools["boss2"] = _get_worker_lua_pool(lua_opp2_str, 2)
+        lua_pools["boss2"] = _get_worker_lua_pool(lua_opp2_str, 3)
     if lua_opp3_str and need_b3:
-        lua_pools["boss3"] = _get_worker_lua_pool(lua_opp3_str, 2)
+        lua_pools["boss3"] = _get_worker_lua_pool(lua_opp3_str, 3)
 
-    # Build all episode tasks and pack into conflict-free waves of up to 6 episodes per batched forward pass
+    # Build all episode tasks and pack into conflict-free waves of up to 10 episodes per batched forward pass
     pending = []
     pair_meta = []
     for p_idx, (map_seed, n_pl, w, h, sym, opp_kind, opp_idx) in enumerate(pair_jobs):
@@ -3751,7 +3751,7 @@ def _gen4_ppo_rollout_worker(args_tuple):
         still = []
         for item in pending:
             p_idx, side_idx, lua_key, spec = item
-            if len(wave_specs) >= 6:
+            if len(wave_specs) >= 10:
                 still.append(item)
                 continue
             if lua_key is not None:
@@ -4122,11 +4122,11 @@ def _gen4_val_worker(args_tuple):
     lua_pools: Dict[str, List] = {"boss": [], "boss2": [], "boss3": []}
     needed_kinds = {j[1] for j in val_jobs}
     if "boss" in needed_kinds and lua1_str:
-        lua_pools["boss"] = _get_worker_lua_pool(lua1_str, 2)
+        lua_pools["boss"] = _get_worker_lua_pool(lua1_str, 3)
     if "boss2" in needed_kinds and lua2_str:
-        lua_pools["boss2"] = _get_worker_lua_pool(lua2_str, 2)
+        lua_pools["boss2"] = _get_worker_lua_pool(lua2_str, 3)
     if "boss3" in needed_kinds and lua3_str:
-        lua_pools["boss3"] = _get_worker_lua_pool(lua3_str, 2)
+        lua_pools["boss3"] = _get_worker_lua_pool(lua3_str, 3)
 
     heur_bots = {
         "tactical": GalconTacticalBot(),
@@ -4143,7 +4143,7 @@ def _gen4_val_worker(args_tuple):
         still = []
         for job in pending:
             bucket, opp_kind, g_seed, n_p, ww, hh, max_t, sym, a_p = job
-            if len(wave) >= 6:
+            if len(wave) >= 10:
                 still.append(job)
                 continue
             if opp_kind in lua_pools and lua_pools[opp_kind]:
@@ -4815,7 +4815,30 @@ def _merge_datasets(ds_list: Sequence[Dict[str, np.ndarray]]) -> Dict[str, np.nd
     valid = [d for d in ds_list if d and len(next(iter(d.values()))) > 0]
     if not valid:
         return {}
-    return {k: np.concatenate([d[k] for d in valid], axis=0) for k in valid[0].keys()}
+    common_keys = [k for k in valid[0].keys() if all(k in d for d in valid)]
+    return {k: np.concatenate([d[k] for d in valid], axis=0) for k in common_keys}
+
+
+def save_ei_dataset_npz(path: str | Path, data: Dict[str, np.ndarray]) -> None:
+    """Persist a Gen 4 Search-EI dataset dict to a compressed ``.npz`` replay buffer file."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(str(p), **data)
+
+
+def load_ei_dataset_npz(paths_spec: str | Sequence[str | Path]) -> Dict[str, np.ndarray]:
+    """Load and merge one or more comma-separated ``.npz`` EI replay buffer files."""
+    if isinstance(paths_spec, (str, Path)):
+        raw_paths = [Path(s.strip()) for s in str(paths_spec).split(",") if s.strip()]
+    else:
+        raw_paths = [Path(s) for s in paths_spec if str(s).strip()]
+    loaded: List[Dict[str, np.ndarray]] = []
+    for p in raw_paths:
+        if not p.is_file():
+            raise FileNotFoundError(f"EI replay buffer file not found: {p}")
+        with np.load(str(p)) as z:
+            loaded.append({k: z[k] for k in z.files})
+    return _merge_datasets(loaded)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -4839,6 +4862,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--v-anchor-coef", type=float, default=0.0)
     parser.add_argument("--kd-alpha", type=float, default=0.30)
     parser.add_argument("--filter-draws", action="store_true", help="Mask boss stalemate draws from EI policy loss while keeping value/aux supervision.")
+    parser.add_argument("--save-ei-npz", default="", help="Optional path to save newly collected Gen 4 Search-EI dataset (.npz) for fast replay/pooling.")
+    parser.add_argument("--load-ei-npz", default="", help="Optional comma-separated .npz EI replay buffer paths to pool with newly collected games (or train directly if --search-games 0).")
     parser.add_argument("--eval-every", type=int, default=4)
     parser.add_argument("--redir-npz", default="checkpoints/galcon_gen2_redir.npz")
     parser.add_argument("--bc-games", type=int, default=80)
@@ -4957,21 +4982,44 @@ def main(argv: list[str] | None = None) -> int:
         lua_p = args.lua_opp or None
         lua_p2 = args.lua_opp2 or None
         lua_p3 = args.lua_opp3 or None
-        g4_data, g4_redir = collect_gen4_multisend_ei_dataset(
-            resume_p,
-            num_games=args.search_games,
-            seed=args.seed,
-            lua_opp_path=lua_p,
-            lua_opp2_path=lua_p2,
-            lua_opp3_path=lua_p3,
-            ckpt_path2=resume_p2,
-            large_map_prob=args.large_map_prob,
-            filter_draw_policy=args.filter_draws,
-            workers=args.workers,
-        )
+
+        datasets_to_pool: List[Dict[str, np.ndarray]] = []
+        if args.load_ei_npz:
+            cached = load_ei_dataset_npz(args.load_ei_npz)
+            if cached:
+                n_cached = len(next(iter(cached.values())))
+                print(f"[Galcon-Gen4-EI] Loaded {n_cached} cached replay states from {args.load_ei_npz}", flush=True)
+                datasets_to_pool.append(cached)
+
+        g4_redir: Dict[str, np.ndarray] = {}
+        if args.search_games > 0:
+            fresh_data, g4_redir = collect_gen4_multisend_ei_dataset(
+                resume_p,
+                num_games=args.search_games,
+                seed=args.seed,
+                lua_opp_path=lua_p,
+                lua_opp2_path=lua_p2,
+                lua_opp3_path=lua_p3,
+                ckpt_path2=resume_p2,
+                large_map_prob=args.large_map_prob,
+                filter_draw_policy=args.filter_draws,
+                workers=args.workers,
+            )
+            if args.save_ei_npz and fresh_data:
+                save_ei_dataset_npz(args.save_ei_npz, fresh_data)
+                print(
+                    f"[Galcon-Gen4-EI] Saved {len(next(iter(fresh_data.values())))} EI replay states -> {args.save_ei_npz}",
+                    flush=True,
+                )
+            datasets_to_pool.append(fresh_data)
+
+        g4_data = _merge_datasets(datasets_to_pool)
+        if not g4_data:
+            raise ValueError("gen4_ei requires either --search-games > 0 or a non-empty --load-ei-npz buffer.")
         old_r = _load_redir_npz()
-        merged_r = _merge_datasets([old_r, g4_redir]) if old_r else g4_redir
-        _save_redir_npz(merged_r)
+        merged_r = _merge_datasets([old_r, g4_redir]) if (old_r and g4_redir) else (g4_redir or old_r)
+        if g4_redir:
+            _save_redir_npz(merged_r)
         train_gen4_multisend_supervised(
             g4_data,
             merged_r,
