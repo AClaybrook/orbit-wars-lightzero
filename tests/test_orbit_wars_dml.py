@@ -324,3 +324,87 @@ def test_ensemble_labeler_gpu_and_cpu():
     assert np.allclose(row_sums, 1.0, atol=2e-3)
     assert np.all(np.isfinite(labeled["val_targets"]))
     assert np.all((labeled["val_targets"] >= -1.05) & (labeled["val_targets"] <= 1.05))
+
+
+def test_gen11_search_allin_eval_specs_and_contiguous_val(tmp_path: Path):
+    from distill_soft_kd import train_soft_kd
+    from evaluate import _parse_threshold_spec, resolve_agent
+    from orbit_wars_bot.planet_transformer import SearchPlanetTransformerAgent
+
+    sim = FastOrbitSim.from_seed(seed=303, num_agents=2, max_steps=60)
+    for _ in range(15):
+        sim.step([[], []])
+    obs = sim.to_observation(player=0)
+    enc = extract_planet_features(obs, player=0, max_speed=sim.ship_speed)
+    pad = pad_encoded_state(enc, MAX_PLANETS)
+
+    m = PlanetTimelineTransformer(d_model=32, n_heads=2, n_layers=1, dim_ff=64, use_aux_future=True)
+    ckpt = tmp_path / "tiny_gen11.pt"
+    torch.save({"model_config": m.config, "model_state_dict": m.state_dict()}, ckpt)
+
+    # 1. All-in + neural_mid_replan Search agent
+    s_ag = SearchPlanetTransformerAgent(
+        ckpt,
+        launch_threshold=0.05,
+        use_d4_tta=True,
+        force_all_in=True,
+        neural_mid_replan=True,
+        rollout_horizon=6,
+        time_budget_sec=0.35,
+    )
+    moves = s_ag.act(obs, sim.to_config())
+    assert isinstance(moves, list)
+    gar_by_pid = {int(row[0]): int(row[5]) for row in obs["planets"] if int(row[1]) == 0}
+    for mv in moves:
+        assert int(mv[2]) == gar_by_pid[int(mv[0])]
+
+    # 2. evaluate.py threshold suffix specs
+    assert _parse_threshold_spec("pt_d4_allin", f"pt_d4_allin_t53:{ckpt}") == (True, 0.53, str(ckpt))
+    assert _parse_threshold_spec("pt_search_d4_allin", "pt_search_d4_allin") == (True, 0.50, None)
+    assert callable(resolve_agent(f"pt_d4_allin_t53:{ckpt}"))
+    assert callable(resolve_agent(f"pt_ens_allin_t56:{ckpt},{ckpt}"))
+    assert callable(resolve_agent(f"pt_search_d4_allin_t53:{ckpt}"))
+
+    # 3. contiguous_val split on synthetic Soft-KD data
+    n_samples = 12
+    soft_q = np.zeros((MAX_PLANETS, MAX_PLANETS + 1), dtype=np.float16)
+    soft_q[:, 0] = 1.0
+    data = {
+        "planet_feats": np.stack([pad["planet_feats"]] * n_samples, axis=0),
+        "timeline_feats": np.stack([pad["timeline_feats"]] * n_samples, axis=0),
+        "edge_feats": np.stack([pad["edge_feats"]] * n_samples, axis=0),
+        "legal_edges": np.stack([pad["legal_edges"]] * n_samples, axis=0),
+        "owned_mask": np.stack([pad["owned_mask"]] * n_samples, axis=0),
+        "pad_mask": np.stack([pad["pad_mask"]] * n_samples, axis=0),
+        "soft_probs": np.stack([soft_q] * n_samples, axis=0),
+        "val_targets": np.linspace(-1.0, 1.0, n_samples, dtype=np.float32),
+        "aux_owner": np.zeros((n_samples, MAX_PLANETS), dtype=np.int64),
+        "aux_ships": np.zeros((n_samples, MAX_PLANETS), dtype=np.float32),
+        "aux_valid": np.stack([pad["pad_mask"]] * n_samples, axis=0),
+    }
+    out_ckpt = tmp_path / "out_contiguous.pt"
+    saved = train_soft_kd(
+        data,
+        resume_from=str(ckpt),
+        out_path=out_ckpt,
+        epochs=1,
+        batch_size=4,
+        lr=1e-4,
+        contiguous_val=True,
+        device="cpu",
+    )
+    assert saved.is_file()
+
+    # 4. Slot-1 missing step preservation check in Soft-KD feature extraction
+    from kaggle_environments import make
+
+    k_env = make("orbit_wars", configuration={"seed": 200}, debug=False)
+    k_steps = k_env.run(["starter", "starter"])
+    t_chk = min(10, len(k_steps) - 1)
+    assert k_steps[t_chk][1]["observation"].get("step") is None
+    obs_s1 = dict(k_steps[t_chk][1]["observation"])
+    obs_s1["player"] = 1
+    obs_s1["step"] = int(k_steps[t_chk][0]["observation"].get("step", t_chk))
+    enc_s1 = extract_planet_features(obs_s1, player=1)
+    assert enc_s1.current_step == t_chk
+    assert abs(float(enc_s1.planet_feats[0, 16]) * 500.0 - t_chk) < 1e-4

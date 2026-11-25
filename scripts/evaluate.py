@@ -18,6 +18,7 @@ import importlib.util
 import inspect
 import os
 import random
+import re
 import sys
 import tarfile
 import time
@@ -153,6 +154,16 @@ def _resolve_hober_main_path() -> Path:
     return direct_main
 
 
+def _parse_threshold_spec(prefix_base: str, spec: str) -> tuple[bool, float, str | None]:
+    """Match ``<prefix_base>[_tNN][:<arg>]`` and return ``(matched, threshold, arg)``."""
+    m = re.fullmatch(rf"{re.escape(prefix_base)}(?:_t(\d{{2}}))?(?::(.*))?", spec)
+    if not m:
+        return False, 0.50, None
+    thr = int(m.group(1)) / 100.0 if m.group(1) is not None else 0.50
+    arg = m.group(2) if m.group(2) else None
+    return True, thr, arg
+
+
 def resolve_agent(spec: str, checkpoint: str | None = None, sims: int = 20, time_budget: float = 0.35):
     """Resolve an agent identifier or file path to a Kaggle Environments agent."""
     if spec in ("random", "starter", "do_nothing"):
@@ -181,12 +192,17 @@ def resolve_agent(spec: str, checkpoint: str | None = None, sims: int = 20, time
         override_ckpt = spec.split(":", 1)[1] if ":" in spec else None
         ckpt_path = override_ckpt or checkpoint or str(REPO_ROOT / "checkpoints" / "planet_transformer_best.pt")
         return create_planet_transformer_agent(checkpoint_path=ckpt_path, use_d4_tta=True)
-    if spec.startswith("pt_d4_allin:") or spec == "pt_d4_allin":
+    matched_allin, thr_allin, arg_allin = _parse_threshold_spec("pt_d4_allin", spec)
+    if matched_allin:
         from orbit_wars_bot.planet_transformer import create_planet_transformer_agent
 
-        override_ckpt = spec.split(":", 1)[1] if ":" in spec else None
-        ckpt_path = override_ckpt or checkpoint or str(REPO_ROOT / "checkpoints" / "planet_transformer_best.pt")
-        return create_planet_transformer_agent(checkpoint_path=ckpt_path, use_d4_tta=True, force_all_in=True)
+        ckpt_path = arg_allin or checkpoint or str(REPO_ROOT / "checkpoints" / "planet_transformer_best.pt")
+        return create_planet_transformer_agent(
+            checkpoint_path=ckpt_path,
+            launch_threshold=thr_allin,
+            use_d4_tta=True,
+            force_all_in=True,
+        )
     if spec.startswith("pt_d4_gen9:") or spec == "pt_d4_gen9":
         from orbit_wars_bot.planet_transformer import create_planet_transformer_agent
 
@@ -197,6 +213,20 @@ def resolve_agent(spec: str, checkpoint: str | None = None, sims: int = 20, time
             use_d4_tta=True,
             force_all_in=True,
             reinforce_threshold=0.60,
+        )
+    matched_search_allin, thr_s_allin, arg_s_allin = _parse_threshold_spec("pt_search_d4_allin", spec)
+    if matched_search_allin:
+        from orbit_wars_bot.planet_transformer import create_search_planet_transformer_agent
+
+        ckpt_path = arg_s_allin or checkpoint or str(REPO_ROOT / "checkpoints" / "planet_transformer_best.pt")
+        return create_search_planet_transformer_agent(
+            checkpoint_path=ckpt_path,
+            launch_threshold=thr_s_allin,
+            use_d4_tta=True,
+            force_all_in=True,
+            neural_mid_replan=True,
+            rollout_horizon=10,
+            time_budget_sec=min(0.35, time_budget),
         )
     if spec in ("planet_transformer_search", "pt_search") or spec.startswith("planet_transformer_search:") or spec.startswith("pt_search:"):
         from orbit_wars_bot.planet_transformer import create_search_planet_transformer_agent
@@ -217,17 +247,27 @@ def resolve_agent(spec: str, checkpoint: str | None = None, sims: int = 20, time
             use_d4_tta=True,
             time_budget_sec=min(0.26, time_budget),
         )
-    if spec.startswith("planet_transformer_ensemble:") or spec.startswith("pt_ens:") or spec.startswith("pt_ens_d4:") or spec.startswith("pt_ens_allin:"):
+    matched_ens_allin, thr_ens_allin, arg_ens_allin = _parse_threshold_spec("pt_ens_allin", spec)
+    if matched_ens_allin and arg_ens_allin:
         from orbit_wars_bot.planet_transformer import create_ensemble_planet_transformer_agent
 
-        use_d4 = spec.startswith("pt_ens_d4:") or spec.startswith("pt_ens_allin:")
-        all_in = spec.startswith("pt_ens_allin:")
+        ckpt_paths = [p.strip() for p in arg_ens_allin.split(",") if p.strip()]
+        return create_ensemble_planet_transformer_agent(
+            checkpoint_paths=ckpt_paths,
+            launch_threshold=thr_ens_allin,
+            use_d4_tta=True,
+            force_all_in=True,
+        )
+    if spec.startswith("planet_transformer_ensemble:") or spec.startswith("pt_ens:") or spec.startswith("pt_ens_d4:"):
+        from orbit_wars_bot.planet_transformer import create_ensemble_planet_transformer_agent
+
+        use_d4 = spec.startswith("pt_ens_d4:")
         raw_paths = spec.split(":", 1)[1]
         ckpt_paths = [p.strip() for p in raw_paths.split(",") if p.strip()]
         return create_ensemble_planet_transformer_agent(
             checkpoint_paths=ckpt_paths,
             use_d4_tta=use_d4,
-            force_all_in=all_in,
+            force_all_in=False,
         )
     if spec.startswith("pt_specialist:"):
         from orbit_wars_bot.planet_transformer import EnsemblePlanetTransformerAgent, PlanetTransformerAgent
