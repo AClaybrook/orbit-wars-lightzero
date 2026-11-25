@@ -2650,6 +2650,8 @@ def collect_gen4_multisend_ei_dataset(
             prior_bonus=0.010,
         )
     else:
+        from galcon.gen5_model import GalconGen5Transformer
+
         search_ag = GalconSearchTransformerAgent(
             ckpt_path,
             use_d4_canonical=True,
@@ -2661,6 +2663,10 @@ def collect_gen4_multisend_ei_dataset(
             opponent_adaptive=True,
             prior_bonus=0.010,
         )
+        if isinstance(search_ag.model, GalconGen5Transformer):
+            search_ag.neural_value_weight = 0.75
+            search_ag.enable_rescue_snipe = True
+            search_ag.enable_opp_direct_rush = True
 
     pf_l, tf_l, ef_l, le_l, om_l, pm_l = [], [], [], [], [], []
     ms_tar_l, ms_fr_l, t_msp_l, vt_l, aux_o_l, aux_s_l = [], [], [], [], [], []
@@ -2935,7 +2941,14 @@ def _gen4_multisend_loss(
         pf, tf, ef, le, om, pm, ms_tar, ms_fr, aux_own, aux_shp = _trim_batch_n(
             pf, tf, ef, le, om, pm, ms_tar, ms_fr, aux_own, aux_shp
         )
-    ms_logits, ms_frac_pred, val, aux_pred = model.forward_multi_send(pf, tf, ef, pm, return_aux=True)
+    has_wdl = hasattr(model, "decode_wdl_from_hidden")
+    if has_wdl:
+        ms_logits, ms_frac_pred, val, wdl_logits, aux_pred = model.forward_multi_send(
+            pf, tf, ef, pm, return_aux=True, return_wdl=True
+        )
+    else:
+        ms_logits, ms_frac_pred, val, aux_pred = model.forward_multi_send(pf, tf, ef, pm, return_aux=True)
+        wdl_logits = None
 
     edge_valid = om.unsqueeze(-1) & le
     ev_f = edge_valid.float()
@@ -2969,7 +2982,19 @@ def _gen4_multisend_loss(
     else:
         frac_loss = ms_frac_pred.sum() * 0.0
 
-    v_loss = F.mse_loss(val, vtar)
+    if wdl_logits is not None:
+        # Calibrated exact-mean-preserving quadratic soft-WDL targets:
+        # t_draw = 0.65 * (1 - |v|)^2, t_win = (1 - t_draw + v)/2, t_loss = (1 - t_draw - v)/2
+        # Guarantees t_win + t_draw + t_loss == 1 AND t_win - t_loss == v while avoiding bogus draw mass on wins.
+        vt_c = vtar.clamp(-1.0, 1.0)
+        t_draw = 0.65 * (1.0 - vt_c.abs()).pow(2)
+        t_win = (1.0 - t_draw + vt_c).mul(0.5).clamp(0.0, 1.0)
+        t_loss = (1.0 - t_draw - vt_c).mul(0.5).clamp(0.0, 1.0)
+        t_wdl = torch.stack([t_loss, t_draw, t_win], dim=-1)
+        wdl_ce = -(t_wdl * F.log_softmax(wdl_logits, dim=-1)).sum(dim=-1).mean()
+        v_loss = 0.65 * wdl_ce + 0.50 * F.mse_loss(val, vt_c)
+    else:
+        v_loss = F.mse_loss(val, vtar)
     vsign = float(((val >= 0) == (vtar >= 0)).float().mean().item())
     pm_f = pm.float()
     pm_sum = pm_f.sum()
@@ -2989,25 +3014,35 @@ def _gen4_multisend_loss(
         aux_acc = 0.0
 
     total = pol_loss + 0.85 * frac_loss + 0.35 * v_loss + 0.22 * aux_loss
-    return total, {"bce": float(pol_loss.item()), "rec": rec, "prec": prec, "vsign": vsign, "aux": aux_acc}
+    return total, {
+        "bce": float(pol_loss.item()),
+        "v_loss": float(v_loss.item()),
+        "rec": rec,
+        "prec": prec,
+        "vsign": vsign,
+        "aux": aux_acc,
+    }
 
 
 def train_gen4_multisend_supervised(
     data: Dict[str, np.ndarray],
     redir_data: Dict[str, np.ndarray],
     *,
-    resume_from: Path,
+    resume_from: Optional[Path],
     out_path: Path,
     epochs: int = 8,
     batch_size: int = 96,
     lr: float = 3.5e-4,
     kd_alpha: float = 0.30,
+    arch: str = "gen4",
     seed: int = 42,
     label: str = "Gen4-MultiSend-EI",
     train_threads: int = 2,
     device: str = "cpu",
 ) -> Path:
-    """Warm-start ``GalconGen4Transformer`` and train with Hybrid Search-EI + Ensemble Soft-KD in Canonical D4."""
+    """Warm-start ``GalconGen4Transformer`` or train ``GalconGen5Transformer`` with Hybrid Search-EI + Soft-KD."""
+    from galcon.gen5_model import GalconGen5Transformer, build_galcon_gen5_transformer
+
     torch.set_num_threads(max(1, int(train_threads)))
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -3015,9 +3050,19 @@ def train_gen4_multisend_supervised(
     train_dev, use_dml = resolve_train_device(device)
 
     n = len(data["val_targets"])
-    perm = np.random.permutation(n)
-    n_val = max(1, int(0.10 * n))
-    val_idx, tr_idx = perm[:n_val], perm[n_val:]
+    # Contiguous game-block held-out validation split (~64 states/block) to prevent adjacent-tick leakage
+    if n >= 256:
+        block_sz = 64
+        n_blocks = (n + block_sz - 1) // block_sz
+        block_perm = np.random.permutation(n_blocks)
+        n_val_blocks = max(1, int(round(0.10 * n_blocks)))
+        val_blocks = set(block_perm[:n_val_blocks].tolist())
+        val_idx = np.array([i for i in range(n) if (i // block_sz) in val_blocks], dtype=np.int64)
+        tr_idx = np.array([i for i in range(n) if (i // block_sz) not in val_blocks], dtype=np.int64)
+    else:
+        perm = np.random.permutation(n)
+        n_val = max(1, int(0.10 * n))
+        val_idx, tr_idx = perm[:n_val], perm[n_val:]
     has_kd = "teacher_ms_prob" in data and kd_alpha > 0.0
 
     def make_ds(idx):
@@ -3063,32 +3108,62 @@ def train_gen4_multisend_supervised(
         )
         redir_loader = DataLoader(rds, batch_size=32, shuffle=True)
 
-    ckpt = torch.load(str(resume_from), map_location="cpu", weights_only=False)
-    cfg = ckpt["model_config"]
-    model = build_galcon_gen4_transformer(
-        d_model=int(cfg["d_model"]),
-        n_heads=int(cfg["n_heads"]),
-        n_layers=int(cfg["n_layers"]),
-        dim_ff=int(cfg["dim_ff"]),
-        feature_version=int(cfg.get("feature_version", 2)),
-    )
-    missing, _ = model.load_state_dict(ckpt["model_state_dict"], strict=False)
-    model = model.to(train_dev)
+    ckpt = torch.load(str(resume_from), map_location="cpu", weights_only=False) if (resume_from is not None and resume_from.is_file()) else None
+    is_gen5_ckpt = bool(ckpt is not None and ckpt.get("model_config", {}).get("model_class") == "GalconGen5Transformer")
+    use_gen5 = (arch == "gen5") or is_gen5_ckpt
     dev_tag = "dml" if use_dml else str(train_dev)
     kd_tag = f", kd_alpha={kd_alpha:.2f}" if has_kd else ""
-    print(f"  [{label}] Warm-started from {resume_from.name} (new multi-send params: {len(missing)} tensors, device={dev_tag}{kd_tag})", flush=True)
 
-    # Give the newly initialized multi-send head 3x higher LR than the warm-started trunk
-    ms_params = [p for k, p in model.named_parameters() if k.startswith("ms_")]
-    base_params = [p for k, p in model.named_parameters() if not k.startswith("ms_")]
+    if use_gen5:
+        label = "Gen5-EdgeGated-WDL-EI"
+        if is_gen5_ckpt and ckpt is not None:
+            cfg = ckpt["model_config"]
+            model: nn.Module = GalconGen5Transformer(
+                d_model=int(cfg.get("d_model", 192)),
+                n_heads=int(cfg.get("n_heads", 6)),
+                n_layers=int(cfg.get("n_layers", 6)),
+                dim_ff=int(cfg.get("dim_ff", 384)),
+                edge_hidden=int(cfg.get("edge_hidden", 24)),
+                num_val_queries=int(cfg.get("num_val_queries", 4)),
+                feature_version=int(cfg.get("feature_version", 2)),
+                dropout=float(cfg.get("dropout", 0.08)),
+            )
+            model.load_state_dict(ckpt["model_state_dict"], strict=False)
+            src_desc = f"Warm-started Gen5 from {resume_from.name}" if resume_from is not None else "Gen5"
+            param_groups = [{"params": list(model.parameters()), "lr": lr}]
+        else:
+            model = build_galcon_gen5_transformer(dropout=0.08)
+            src_desc = f"Fresh Gen5 ({sum(p.numel() for p in model.parameters())/1e6:.2f}M params, drop=0.08)"
+            param_groups = [{"params": list(model.parameters()), "lr": lr}]
+        model = model.to(train_dev)
+        print(f"  [{label}] {src_desc} (device={dev_tag}{kd_tag}, block_val={len(val_idx)}/{n})", flush=True)
+    else:
+        assert ckpt is not None and resume_from is not None
+        cfg = ckpt["model_config"]
+        model = build_galcon_gen4_transformer(
+            d_model=int(cfg["d_model"]),
+            n_heads=int(cfg["n_heads"]),
+            n_layers=int(cfg["n_layers"]),
+            dim_ff=int(cfg["dim_ff"]),
+            feature_version=int(cfg.get("feature_version", 2)),
+        )
+        missing, _ = model.load_state_dict(ckpt["model_state_dict"], strict=False)
+        model = model.to(train_dev)
+        print(f"  [{label}] Warm-started from {resume_from.name} (new multi-send params: {len(missing)} tensors, device={dev_tag}{kd_tag})", flush=True)
+        # Give the newly initialized multi-send head 3x higher LR than the warm-started trunk
+        ms_params = [p for k, p in model.named_parameters() if k.startswith("ms_")]
+        base_params = [p for k, p in model.named_parameters() if not k.startswith("ms_")]
+        param_groups = [{"params": base_params, "lr": lr * 0.45}, {"params": ms_params, "lr": lr * 2.5}]
+
+    ms_pos_weight = 2.2 if use_gen5 else 4.5
     opt = _build_optimizer(
-        [{"params": base_params, "lr": lr * 0.45}, {"params": ms_params, "lr": lr * 2.5}],
+        param_groups,
         lr=lr,
-        weight_decay=1e-4,
+        weight_decay=(2.5e-3 if use_gen5 else 1e-4),
         use_dml=use_dml,
     )
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs), eta_min=lr * 0.08)
-    best_bce = float("inf")
+    best_metric = float("inf")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
 
@@ -3101,7 +3176,21 @@ def train_gen4_multisend_supervised(
             t_msp = bt[11] if has_kd else None
             opt.zero_grad(set_to_none=True)
             loss, _ = _gen4_multisend_loss(
-                model, pf, tf, ef, le, om, pm, mst, msf, vt, ao, ashp, t_msp=t_msp, kd_alpha=(kd_alpha if has_kd else 0.0)
+                model,
+                pf,
+                tf,
+                ef,
+                le,
+                om,
+                pm,
+                mst,
+                msf,
+                vt,
+                ao,
+                ashp,
+                pos_weight=ms_pos_weight,
+                t_msp=t_msp,
+                kd_alpha=(kd_alpha if has_kd else 0.0),
             )
             if r_iter is not None and (b_idx % 4 == 0):
                 try:
@@ -3125,12 +3214,28 @@ def train_gen4_multisend_supervised(
                 pf, tf, ef, le, om, pm, mst, msf, vt, ao, ashp = bt[:11]
                 t_msp = bt[11] if has_kd else None
                 _, m = _gen4_multisend_loss(
-                    model, pf, tf, ef, le, om, pm, mst, msf, vt, ao, ashp, t_msp=t_msp, kd_alpha=(kd_alpha if has_kd else 0.0)
+                    model,
+                    pf,
+                    tf,
+                    ef,
+                    le,
+                    om,
+                    pm,
+                    mst,
+                    msf,
+                    vt,
+                    ao,
+                    ashp,
+                    pos_weight=ms_pos_weight,
+                    t_msp=t_msp,
+                    kd_alpha=(kd_alpha if has_kd else 0.0),
                 )
                 vm.append(m)
         v_bce = float(np.mean([x["bce"] for x in vm]))
-        if v_bce < best_bce:
-            best_bce = v_bce
+        v_vloss = float(np.mean([x["v_loss"] for x in vm]))
+        sel_metric = (v_bce + 0.15 * v_vloss) if use_gen5 else v_bce
+        if sel_metric < best_metric:
+            best_metric = sel_metric
             torch.save(
                 {
                     "model_config": model.config,
@@ -3139,12 +3244,13 @@ def train_gen4_multisend_supervised(
                     "has_trained_multi_send": True,
                     "use_canonical_d4": True,
                     "val_ms_bce": v_bce,
+                    "val_v_loss": v_vloss,
                 },
                 out_path,
             )
         if ep == 1 or ep % 2 == 0 or ep == epochs:
             print(
-                f"  [{label}] ep {ep:2d}/{epochs} ({time.time()-t0:4.1f}s) | val_bce={v_bce:.3f} "
+                f"  [{label}] ep {ep:2d}/{epochs} ({time.time()-t0:4.1f}s) | val_bce={v_bce:.3f} vloss={v_vloss:.3f} "
                 f"rec={100*np.mean([x['rec'] for x in vm]):5.1f}% prec={100*np.mean([x['prec'] for x in vm]):5.1f}% "
                 f"aux={100*np.mean([x['aux'] for x in vm]):5.1f}% vsign={100*np.mean([x['vsign'] for x in vm]):5.1f}%",
                 flush=True,
@@ -3231,10 +3337,26 @@ def _fast_gen4_neural_act(
     return orders
 
 
-def _load_gen4_policy_from_ckpt(ckpt_path: Path, *, allow_non_ms: bool = False) -> GalconPlanetTransformer:
-    """Instantiate a ``GalconPlanetTransformer`` directly from a saved checkpoint dict."""
+def _load_gen4_policy_from_ckpt(ckpt_path: Path, *, allow_non_ms: bool = False):
+    """Instantiate a ``GalconPlanetTransformer`` or ``GalconGen5Transformer`` directly from a saved checkpoint dict."""
+    from galcon.gen5_model import GalconGen5Transformer
+
     ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
     cfg = ckpt["model_config"]
+    if cfg.get("model_class") == "GalconGen5Transformer" or any(
+        k.startswith("val_wdl_head.") for k in ckpt["model_state_dict"]
+    ):
+        model = GalconGen5Transformer(
+            d_model=int(cfg.get("d_model", 192)),
+            n_heads=int(cfg.get("n_heads", 6)),
+            n_layers=int(cfg.get("n_layers", 6)),
+            dim_ff=int(cfg.get("dim_ff", 384)),
+            edge_hidden=int(cfg.get("edge_hidden", 24)),
+            num_val_queries=int(cfg.get("num_val_queries", 4)),
+            feature_version=int(cfg.get("feature_version", 2)),
+        )
+        model.load_state_dict(ckpt["model_state_dict"])
+        return model
     enable_ms = (
         bool(cfg.get("enable_multi_send", False) or any(k.startswith("ms_head.") for k in ckpt["model_state_dict"]))
         if allow_non_ms
@@ -4861,6 +4983,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--kl-coef", type=float, default=0.030)
     parser.add_argument("--v-anchor-coef", type=float, default=0.0)
     parser.add_argument("--kd-alpha", type=float, default=0.30)
+    parser.add_argument("--arch", choices=["gen4", "gen5"], default="gen4", help="Model architecture for gen4_ei supervised/KD training (gen4=1.29M, gen5=2.93M Edge-Gated WDL).")
     parser.add_argument("--filter-draws", action="store_true", help="Mask boss stalemate draws from EI policy loss while keeping value/aux supervision.")
     parser.add_argument("--save-ei-npz", default="", help="Optional path to save newly collected Gen 4 Search-EI dataset (.npz) for fast replay/pooling.")
     parser.add_argument("--load-ei-npz", default="", help="Optional comma-separated .npz EI replay buffer paths to pool with newly collected games (or train directly if --search-games 0).")
@@ -4978,7 +5101,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.stage == "gen4_ei":
         resume_p = Path(args.resume) if args.resume else Path("checkpoints/galcon_transformer_best.pt")
         resume_p2 = Path(args.resume2) if args.resume2 else None
-        student_p = Path(args.student_init) if args.student_init else resume_p
+        student_p = Path(args.student_init) if args.student_init else (None if args.arch == "gen5" and not args.student_init else resume_p)
         lua_p = args.lua_opp or None
         lua_p2 = args.lua_opp2 or None
         lua_p3 = args.lua_opp3 or None
@@ -5026,8 +5149,9 @@ def main(argv: list[str] | None = None) -> int:
             resume_from=student_p,
             out_path=out_path,
             epochs=args.epochs,
-            lr=args.lr if args.lr > 0 else 3.5e-4,
+            lr=args.lr if args.lr > 0 else (4.5e-4 if args.arch == "gen5" else 3.5e-4),
             kd_alpha=args.kd_alpha,
+            arch=args.arch,
             seed=args.seed,
             train_threads=args.train_threads,
             device=args.device,
