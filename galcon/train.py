@@ -3223,9 +3223,8 @@ def _run_gen4_ppo_episode(
             if not sim.done:
                 sim.step({})
             new_pot = evaluate_galcon_state(sim, ours_pid)
-            # Wave 9 opening shaping: emphasize potential delta during ticks 0..20 to close early production gaps
-            pot_scale = 0.085 if cur_tick <= 20 else 0.05
-            step_rew = pot_scale * (new_pot - prev_pot)
+            # Uniform 0.05 potential shaping (Wave 9's 0.085 opening boost caused greedy early over-expansion vs Sparky/Waffle3z)
+            step_rew = 0.05 * (new_pot - prev_pot)
             prev_pot = new_pot
             ep_steps.append((cur_tick, pad, a_pad, f_pad, total_lp, v_pred, step_rew))
         else:
@@ -3698,9 +3697,14 @@ def rl_mirror_league_ppo_gen4(
             std_opps.append(("boss3", lua_opp3, 8))
         for oi, (tag, ob, ng) in enumerate(std_opps):
             for k in range(ng):
-                g_rng = random.Random(39000 + oi * 100 + k)
-                n_p, ww, hh = _sample_map_config(g_rng)
-                s = GalconSim.create(seed=39000 + oi * 100 + k, num_planets=n_p, width=ww, height=hh, max_ticks=200)
+                if tag in ("boss", "boss3") and k < (ng // 2):
+                    n_p, ww, hh = 18, 400.0, 240.0
+                    g_seed = 39000 + oi * 100 + (k // 2)
+                else:
+                    g_seed = 39000 + oi * 100 + k
+                    g_rng = random.Random(g_seed)
+                    n_p, ww, hh = _sample_map_config(g_rng)
+                s = GalconSim.create(seed=g_seed, num_planets=n_p, width=ww, height=hh, max_ticks=200)
                 a_p = 1 if (k % 2 == 0) else 2
                 b_p = 2 if a_p == 1 else 1
                 while not s.done:

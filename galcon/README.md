@@ -1,20 +1,22 @@
-# Galcon AI Wave 10A — Waffle3z-GA (`bots_waffle3z_optimized`) Boss Integration & Triple-Boss Objective + Wave 9 `33 ms` Single-Model Champion
+# Galcon AI Wave 10 — Waffle3z-GA (`bots_waffle3z_optimized`) & Triple-Boss Champions (`66.3%` Sparky • `68.8%–70.0%` Waffle3z-GA • `66.7%–83.3%` Large)
 
 A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-lightzero` that cross-pollinates our Orbit Wars **`PlanetTimelineTransformer`** (`orbit_wars_bot/planet_transformer.py`) to classic Galcon, Phil Hassey's official **`gbots`** protocol, and zero-copy head-to-head benchmarking against Evan Sparano's (`esparano/GalconModVault`) unmodified Lua tournament bots (`Sparky v1.6`, `Waffle3z-GA / bots_waffle3z_optimized`, & `EsparanBot v0.2`) via [`galcon/lua_bridge.py`](lua_bridge.py).
 
-## Wave 10A Highlights — Waffle3z-GA (`bots_waffle3z_optimized`) & Triple-Boss Training Objective
+## Wave 10 Highlights — Waffle3z-GA Integration, Triple-Boss Distillation & New All-Round Champion
 - **Galcon `botwar` Functional API Support in [`galcon/lua_bridge.py`](lua_bridge.py):**
-  - Auto-detects `botwar` sandboxed scripts (`_sandbox_init`), adds Lua 5.3 `math.pow`/`math.atan2` shims, tracks a real per-tick `sb_stats()` call+time budget counter (matching Galcon 2's `g2_sandbox(..., 64, 64)` cap to prevent infinite search loops), maintains per-player `memory` tables, and supports `path/to/mod.lua::func_name` selectors so `external/GalconModVault/esparano/bots/bot_hivemind/mod_botwar_testing.lua::bots_waffle3z_optimized` runs **unmodified with zero Lua errors**.
-- **Verified Waffle3z-GA (`bots_waffle3z_optimized`) Benchmark Gauntlet (Zero Prior Waffle3z Training!):**
-  - **External Lua Bot Hierarchy:** `Waffle3z-GA` crushes `EsparanBot v0.2` **`12–5–3` (`67.5%`, 20g 18pl)** and competes strongly against `Sparky v1.6` on Large Paired (**`5–7–0` / `41.7%`**) and 18pl Std (`9–20–11` / `36.3%`, 40g) — making it the clear **#2 external Lua boss (~`1730–1760 Elo`)**.
-  - **Our Wave 8/9 Champions vs. `Waffle3z-GA` (held-out, zero Waffle3z exposure):**
-    - **Wave 9 Single-Model Search (`galcon_wave9_search.pt`, `33 ms`):** **`23–13–4` (`62.5%`)** on 40g 18pl Std (`s=14000`: `11–5–4 / 65.0%`, `s=9500`: `12–8–0 / 60.0%`), **`10–2–0` (`83.3%`)** on Large 24pl Asym.
-    - **Wave 9 Adaptive Ensemble (`W6B + W7p1`, `49 ms`):** **`24–13–3` (`63.8%`)** on 40g 18pl Std (`s=9500`: `14–4–2 / 75.0%`), **`10–2–0` (`83.3%`)** on Large 24pl Asym, **`8–4–0` (`66.7%`)** on Large 22–28pl Paired.
-    - **Wave 8 Pure (`galcon_wave8_pure.pt`, `8 ms`, ZERO search):** **`18–16–6` (`52.5%`)** on 40g 18pl Std (`s=9500`: `12–6–2 / 65.0%`, `23pl 480×320`: `11–7–2 / 60.0%`), while **Waffle3z-GA exposes concrete Pure weaknesses on `s=14000` (`6–10–4 / 40.0%`) and Large Paired (`4–8–0 / 33.3%`)** — making it a high-signal training boss!
-- **Triple-Boss Training & 56-Game Validation Gate (`--lua-opp3`, `--waffle-share` in [`galcon/train.py`](train.py)):**
-  - Extends both `gen4_ei` and `gen4_ppo` with Boss #3 (`--lua-opp3 path.lua::func`), stratified scheduling (`--sparky-share`, `--waffle-share`, `--esparan-share`), and a **56-game validation gate (`val_56g`)** adding `8` Std + `4` Large Paired games vs. Waffle3z-GA:
-    - Composite objective: `0.40 * spky + 0.25 * waff + 0.15 * esp + 0.10 * anc + 0.10 * heur`
-    - Strict promotion guardrails on both Sparky and the combined `(0.60 * spky + 0.40 * waff)` boss floor.
+  - Auto-detects `botwar` sandboxed scripts (`_sandbox_init`), adds Lua 5.3 `math.pow`/`math.atan2` shims, tracks a real per-tick `sb_stats()` call+time budget counter (matching Galcon 2's `g2_sandbox(..., 64, 64)` cap), maintains per-player `memory`, and supports cross-platform `path.lua::func_name` selectors so `external/GalconModVault/esparano/bots/bot_hivemind/mod_botwar_testing.lua::bots_waffle3z_optimized` runs **unmodified with zero Lua errors**.
+  - **External Lua Boss Hierarchy:** `Waffle3z-GA` crushes `EsparanBot v0.2` **`12–5–3` (`67.5%`)** and pulls **`5–7–0` (`41.7%`)** on Large Paired vs. `Sparky v1.6` (`36.3%` on 40g 18pl Std) — clear **#2 external Lua boss (~`1745 Elo`)**.
+- **#1 All-Round Triple-Boss Champion — `Ens(W9S + W6B)` (`galcon_wave9_search.pt` + `galcon_transformer_best.pt`, `43–49 ms/tick`, new `--bot ensemble` default!):**
+  - **18pl Std `Sparky v1.6` (40g, 1-tick):** **`24–11–5` (`66.3%`, ~`1945 Elo`)** (`s=14000: 60.0%`, `s=9500: 72.5%`, `49.5 ms/t`)
+  - **18pl Std `Waffle3z-GA` (40g, 1-tick):** **`26–11–3` (`68.8%` — `+5.0%` over Wave 9 Ensemble!)** (`s=14000: 65.0%`, `s=9500: 72.5%`, `43.4 ms/t`)
+  - **Large 24pl Asymmetric:** **`8–4–0` (`66.7%`)** vs. `Sparky v1.6` | **`9–3–0` (`75.0%`)** vs. `Waffle3z-GA` (`8–4–0` / `66.7%` Large Paired vs. `Waffle3z-GA`)!
+- **New Triple-Boss Distilled Checkpoint — [`checkpoints/galcon_wave10_search.pt`](../checkpoints/galcon_wave10_search.pt) (`28–30 ms/tick`):**
+  - Distilled 64 games of `Ens(W9S + W6B)` across all three Lua bosses (`23–13–8` / `61.4%` vs. triple bosses, `223` multi-send ticks, `915` redir states) into `galcon_wave8_pure.pt` (`prec=67.6%`, `rec=92.5%`, `aux=96.9%`, `vsign=83.1%–87.5%`):
+  - **New Single-Model Records:** **`24–11–5` (`66.3%`, `s=9500: 77.5%`!)** vs. `Waffle3z-GA` (`+3.8%` over `W9S`) and **`9–3–8` (`65.0%`)** vs. `Sparky v1.6` `s=14000`!
+  - **Mirror-Image Ensemble `Ens(W9S + W10S)` (`41–51 ms/t`):** **`23–10–7` (`66.3%`, fewest Sparky losses ever, `s=14000: 67.5%` record!)** vs. `Sparky v1.6` and **`24–11–5` (`66.3%`)** vs. `Waffle3z-GA`; 3-model `Ens(W9S + W10S + W6B)` hits **`26–10–4` (`70.0%`!)** vs. `Waffle3z-GA`!
+- **Triple-Boss Training & 18pl-Aligned `val_56g` Gate (`--lua-opp3`, `--waffle-share` in [`galcon/train.py`](train.py)):**
+  - Restored Wave 8's uniform `0.05` PPO potential shaping (removing Wave 9's `0.085` opening boost that caused greedy early over-expansion), aligned `val_56g` with paired 18pl Standard boards alongside Compact/Mixed & Large, and enforced dual promotion floors on Sparky + `(0.60*spky + 0.40*waff)`.
+- **Upgraded Interactive Viewer ([`docs/galcon_viewer.html`](../docs/galcon_viewer.html)):** Now includes **Waffle3z-GA Win/Loss Forensics**, **Wave 10 Ensemble & Single-Model Sparky/Large replays**, an **External Lua Bot War (`Sparky v1.6 vs. Waffle3z-GA`)**, and upgraded **Triple-Boss Win-Rate Comparison Bars & Elo Ladder**.
 
 ## Wave 9 Highlights (Map-Adaptive Adversarial/3-Ply + `33 ms` Single-Model Champion `galcon_wave9_search.pt`)
 - **#1 Overall on 18pl Standard `Sparky v1.6` — Single-Model `33 ms` Search (`checkpoints/galcon_wave9_search.pt`, ~`1939 Elo`!):**
@@ -141,12 +143,16 @@ python3 -m galcon.train --mode gen2 --stage gen4_ppo \
   --workers 4 --train-threads 4 --device cuda \
   --out checkpoints/galcon_wave10_pure.pt
 
-# Record showcase replays (incl. Wave 9 33ms Single Search Win/Loss, Large 24pl Win & 8ms Pure Win/Loss) & Elo viewer:
+# Record Wave 10 Triple-Boss showcase replays (Sparky, Waffle3z-GA, Large 24pl, Loss Forensics & External Lua Bot War) & Elo viewer:
 python3 -m galcon.record_replays \
-  --checkpoint checkpoints/galcon_transformer_best.pt \
-  --checkpoint2 checkpoints/galcon_wave7_p1.pt \
+  --checkpoint checkpoints/galcon_wave9_search.pt \
+  --checkpoint2 checkpoints/galcon_transformer_best.pt \
   --search-checkpoint checkpoints/galcon_wave9_search.pt \
+  --w10-checkpoint checkpoints/galcon_wave10_search.pt \
   --pure-checkpoint checkpoints/galcon_wave8_pure.pt \
+  --lua-sparky external/GalconModVault/esparano/bots/sparky/bot_sparky_v1.6.lua \
+  --lua-waffle external/GalconModVault/esparano/bots/bot_hivemind/mod_botwar_testing.lua::bots_waffle3z_optimized \
+  --lua-esparan external/GalconModVault/esparano/bots/bot_esparanbot_v0.2/bot_esparanbot.lua \
   --out-html docs/galcon_viewer.html
 
 # Run all 17 unit tests (Waffle3z botwar Lua bridge, Triple-boss schedule/val gate, Map-adaptive adversarial + decoupled value_weights, Vectorized futures parity, Canonical D4, multi-send, DMLAdamW, Ensemble):
@@ -155,17 +161,17 @@ pytest -v tests/test_galcon.py
 
 ### 2. Plug Straight Into Phil Hassey's Official `gbots`
 ```bash
-# Tier 1 — #1 Fast Single-Model Map-Adaptive Search (66.3% 40g 18pl vs Sparky @ 30-38 ms!):
+# Tier 1 — #1 All-Round Triple-Boss Ensemble (66.3% Sparky / 68.8% Waffle3z-GA / 66.7%–75.0% Large @ 43–49 ms!):
+./gbots pipe -name OurGalconWave10Ensemble -key YOUR_KEY \
+  -exec "python3 -m galcon.gbots_client --bot ensemble"
+
+# Tier 2 — #1 Fast Single-Model Map-Adaptive Search (66.3% Sparky @ 30–38 ms; or use galcon_wave10_search.pt for 66.3% Waffle3z @ 29 ms!):
 ./gbots pipe -name OurGalconWave9Search -key YOUR_KEY \
   -exec "python3 -m galcon.gbots_client --bot search --checkpoint checkpoints/galcon_wave9_search.pt"
 
-# Tier 2 — All-Scale 2-Model Map-Adaptive Ensemble (65.0% Std @ 48-51 ms / 66.7% Large 24pl / 100% heuristics):
-./gbots pipe -name OurGalconWave9Ensemble -key YOUR_KEY \
-  -exec "python3 -m galcon.gbots_client --bot ensemble --checkpoint checkpoints/galcon_transformer_best.pt --checkpoint2 checkpoints/galcon_wave7_p1.pt"
-
-# Tier 3 — Ultra-Fast Wave 8 Pure neural net (~8.0 ms VM, 61.3% 40g 18pl vs Sparky v1.6, ZERO search!):
+# Tier 3 — Ultra-Fast Wave 8 Pure neural net (~8.0 ms VM, 61.3% Sparky / 52.5% Waffle3z-GA, ZERO search!):
 ./gbots pipe -name OurGalconWave8Pure -key YOUR_KEY \
   -exec "python3 -m galcon.gbots_client --bot transformer --checkpoint checkpoints/galcon_wave8_pure.pt"
 ```
 
-Interactive HTML5 Canvas Replay Viewer (with Sparky v1.6 18pl Win/Loss Forensics & Large 24pl Win) & Elo Ladder: [`docs/galcon_viewer.html`](../docs/galcon_viewer.html).
+Interactive HTML5 Canvas Replay Viewer (with Sparky v1.6 & Waffle3z-GA Win/Loss Forensics, Large 24pl Wins, External Lua Bot War & Triple-Boss Scoreboard): [`docs/galcon_viewer.html`](../docs/galcon_viewer.html).

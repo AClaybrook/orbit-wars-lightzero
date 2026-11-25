@@ -210,7 +210,10 @@ def run_gbots_loop(
 
 
 def _build_bot(
-    bot_kind: str, checkpoint: Optional[str], checkpoint2: Optional[str] = None
+    bot_kind: str,
+    checkpoint: Optional[str],
+    checkpoint2: Optional[str] = None,
+    checkpoint3: Optional[str] = None,
 ) -> Callable[[GalconSim, int], List[Order]]:
     if bot_kind == "classic":
         return GalconClassicBot().act
@@ -235,17 +238,27 @@ def _build_bot(
             ckpt = checkpoint
         elif bot_kind == "transformer" and Path("checkpoints/galcon_wave8_pure.pt").is_file():
             ckpt = "checkpoints/galcon_wave8_pure.pt"
-        elif bot_kind == "search" and Path("checkpoints/galcon_wave9_search.pt").is_file():
+        elif bot_kind in ("search", "ensemble") and Path("checkpoints/galcon_wave9_search.pt").is_file():
             ckpt = "checkpoints/galcon_wave9_search.pt"
         else:
             ckpt = "checkpoints/galcon_transformer_best.pt"
         if not Path(ckpt).is_file():
             raise FileNotFoundError(f"Galcon checkpoint not found: {ckpt}")
         if bot_kind == "ensemble":
-            ckpt2 = checkpoint2 or "checkpoints/galcon_wave7_p1.pt"
+            if checkpoint2:
+                ckpt2 = checkpoint2
+            elif Path(ckpt).name == "galcon_wave9_search.pt" and Path("checkpoints/galcon_transformer_best.pt").is_file():
+                ckpt2 = "checkpoints/galcon_transformer_best.pt"
+            else:
+                ckpt2 = "checkpoints/galcon_wave7_p1.pt"
             if not Path(ckpt2).is_file():
                 raise FileNotFoundError(f"Galcon ensemble secondary checkpoint not found: {ckpt2}")
-            return EnsembleGalconSearchAgent([ckpt, ckpt2], use_d4_canonical=True, use_d4_tta=False).act
+            ckpts = [ckpt, ckpt2]
+            if checkpoint3:
+                if not Path(checkpoint3).is_file():
+                    raise FileNotFoundError(f"Galcon ensemble tertiary checkpoint not found: {checkpoint3}")
+                ckpts.append(checkpoint3)
+            return EnsembleGalconSearchAgent(ckpts, use_d4_canonical=True, use_d4_tta=False).act
         if bot_kind == "search":
             return GalconSearchTransformerAgent(ckpt, use_d4_canonical=True, use_d4_tta=False).act
         return GalconTransformerAgent(ckpt, use_d4_canonical=True, use_d4_tta=False).act
@@ -260,9 +273,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         default="transformer",
     )
     parser.add_argument("--checkpoint", default=None)
-    parser.add_argument("--checkpoint2", default="checkpoints/galcon_wave7_p1.pt")
+    parser.add_argument("--checkpoint2", default=None)
+    parser.add_argument("--checkpoint3", default=None)
     args = parser.parse_args(argv)
-    act_fn = _build_bot(args.bot, args.checkpoint, args.checkpoint2)
+    act_fn = _build_bot(args.bot, args.checkpoint, args.checkpoint2, args.checkpoint3)
     run_gbots_loop(act_fn)
     return 0
 
