@@ -395,6 +395,181 @@ def test_gen11_search_allin_eval_specs_and_contiguous_val(tmp_path: Path):
     )
     assert saved.is_file()
 
+
+def test_gen12_ptv2_d4_equivariance_factorized_head_and_dml(tmp_path: Path):
+    from distill_soft_kd import compute_soft_kd_loss
+    from orbit_wars_bot.planet_transformer import (
+        TIMELINE_FEAT_DIM_V2,
+        EnsemblePlanetTransformerAgent,
+        apply_d4_planet_feats,
+        apply_d4_timeline_feats,
+    )
+
+    sim = FastOrbitSim.from_seed(seed=404, num_agents=2, max_steps=80)
+    for _ in range(15):
+        sim.step([[], []])
+    obs = sim.to_observation(player=0)
+
+    enc_v1 = extract_planet_features(obs, player=0, max_speed=sim.ship_speed, feature_version=1)
+    enc_v2 = extract_planet_features(obs, player=0, max_speed=sim.ship_speed, feature_version=2)
+    assert enc_v2.timeline_feats.shape == (len(enc_v2.planet_ids), 20, TIMELINE_FEAT_DIM_V2)
+    assert np.allclose(enc_v2.timeline_feats[:, :, :8], enc_v1.timeline_feats, atol=1e-6)
+
+    # Exact D4 equivariance on rotated/flipped board observation + group closure
+    def _xform_xy(x: float, y: float, k_rot: int, flip_x: bool):
+        dx, dy = x - 50.0, y - 50.0
+        if flip_x:
+            dx = -dx
+        k = k_rot % 4
+        if k == 1:
+            dx, dy = -dy, dx
+        elif k == 2:
+            dx, dy = -dx, -dy
+        elif k == 3:
+            dx, dy = dy, -dx
+        return 50.0 + dx, 50.0 + dy
+
+    obs_rot = copy.deepcopy(obs)
+    for key in ("planets", "initial_planets"):
+        for row in obs_rot.get(key, []) or []:
+            row[2], row[3] = _xform_xy(float(row[2]), float(row[3]), k_rot=1, flip_x=False)
+    for grp in obs_rot.get("comets", []) or []:
+        for pth in grp.get("paths", []) or []:
+            for pt in pth:
+                pt[0], pt[1] = _xform_xy(float(pt[0]), float(pt[1]), k_rot=1, flip_x=False)
+    enc_rot = extract_planet_features(obs_rot, player=0, max_speed=sim.ship_speed, feature_version=2)
+    assert np.allclose(
+        apply_d4_planet_feats(enc_v2.planet_feats, k_rot=1, flip_x=False),
+        enc_rot.planet_feats,
+        atol=1e-4,
+    )
+    assert np.allclose(
+        apply_d4_timeline_feats(enc_v2.timeline_feats, k_rot=1, flip_x=False),
+        enc_rot.timeline_feats,
+        atol=1e-4,
+    )
+    # Full D4 group closure + radial invariant check across all 8 symmetries
+    for k_rot in range(4):
+        for flip_x in (False, True):
+            tf_t = apply_d4_timeline_feats(enc_v2.timeline_feats, k_rot=k_rot, flip_x=flip_x)
+            assert np.allclose(tf_t[..., :8], enc_v2.timeline_feats[..., :8], atol=1e-6)
+            assert np.allclose(tf_t[..., 10:], enc_v2.timeline_feats[..., 10:], atol=1e-6)
+            valid_pos = tf_t[..., 11] > 0.5
+            r_calc = np.hypot(tf_t[..., 8] * 50.0, tf_t[..., 9] * 50.0) / 70.0
+            assert np.allclose(r_calc[valid_pos], tf_t[..., 10][valid_pos], atol=1e-5)
+    assert np.allclose(
+        apply_d4_timeline_feats(apply_d4_timeline_feats(enc_v2.timeline_feats, k_rot=1, flip_x=True), k_rot=1, flip_x=True),
+        enc_v2.timeline_feats,
+        atol=1e-6,
+    )
+
+    # Factorized launch invariance + zero-legal-edge safety
+    pad_v2 = pad_encoded_state(enc_v2, MAX_PLANETS)
+    m_v2 = PlanetTimelineTransformer(
+        timeline_dim=TIMELINE_FEAT_DIM_V2,
+        d_model=32,
+        n_heads=2,
+        n_layers=1,
+        dim_ff=64,
+        use_aux_future=True,
+        feature_version=2,
+        arch_version=2,
+    ).eval()
+    pf = torch.from_numpy(pad_v2["planet_feats"][None])
+    tf = torch.from_numpy(pad_v2["timeline_feats"][None])
+    ef = torch.from_numpy(pad_v2["edge_feats"][None])
+    le = torch.from_numpy(pad_v2["legal_edges"][None])
+    pm = torch.from_numpy(pad_v2["pad_mask"][None])
+
+    n_pl = len(enc_v2.planet_ids)
+    owned_rows = [i for i in range(n_pl) if enc_v2.owned_mask[i] and np.sum(enc_v2.legal_edges[i]) >= 2]
+    assert owned_rows, "Expected an owned planet with >=2 legal targets"
+    row_i = owned_rows[0]
+
+    le_sub = le.clone()
+    legal_cols = [j for j in range(n_pl) if bool(le[0, row_i, j])]
+    le_sub[0, row_i, legal_cols[1:]] = False
+    le_zero = le.clone()
+    le_zero[0, row_i, :] = False
+
+    with torch.no_grad():
+        log_full, _, _ = m_v2(pf, tf, ef, pm, legal_edges=le)
+        log_sub, _, _ = m_v2(pf, tf, ef, pm, legal_edges=le_sub)
+        log_zero, _, _ = m_v2(pf, tf, ef, pm, legal_edges=le_zero)
+
+    def _masked_probs(log_t: torch.Tensor, mask_e: torch.Tensor) -> torch.Tensor:
+        hold_ok = torch.ones((1, MAX_PLANETS, 1), dtype=torch.bool)
+        act_m = torch.cat([hold_ok, mask_e], dim=-1)
+        return F.softmax(log_t.masked_fill(~act_m, -1e9), dim=-1)
+
+    p_full = _masked_probs(log_full, le)
+    p_sub = _masked_probs(log_sub, le_sub)
+    p_zero = _masked_probs(log_zero, le_zero)
+    assert torch.all(torch.isfinite(p_full)) and torch.all(torch.isfinite(p_zero))
+    assert torch.allclose(p_full[0, :n_pl].sum(dim=-1), torch.ones(n_pl), atol=1e-5)
+    assert abs((1.0 - float(p_full[0, row_i, 0])) - (1.0 - float(p_sub[0, row_i, 0]))) < 1e-5
+    assert abs(float(p_zero[0, row_i, 0]) - 1.0) < 1e-5
+
+    # Backward compatibility: v1 model consumes 14-ch tensor & Ensemble mixes v2 + v1
+    m_v1 = PlanetTimelineTransformer(d_model=32, n_heads=2, n_layers=1, dim_ff=64, use_aux_future=False).eval()
+    with torch.no_grad():
+        l1, f1, v1 = m_v1(pf, tf, ef, pm, legal_edges=le)
+    assert torch.all(torch.isfinite(l1)) and torch.all(torch.isfinite(f1)) and torch.all(torch.isfinite(v1))
+
+    ck2 = tmp_path / "tiny_v2.pt"
+    ck1 = tmp_path / "tiny_v1.pt"
+    torch.save({"model_config": m_v2.config, "model_state_dict": m_v2.state_dict()}, ck2)
+    torch.save({"model_config": m_v1.config, "model_state_dict": m_v1.state_dict()}, ck1)
+    ens = EnsemblePlanetTransformerAgent([ck2, ck1], use_d4_tta=True)
+    assert ens.feature_version == 2
+    mv_ens = ens.act(obs, sim.to_config())
+    assert isinstance(mv_ens, list)
+
+    # Soft-KD binary launch-KL loss + zero-fallback DirectML backward step
+    dev, is_dml = resolve_train_device("dml" if _HAS_DML_GPU else "cpu")
+    m_dev = PlanetTimelineTransformer(
+        timeline_dim=TIMELINE_FEAT_DIM_V2,
+        d_model=32,
+        n_heads=2,
+        n_layers=1,
+        dim_ff=64,
+        use_aux_future=True,
+        feature_version=2,
+        arch_version=2,
+    ).to(dev)
+    opt = build_optimizer(m_dev.parameters(), lr=1e-3, use_dml=is_dml)
+    soft_q = np.zeros((1, MAX_PLANETS, MAX_PLANETS + 1), dtype=np.float32)
+    soft_q[:, :, 0] = 0.7
+    soft_q[:, row_i, 1 + legal_cols[0]] = 0.3
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        opt.zero_grad(set_to_none=True)
+        loss, m_dict = compute_soft_kd_loss(
+            m_dev,
+            pf.to(dev),
+            tf.to(dev),
+            ef.to(dev),
+            le.to(dev),
+            torch.from_numpy(pad_v2["owned_mask"][None]).to(dev),
+            pm.to(dev),
+            torch.from_numpy(soft_q).to(dev),
+            torch.tensor([1.0], dtype=torch.float32, device=dev),
+            torch.zeros((1, MAX_PLANETS), dtype=torch.long, device=dev),
+            torch.zeros((1, MAX_PLANETS), dtype=torch.float32, device=dev),
+            pm.to(dev),
+            launch_bce_weight=0.50,
+            return_tensor_metrics=True,
+        )
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(m_dev.parameters(), 1.0, foreach=not is_dml)
+        opt.step()
+        assert torch.isfinite(loss).item()
+        for k in ("l_tp", "l_fp", "l_fn"):
+            assert k in m_dict and torch.isfinite(m_dict[k]).item()
+    if is_dml:
+        _assert_no_dml_fallback(caught)
+
     # 4. Slot-1 missing step preservation check in Soft-KD feature extraction
     from kaggle_environments import make
 
@@ -408,3 +583,121 @@ def test_gen11_search_allin_eval_specs_and_contiguous_val(tmp_path: Path):
     enc_s1 = extract_planet_features(obs_s1, player=1)
     assert enc_s1.current_step == t_chk
     assert abs(float(enc_s1.planet_feats[0, 16]) * 500.0 - t_chk) < 1e-4
+
+
+def test_gen12_fast_numpy_features_batched_rollouts_and_cached_ppo():
+    """Verify bit-exact parity of shared-physics NumPy features, compute_frac=False, B=4 rollouts, and cached PPO."""
+    from orbit_wars_bot.heuristic_bot import heuristic_moves
+    from orbit_wars_bot.physics import (
+        build_comet_lookup,
+        predict_all_planet_tracks,
+        predict_all_planet_tracks_arrays,
+        predict_fleet_arrivals,
+        predict_fleet_arrivals_vectorized,
+    )
+    from orbit_wars_bot.planet_transformer import (
+        TIMELINE_FEAT_DIM_V2,
+        TIMELINE_HORIZON,
+        build_shared_planet_physics,
+    )
+    from rl_finetune_transformer import collect_episodes_batched_2p, ppo_update
+
+    # 1. Vectorized tracks & swept-pair fleet arrivals parity across live midgame w/ fleets + comets
+    sim = FastOrbitSim.from_seed(seed=990, num_agents=2, max_steps=70)
+    for _ in range(55):
+        if sim.done:
+            break
+        sim.step([heuristic_moves(sim, 0), heuristic_moves(sim, 1)])
+    obs0 = sim.to_observation(player=0)
+    obs1 = sim.to_observation(player=1)
+    planets = [list(p) for p in obs0["planets"]]
+    fleets = obs0["fleets"]
+    init_by_id = {int(p[0]): p for p in obs0["initial_planets"]}
+    clookup = build_comet_lookup(obs0["comets"])
+    step = int(obs0["step"])
+    av = float(obs0["angular_velocity"])
+
+    ref_tracks = predict_all_planet_tracks(planets, TIMELINE_HORIZON, step, av, init_by_id, clookup)
+    tr_x, tr_y, _, vec_tracks = predict_all_planet_tracks_arrays(planets, TIMELINE_HORIZON, step, av, init_by_id, clookup)
+    ref_arr = predict_fleet_arrivals(
+        fleets, planets, step, av, init_by_id, comet_lookup=clookup, tracks=ref_tracks, max_horizon=TIMELINE_HORIZON
+    )
+    vec_arr = predict_fleet_arrivals_vectorized(fleets, planets, tr_x, tr_y, max_horizon=TIMELINE_HORIZON)
+    assert vec_arr == ref_arr
+    assert set(vec_tracks.keys()) == set(ref_tracks.keys())
+
+    # 2. Shared-physics 2P extraction parity + compute_frac=False exact match + broadcast (1, N, N, E)
+    sh = build_shared_planet_physics(obs0, max_speed=sim.ship_speed)
+    for pid, ob in ((0, obs0), (1, obs1)):
+        e_solo = extract_planet_features(ob, player=pid, max_speed=sim.ship_speed, feature_version=2)
+        e_sh = extract_planet_features(ob, player=pid, max_speed=sim.ship_speed, feature_version=2, shared_physics=sh)
+        assert np.allclose(e_solo.planet_feats, e_sh.planet_feats, atol=1e-6)
+        assert np.allclose(e_solo.timeline_feats, e_sh.timeline_feats, atol=1e-6)
+        assert np.allclose(e_solo.edge_feats, e_sh.edge_feats, atol=1e-6)
+        assert np.array_equal(e_solo.legal_edges, e_sh.legal_edges)
+
+    m = PlanetTimelineTransformer(
+        timeline_dim=TIMELINE_FEAT_DIM_V2,
+        d_model=32,
+        n_heads=4,
+        n_layers=2,
+        dim_ff=64,
+        use_aux_future=True,
+        feature_version=2,
+        arch_version=2,
+    ).eval()
+    e0 = extract_planet_features(obs0, player=0, max_speed=sim.ship_speed, feature_version=2, shared_physics=sh)
+    n_p = len(e0.planet_ids)
+    pf = torch.from_numpy(e0.planet_feats[None]).repeat(4, 1, 1)
+    tf = torch.from_numpy(e0.timeline_feats[None]).repeat(4, 1, 1, 1)
+    ef_full = torch.from_numpy(e0.edge_feats[None]).repeat(4, 1, 1, 1)
+    ef_bcast = torch.from_numpy(e0.edge_feats[None])
+    pm = torch.ones((4, n_p), dtype=torch.bool)
+    le = torch.from_numpy(e0.legal_edges[None]).repeat(4, 1, 1)
+    with torch.no_grad():
+        l1, f1, v1 = m(pf, tf, ef_full, pm, legal_edges=le, compute_frac=True)
+        l2, f2, v2 = m(pf, tf, ef_bcast, pm, legal_edges=le, compute_frac=False)
+    assert f1 is not None and f2 is None
+    assert torch.allclose(l1, l2, atol=1e-5)
+    assert torch.allclose(v1, v2, atol=1e-5)
+
+    # 3. Lockstep batched 2P rollouts (float16 features) + cached ref-logp PPO update
+    res = collect_episodes_batched_2p(
+        m,
+        m,
+        specs=[(777, 0), (777, 1), (778, 0), (778, 1)],
+        temperature=0.55,
+        max_steps=30,
+        force_all_in=True,
+        opp_temperature=0.45,
+    )
+    assert len(res) == 4
+    batches = [b for b, _ in res if len(b["returns"]) > 0]
+    assert batches and batches[0]["planet_feats"].dtype == np.float16
+    rollout = {k: np.concatenate([b[k] for b in batches], axis=0) for k in batches[0]}
+
+    dev, is_dml = resolve_train_device("auto")
+    pol = copy.deepcopy(m).to(dev)
+    anc = copy.deepcopy(m).to(dev).eval()
+    fix = copy.deepcopy(m).to(dev).eval()
+    opt = build_optimizer(pol.parameters(), lr=1e-4, use_dml=is_dml)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        stats = ppo_update(
+            pol,
+            anc,
+            opt,
+            rollout,
+            ppo_epochs=2,
+            batch_size=16,
+            fixed_anchor=fix,
+            anchor_kl_coef=0.05,
+            aux_coef=0.15,
+            device=dev,
+            use_dml=is_dml,
+            augment_d4=False,
+        )
+    if is_dml:
+        _assert_no_dml_fallback(caught)
+    assert all(np.isfinite(v) for v in stats.values())
+

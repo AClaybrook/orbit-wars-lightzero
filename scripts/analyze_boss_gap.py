@@ -318,6 +318,7 @@ def _analyze_episode(
                     our_obs,
                     player=our_pid,
                     max_speed=max_speed,
+                    feature_version=int(getattr(our_agent, "feature_version", 1)),
                 )
                 n = len(enc.planet_ids)
                 if n > 0 and np.any(enc.owned_mask):
@@ -466,6 +467,7 @@ def main() -> None:
     parser.add_argument("--seeds", type=int, nargs="+", default=[200, 201, 202, 203, 204, 205])
     parser.add_argument("--ckpt", type=str, default="checkpoints/planet_transformer_gen8_2p_softkd.pt")
     parser.add_argument("--weights", type=float, nargs="*", default=None)
+    parser.add_argument("--launch-threshold", type=float, default=0.50)
     parser.add_argument("--no-counterfactual", action="store_true")
     parser.add_argument("--out-json", type=str, default="scratch/boss_forensics.json")
     args = parser.parse_args()
@@ -477,10 +479,12 @@ def main() -> None:
     ckpt_list = [p.strip() for p in args.ckpt.split(",") if p.strip()]
     if len(ckpt_list) > 1:
         our_agent: Any = EnsemblePlanetTransformerAgent(
-            ckpt_list, weights=args.weights, use_d4_tta=True, force_all_in=True
+            ckpt_list, weights=args.weights, launch_threshold=args.launch_threshold, use_d4_tta=True, force_all_in=True
         )
     else:
-        our_agent = PlanetTransformerAgent(ckpt_list[0], use_d4_tta=True, force_all_in=True)
+        our_agent = PlanetTransformerAgent(
+            ckpt_list[0], launch_threshold=args.launch_threshold, use_d4_tta=True, force_all_in=True
+        )
 
     episodes = []
     for seed in args.seeds:
@@ -488,11 +492,14 @@ def main() -> None:
         hober_ag = resolve_agent("hober_malloc")
         if len(ckpt_list) > 1:
             ep_ag = EnsemblePlanetTransformerAgent(
-                ckpt_list, weights=args.weights, use_d4_tta=True, force_all_in=True
+                ckpt_list, weights=args.weights, launch_threshold=args.launch_threshold, use_d4_tta=True, force_all_in=True
             )
             pt_ag = lambda obs, cfg, _ag=ep_ag: _ag.act(obs, cfg)
         else:
-            pt_ag = resolve_agent(f"pt_d4_allin:{ckpt_list[0]}")
+            ep_ag = PlanetTransformerAgent(
+                ckpt_list[0], launch_threshold=args.launch_threshold, use_d4_tta=True, force_all_in=True
+            )
+            pt_ag = lambda obs, cfg, _ag=ep_ag: _ag.act(obs, cfg)
         env = make(
             "orbit_wars",
             configuration={"episodeSteps": 500, "seed": seed, "actTimeout": 5.0},
@@ -572,16 +579,14 @@ def main() -> None:
         for ph in cf_agg:
             cf_agg[ph].update(e["counterfactual_by_phase"][ph])
 
+    tip_p = [e["tipping_prod_tick"] for e in episodes if e["tipping_prod_tick"] is not None]
+    tip_s = [e["tipping_ship_tick"] for e in episodes if e["tipping_ship_tick"] is not None]
     summary = {
         "seeds": args.seeds,
         "elapsed_sec": round(time.perf_counter() - t_start, 1),
         "avg_ticks": round(float(np.mean([e["ticks"] for e in episodes])), 1),
-        "avg_tipping_prod_tick": round(
-            float(np.mean([e["tipping_prod_tick"] for e in episodes if e["tipping_prod_tick"] is not None])), 1
-        ),
-        "avg_tipping_ship_tick": round(
-            float(np.mean([e["tipping_ship_tick"] for e in episodes if e["tipping_ship_tick"] is not None])), 1
-        ),
+        "avg_tipping_prod_tick": round(float(np.mean(tip_p)), 1) if tip_p else None,
+        "avg_tipping_ship_tick": round(float(np.mean(tip_s)), 1) if tip_s else None,
         "economy_curve": curve,
         "ours_agg": _agg_player("ours"),
         "hober_agg": _agg_player("hober"),

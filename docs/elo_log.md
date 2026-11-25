@@ -253,3 +253,40 @@ This log tracks calibrated **Kaggle-equivalent Elo** estimates (anchored against
   - `R2-Bal` (`92.9s`): `t=40` ships `344.8 vs 355.5 (-10.7)`, `t=50` `389.5 vs 448.0 (-58.5)`, `t=60` `406.7 vs 541.2 (-134.5)`; exact policy parity `85.7%` (`102/119`) early, `67.5%` (`462/684`) mid, `61.0%` (`86/141`) late; comets `3 vs 2`, neutrals `10.83 vs 10.33`, sync arrivals `110 vs 113`.
   - `PPO w2_it20` (`96.4s`): `t=10` ships `38.0 vs 37.2 (+0.8)`, `t=20` `91.7 vs 88.3 (+3.3)`, `t=40` `360.8 vs 380.5 (-19.7)`, `t=50` `434.8 vs 501.0 (-66.2)`, `t=60` `446.0 vs 601.5 (-155.5)`; exact policy parity `83.5%` (`106/127`) early, `59.6%` (`378/634`, with `153` `ours_REINFORCE_hober_HOLD` at `t=0.50` — explaining why inference `t=0.56` gains survival vs `#2`); comets `3 vs 2`, neutral ROI `0.313 vs 0.200`, sync arrivals `114 vs 132`.
 - **Promotion Summary:** `checkpoints/planet_transformer_best.pt` promoted to `Gen 11 PPO (w2_it20)` (`+70.0%` over `Gen 10`, `90.0%` over `Gen 9`, `138.8t` avg vs `#2 Hober Malloc`, `33.19 ms/turn`, with recommended inference threshold `t=0.56`); retained `gen11_4m_kd.pt`, `gen11_4m_kd_pure.pt`, and `gen11_4m_ppo.pt` together also power the `90.0%` `3×` diverse ensemble (`85.44 ms/turn`).
+
+---
+
+### Generation 12 (2026-11-25): `4.31M PT-v2` Architecture + 71.9k Direct `#2` Soft-KD + Fast Pipelined DirectML League PPO (`8–0–16 / 33.3%` vs. `#2 Hober Malloc`, `18–0–2` vs. Gen 11/10/9!)
+
+- **Architectural Breakthrough (`PT-v2`, `4.31M` params — exact footprint of `#2 Hober Malloc`):**
+  - **14-Channel Per-Timestep Orbital Timeline (`feature_version=2`):** Extended the 20-tick timeline with exact per-tick `(dx_t, dy_t, r_t, pos_valid_t, log1p(cap_need_t)/6, (step+dt)/500)` + exact D4 dihedral symmetry transform (`apply_d4_timeline_feats`), encoded via 3 residual Conv1D+GELU+LayerNorm blocks + 6 GeGLU Edge-Biased Transformer layers.
+  - **Decoupled Factorized Launch + Multi-Head `Q·K` Target Attention (`arch_version=2`):** Separated binary launch probability (using zero-fallback 2-class `F.log_softmax([0, z])` on DirectML) from the variable-size target softmax (`|legal(i)|`) with learned `tgt_head_weights` and directed `edge_target_head` residual.
+- **3-Round Direct `#2 Hober Malloc` Soft-KD + Iterative On-Policy DAgger (`71,876` float16 boards, RX 6950 XT DirectML, `0` fallbacks):**
+  - **Round 1 (`23,123` boards):** `val_kl = 0.167`, `val_all = 90.5%`, `l_f1 = 86.4%`, `val_tgt = 80.9%` (`134.3t` avg on 6g Boss).
+  - **Round 2 (`46,279` boards -> `gen12_r2_pure.pt`, unweighted clean Soft-KD):** `val_kl = 0.115`, `val_all = 92.6%`, `l_f1 = 89.7%`, `val_launch = 59.5%`, `val_tgt = 88.5%` — **first-ever single-model win vs. `#2 Hober Malloc` (`1–0–11`, `167.9t` avg)** and **`20–0–0` (`100.0%`)** sweep of Gen 11 PPO!
+  - **Round 3 (`71,876` boards -> `planet_transformer_gen12_4m_ptv2_kd.pt`):** **`val_kl = 0.098`** (first time under `0.10`), **`val_all = 93.4%`**, **`l_f1 = 91.1%` (`p=91.3%`, `r=90.8%`)**, **`val_launch = 62.2%`**, **`val_tgt = 89.6%`**, `aux_own = 96.2%` -> **`4–0–20` (`16.7%`, `176.2t` avg)** on the 24-game `#2 Hober Malloc` gauntlet (`seeds 200–223`)!
+- **RX 6950 XT DirectML KL-Anchored League PPO Waves + `~3×` RL Pipeline Speedup (`91s → 31.5s/iter`):**
+  - **Wave 1 (`60` iters × `24` mirror pairs = `2,880` 2P games -> `planet_transformer_gen12_4m_ptv2_ppo.pt`):** Anchored to `r3_pure` (`akl=0.075`, `aux=96.5%`), **doubled single-model Boss win rate from `16.7% → 33.3%` (`8–0–16`, `5–0–7 / 41.7%` on seeds `212–223`, `175.9t` avg, `5` P0 wins including `153t`/`154t` KOs + `3` P1 wins)**!
+  - **Wave 2 (`40` iters, greedy `oppT=0.0`):** Regressed to `4–0–20` (`16.7%`) due to unbalanced `21–39%` rollout win rate; rejected.
+  - **RL & Inference Speedup Stack Landed (Bit-Exact Verified Over 954 Live Boards, `max_diff = 5.96e-8`, `0` Mismatches):**
+    1. Vectorized NumPy `predict_all_planet_tracks_arrays`, 1-shot `(F, H, N)` `predict_fleet_arrivals_vectorized`, and `build_shared_planet_physics` (`3.86×` solo / **`6.53×` 2P faster** feature extraction).
+    2. `compute_frac=False` fast-path + `(1, N, N, 12)` `8× D4` TTA edge broadcast (cut live `8× D4` latency `43.4 ms → 33.30 ms` mean / `42.21 ms` p95 / `50.62 ms` max).
+    3. `B=8` lockstep batched CPU rollouts (`collect_episodes_batched_2p`, `2.12×` faster rollouts), once-per-iter cached `teacher`/`fixed_anchor` log-probs, `float16` rollout IPC, `--ppo-epochs 2`, and `--async-rollout` CPU/GPU pipelining (`roll_wait = 0.0s`, **`91s/iter → 31.5s/iter`, `~3.0×` faster**).
+  - **Wave 3B Fast Pipelined PPO (`40` iters = `1,920` games in `29.6 min`, balanced `oppT=0.45` -> `planet_transformer_gen12_4m_ptv2_ppo_w3b.pt`):** **`7–0–17` (`29.2%`, `181.2t` avg — new highest avg survival, `4` P1 + `3` P0 wins)**; `10–0–10` (`50.0%`) vs. `w1_it60` — stopped clone-only PPO waves at `< 5%` diminishing returns.
+- **Verified Final Head-to-Head Ladder (`4.31M PT-v2 Gen 12 PPO`, Single Model, `8× D4`, `t=0.53`, Unseen `seeds 990–999` × 2 seats):**
+
+| Matchup (Single `4.31M` Champion vs. Opponent) | Arena / Games | Score | Win Rate | Avg Len | Mean Latency |
+| --- | --- | --- | ---: | ---: | ---: |
+| **Gen 12 PPO (`w1_it60`)** vs. **`#2 Hober Malloc (1800.1)`** | 2P (`seeds 200–223`, 24g) | **`8–0–16`** (`5–0–7` on `212–223`) | **`33.3%`** | `175.9t` | `33.3 ms` |
+| **Gen 12 PPO (`w1_it60`)** vs. **Gen 11 PPO (`4.31M PT-v1`)** | 2P (`seeds 990–999`, 20g) | **`18–0–2`** | **`90.0%`** | `156.3t` | `33.3 ms` |
+| **Gen 12 PPO (`w1_it60`)** vs. **Gen 10 PPO (`4.31M PT-v1`)** | 2P (`seeds 990–999`, 20g) | **`18–0–2`** | **`90.0%`** | `130.1t` | `33.3 ms` |
+| **Gen 12 PPO (`w1_it60`)** vs. **Gen 9 `2×` Ensemble (`1.89M`)** | 2P (`seeds 990–999`, 20g) | **`18–0–2`** | **`90.0%`** | `136.6t` | `33.3 ms` |
+| **Gen 12 PPO (`w1_it60`)** vs. **Gen 12 Soft-KD R3 (`0.098 KL`)** | 2P (`seeds 990–999`, 20g) | `10–0–10` (`2×` Boss WR) | `50.0%` | `170.0t` | `33.3 ms` |
+| **Gen 12 PPO (`w1_it60`)** vs. **`subham_v14`** | 2P (`seed 100`, 4g, `t=0.53` / `0.50`) | **`4–0–0` / `4–0–0`** | **`100.0%`** | `114.8t` / `109.8t` | **`33.30 ms`** / `36.46 ms` |
+
+- **Verified `#2 Hober Malloc` Forensics (`scripts/analyze_boss_gap.py`, `seeds 200–205`, Gen 8 → Gen 9 → Gen 12):**
+  - Counterfactual exact-match jumped to **`89.2%` early (`116/130`), `86.0%` midgame (`723/841`, `+19.7%` over Gen 9), and `84.0%` late (`178/212`)**.
+  - Midgame premature reinforces dropped **`94 → 74 → 21` (`-78%`)**; impulsive enemy pokes dropped **`29 → 13 → 7` (`-76%`)**; neutral overkill dropped **`1,890 → 866` (`-54%`)**; comets flipped **`0 v 5 → 3 v 1`**.
+  - Production led `#2` at **`t=30` (`+1.5`)** and **`t=50` (`+0.2`)**; ship deficit slashed **`-73%` at `t=50` (`-131.8 → -36.2`)** and **`-75%` at `t=90` (`-1104 → -258.2`)**; avg ship tipping tick shifted `t=16.3 → t=27.8 → t=67.8` (seed 204 **154t KO win**, seed 200 held to `t=148`).
+- **Graphics & Replay Viewers Updated:** Embedded 8 compact Gen 12 comparison battles (including 3 wins vs. `#2 Hober Malloc` from P0 & P1 + sweeps of Gen 11/10/9/`subham_v14`) into `docs/gameplay_viewer.html` (28 matches total) and updated `docs/status_report.html` and `docs/boss_forensics.html`.
+- **Promotion Summary:** `checkpoints/planet_transformer_best.pt` promoted to `Gen 12 PT-v2 PPO (w1_it60)` (`8–0–16 / 33.3%` vs. `#2 Hober Malloc`, `18–0–2 / 90.0%` vs. Gen 11/10/9, `4–0–0` vs. `subham_v14`, `33.30 ms/turn`, recommended threshold `t=0.53`). Retained `planet_transformer_gen12_4m_ptv2_ppo.pt`, `planet_transformer_gen12_4m_ptv2_kd.pt`, and `planet_transformer_gen12_4m_ptv2_ppo_w3b.pt`.
