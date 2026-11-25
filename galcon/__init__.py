@@ -5,6 +5,8 @@ directly to classic Galcon / Phil Hassey's ``gbots`` protocol.
 """
 
 from galcon.sim import (
+    ITEMS_MAX,
+    ITEMS_RESERVED,
     MIN_PLANET_GAP,
     SHIP_RADIUS,
     Fleet,
@@ -13,6 +15,7 @@ from galcon.sim import (
     RedirOrder,
     SendOrder,
     generate_galcon_map,
+    physical_ship_count,
     planet_radius_from_production,
     settle_planets,
 )
@@ -20,12 +23,15 @@ from galcon.sim import (
 __all__ = [
     "Fleet",
     "GalconSim",
+    "ITEMS_MAX",
+    "ITEMS_RESERVED",
     "MIN_PLANET_GAP",
     "Planet",
     "RedirOrder",
     "SHIP_RADIUS",
     "SendOrder",
     "generate_galcon_map",
+    "physical_ship_count",
     "planet_radius_from_production",
     "settle_planets",
 ]

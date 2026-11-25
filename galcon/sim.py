@@ -32,6 +32,9 @@ NEUTRAL_PROD_MIN = 15
 NEUTRAL_PROD_MAX = 100
 TIE_EPS = 1e-9
 ARRIVAL_EPS = 1e-9
+ITEMS_MAX = 4096
+ITEMS_RESERVED = 16
+BASE_ITEM_USERS = 3  # neutral + P1 + P2
 
 
 @dataclass
@@ -55,6 +58,41 @@ class Fleet:
     source: int
     target: int
     radius: float = SHIP_RADIUS
+    num_units: int = 1
+
+    @property
+    def ships_per_unit(self) -> float:
+        return self.ships / max(1, self.num_units)
+
+
+def physical_ship_count(
+    ships: float,
+    total_planet_ships: float,
+    item_count: int,
+    *,
+    items_max: int = ITEMS_MAX,
+    reserved: int = ITEMS_RESERVED,
+) -> int:
+    """Compute physical ship count for a launched fleet (Galcon 2 ``galcon_fleet.cpp`` / Galcon 3 ``galcon/fleet.go``).
+
+    Matches the exact world item-table throttling formula:
+    - ``items_max`` defaults to ``ITEMS_MAX = 4096`` and ``reserved`` defaults to ``ITEMS_RESERVED = 16``.
+    - ``item_count`` is total occupied item-table slots: ``users + planets + fleets + physical_ship_units``.
+    - ``total_planet_ships`` is the sum of non-negative ships on **planets only** (flying fleets excluded),
+      counted **before** the fleet leaves its source planet.
+    - Returns ``0`` if ``ships < 1.0 - TIE_EPS``; otherwise returns at least ``1`` (soft cap when table is full).
+    """
+    if ships < 1.0 - TIE_EPS:
+        return 0
+    avail = items_max - int(item_count) - int(reserved)
+    if avail <= 0:
+        avail = 0
+    avail //= 2
+    parts = int(ships)
+    parts = int(min(parts, math.sqrt(17.0 * ships)))
+    if total_planet_ships > 0.0:
+        parts = int(min(parts, avail * ships / total_planet_ships))
+    return max(1, parts)
 
 
 @dataclass(frozen=True)
@@ -526,7 +564,17 @@ class GalconSim:
             for p in planets
         }
         self.fleets: Dict[int, Fleet] = {
-            f.id: Fleet(f.id, f.owner, float(f.ships), float(f.x), float(f.y), f.source, f.target, float(f.radius))
+            f.id: Fleet(
+                f.id,
+                f.owner,
+                float(f.ships),
+                float(f.x),
+                float(f.y),
+                f.source,
+                f.target,
+                float(f.radius),
+                int(f.num_units),
+            )
             for f in fleets
         }
         self.width = float(width)
@@ -584,6 +632,15 @@ class GalconSim:
         sim._winner = self._winner
         return sim
 
+    def item_count(self) -> int:
+        """Current world item-table occupancy: users + planets + fleets + physical ship units."""
+        return (
+            BASE_ITEM_USERS
+            + len(self.planets)
+            + len(self.fleets)
+            + sum(max(1, f.num_units) for f in self.fleets.values())
+        )
+
     def eta_ticks(self, x1: float, y1: float, dst: Planet) -> int:
         """Exact arrival ticks from ``(x1, y1)`` to ``dst`` boundary."""
         dist = max(0.0, math.hypot(dst.x - x1, dst.y - y1) - dst.radius)
@@ -609,12 +666,15 @@ class GalconSim:
                     dst = self.planets.get(order.dst_id)
                     if src is None or dst is None or src.id == dst.id or src.owner != pid:
                         continue
-                    pct = max(1, min(100, int(order.percent)))
-                    send_ships = math.floor(src.ships * (pct / 100.0) + 1e-9)
-                    if send_ships < 1:
+                    if src.ships < 1.0 - TIE_EPS:
                         continue
-                    send_ships = min(float(send_ships), src.ships)
-                    src.ships -= send_ships
+                    pct = max(1, min(100, int(order.percent)))
+                    send_ships = min(src.ships, src.ships * (pct / 100.0))
+                    if send_ships < 1.0 - TIE_EPS:
+                        continue
+                    total_planet_ships = sum(max(0.0, p.ships) for p in self.planets.values())
+                    parts = physical_ship_count(send_ships, total_planet_ships, self.item_count())
+                    src.ships = max(0.0, src.ships - send_ships)
                     dx = dst.x - src.x
                     dy = dst.y - src.y
                     d = max(1e-6, math.hypot(dx, dy))
@@ -630,6 +690,7 @@ class GalconSim:
                         y=spawn_y,
                         source=src.id,
                         target=dst.id,
+                        num_units=parts,
                     )
                 elif isinstance(order, RedirOrder) and self.allow_redirect:
                     fl = self.fleets.get(order.fleet_id)

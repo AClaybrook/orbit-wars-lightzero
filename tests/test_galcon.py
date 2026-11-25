@@ -1503,3 +1503,212 @@ def test_galcon_sim_epsilon_tie_and_arrival_tolerance():
     sim2.step({})
     assert 2000 not in sim2.fleets
     assert sim2.planets[1].owner == 1 and np.isclose(sim2.planets[1].ships, 1e-6, atol=1e-12)
+
+
+def test_galcon_sim_fractional_send_and_physical_ship_count():
+    """Verify fractional ship packing, >= 1.0 send guard, physical_ship_count throttling, and clone parity."""
+    import math
+    import galcon
+    from galcon.sim import (
+        BASE_ITEM_USERS,
+        ITEMS_MAX,
+        ITEMS_RESERVED,
+        Fleet,
+        GalconSim,
+        Planet,
+        SendOrder,
+        physical_ship_count,
+    )
+
+    # Re-exports & constants
+    assert ITEMS_MAX == 4096
+    assert ITEMS_RESERVED == 16
+    assert BASE_ITEM_USERS == 3
+    assert galcon.ITEMS_MAX == ITEMS_MAX
+    assert galcon.ITEMS_RESERVED == ITEMS_RESERVED
+    assert galcon.physical_ship_count is physical_ship_count
+    assert physical_ship_count(0.99, 100.0, 10) == 0
+    assert physical_ship_count(1.0 - 1e-12, 100.0, 10) == 1
+
+    # 1. Planet with < 1.0 ships (0.99) cannot send at 100%
+    p1 = Planet(id=1, owner=1, ships=0.99, x=20.0, y=100.0, production=0.0, radius=12.0)
+    p2 = Planet(id=2, owner=2, ships=50.0, x=220.0, y=100.0, production=0.0, radius=12.0)
+    sim = GalconSim([p1, p2], width=300.0, height=200.0)
+    sim.step({1: [SendOrder(1, 2, 100)]})
+    assert len(sim.fleets) == 0
+    assert np.isclose(sim.planets[1].ships, 0.99, atol=1e-12)
+
+    # 2. Planet with 1.5 ships cannot send at 50% (0.75 < 1.0), CAN send at 80% (1.2 ships)
+    sim.planets[1].ships = 1.5
+    sim.step({1: [SendOrder(1, 2, 50)]})
+    assert len(sim.fleets) == 0
+    assert np.isclose(sim.planets[1].ships, 1.5, atol=1e-12)
+
+    sim.step({1: [SendOrder(1, 2, 80)]})
+    assert len(sim.fleets) == 1
+    fl = next(iter(sim.fleets.values()))
+    assert np.isclose(sim.planets[1].ships, 0.3, atol=1e-12)
+    assert np.isclose(fl.ships, 1.2, atol=1e-12)
+    assert fl.num_units == 1
+    assert np.isclose(fl.ships_per_unit, 1.2, atol=1e-12)
+
+    # 3. Fractional ship packing evenly across physical ships: 10.6 @ 50% -> 5.3 across 5 units (1.06/unit)
+    p1 = Planet(id=1, owner=1, ships=10.6, x=20.0, y=100.0, production=0.0, radius=12.0)
+    p2 = Planet(id=2, owner=2, ships=50.0, x=220.0, y=100.0, production=0.0, radius=12.0)
+    sim_frac = GalconSim([p1, p2], width=300.0, height=200.0)
+    sim_frac.step({1: [SendOrder(1, 2, 50)]})
+    assert len(sim_frac.fleets) == 1
+    fl_frac = next(iter(sim_frac.fleets.values()))
+    assert np.isclose(sim_frac.planets[1].ships, 5.3, atol=1e-12)
+    assert np.isclose(fl_frac.ships, 5.3, atol=1e-12)
+    assert fl_frac.num_units == 5
+    assert np.isclose(fl_frac.ships_per_unit, 1.06, atol=1e-12)
+    assert np.isclose(fl_frac.num_units * fl_frac.ships_per_unit, 5.3, atol=1e-12)
+
+    # 4. Large send sqrt(17 * N) cap: 100 ships -> floor(sqrt(1700)) == 41 units, 100/41 each
+    p1 = Planet(id=1, owner=1, ships=100.0, x=20.0, y=100.0, production=0.0, radius=24.0)
+    p2 = Planet(id=2, owner=2, ships=100.0, x=320.0, y=100.0, production=0.0, radius=24.0)
+    sim_lg = GalconSim([p1, p2], width=400.0, height=200.0)
+    sim_lg.step({1: [SendOrder(1, 2, 100)]})
+    fl_lg = next(iter(sim_lg.fleets.values()))
+    assert fl_lg.num_units == int(math.sqrt(17.0 * 100.0)) == 41
+    assert np.isclose(fl_lg.ships, 100.0, atol=1e-12)
+    assert np.isclose(fl_lg.ships_per_unit, 100.0 / 41.0, atol=1e-12)
+    assert sim_lg.item_count() == BASE_ITEM_USERS + 2 + 1 + 41
+
+    # 5a. Table saturation & total_planet_ships scaling: item_count=3500 -> avail=290 -> int(avail * N / T)
+    assert physical_ship_count(100.0, 2000.0, 3500) == int(290 * 100.0 / 2000.0) == 14
+    # Build a sim with exact item_count == 3500 and total_planet_ships == 2000.0
+    # item_count = BASE_ITEM_USERS(3) + planets(2) + fleets(1) + num_units(3494) = 3500
+    filler_3500 = Fleet(id=900, owner=2, ships=10.0, x=20.0, y=20.0, source=2, target=1, num_units=3494)
+    sim_3500 = GalconSim(
+        [
+            Planet(id=1, owner=1, ships=100.0, x=20.0, y=180.0, production=0.0, radius=24.0),
+            Planet(id=2, owner=2, ships=1900.0, x=420.0, y=180.0, production=0.0, radius=24.0),
+        ],
+        [filler_3500],
+        width=480.0,
+        height=320.0,
+    )
+    assert sim_3500.item_count() == 3500
+    sim_3500.step({1: [SendOrder(1, 2, 100)]})
+    fl_3500 = sim_3500.fleets[1000]
+    assert fl_3500.num_units == 14
+    assert np.isclose(fl_3500.ships, 100.0, atol=1e-12)
+    assert np.isclose(fl_3500.ships_per_unit, 100.0 / 14.0, atol=1e-12)
+
+    # 5b. T includes source planet's ships BEFORE deduction (single planet sending 100% -> N / T = 1.0)
+    # item_count = 3 + 2 + 1 + 4034 = 4040 -> avail = (4096 - 4040 - 16) // 2 = 20
+    filler_4040 = Fleet(id=901, owner=2, ships=10.0, x=20.0, y=20.0, source=2, target=1, num_units=4034)
+    sim_single = GalconSim(
+        [
+            Planet(id=1, owner=1, ships=100.0, x=20.0, y=180.0, production=0.0, radius=24.0),
+            Planet(id=2, owner=2, ships=0.0, x=420.0, y=180.0, production=0.0, radius=24.0),
+        ],
+        [filler_4040],
+        width=480.0,
+        height=320.0,
+    )
+    assert sim_single.item_count() == 4040
+    sim_single.step({1: [SendOrder(1, 2, 100)]})
+    assert sim_single.fleets[1000].num_units == 20  # avail * (100 / 100) == 20
+
+    # Also distinguish before-deduction vs after-deduction when another planet holds ships:
+    # item_count = 3980 -> avail = 50; p1=100, p2=100 -> T_before = 200 -> parts = int(50 * 100 / 200) = 25
+    # (post-deduction T would be 100, which would erroneously give 41)
+    filler_3980 = Fleet(id=902, owner=2, ships=1.0, x=20.0, y=20.0, source=2, target=1, num_units=3974)
+    sim_before = GalconSim(
+        [
+            Planet(id=1, owner=1, ships=100.0, x=20.0, y=180.0, production=0.0, radius=24.0),
+            Planet(id=2, owner=2, ships=100.0, x=420.0, y=180.0, production=0.0, radius=24.0),
+        ],
+        [filler_3980],
+        width=480.0,
+        height=320.0,
+    )
+    assert sim_before.item_count() == 3980
+    sim_before.step({1: [SendOrder(1, 2, 100)]})
+    assert sim_before.fleets[1000].num_units == 25
+
+    # 5c. Flying fleets do NOT inflate T (only their item_count slots matter)
+    filler_huge_ships = Fleet(id=902, owner=2, ships=100000.0, x=20.0, y=20.0, source=2, target=1, num_units=3974)
+    sim_huge_fl = GalconSim(
+        [
+            Planet(id=1, owner=1, ships=100.0, x=20.0, y=180.0, production=0.0, radius=24.0),
+            Planet(id=2, owner=2, ships=100.0, x=420.0, y=180.0, production=0.0, radius=24.0),
+        ],
+        [filler_huge_ships],
+        width=480.0,
+        height=320.0,
+    )
+    assert sim_huge_fl.item_count() == 3980
+    sim_huge_fl.step({1: [SendOrder(1, 2, 100)]})
+    assert sim_huge_fl.fleets[1000].num_units == 25  # identical to sim_before despite 100,000 flying ships
+
+    # Adding an extra 100,000-ship flying fleet only adds its 2 item_count slots (3982 -> avail=49 -> parts=24)
+    sim_extra_fl = GalconSim(
+        [
+            Planet(id=1, owner=1, ships=100.0, x=20.0, y=180.0, production=0.0, radius=24.0),
+            Planet(id=2, owner=2, ships=100.0, x=420.0, y=180.0, production=0.0, radius=24.0),
+        ],
+        [
+            filler_3980,
+            Fleet(id=903, owner=1, ships=100000.0, x=20.0, y=20.0, source=1, target=2, num_units=1),
+        ],
+        width=480.0,
+        height=320.0,
+    )
+    assert sim_extra_fl.item_count() == 3982
+    sim_extra_fl.step({1: [SendOrder(1, 2, 100)]})
+    assert sim_extra_fl.fleets[1000].num_units == int(49 * 100.0 / 200.0) == 24
+
+    # 5d. Soft cap: item_count >= 4080 -> avail = 0 -> parts == 1 (send is NOT refused)
+    assert physical_ship_count(100.0, 100.0, 4080) == 1
+    assert physical_ship_count(100.0, 100.0, 5000) == 1
+    filler_full = Fleet(id=904, owner=2, ships=10.0, x=20.0, y=20.0, source=2, target=1, num_units=4074)
+    sim_full = GalconSim(
+        [
+            Planet(id=1, owner=1, ships=100.0, x=20.0, y=180.0, production=0.0, radius=24.0),
+            Planet(id=2, owner=2, ships=100.0, x=420.0, y=180.0, production=0.0, radius=24.0),
+        ],
+        [filler_full],
+        width=480.0,
+        height=320.0,
+    )
+    assert sim_full.item_count() == 4080
+    sim_full.step({1: [SendOrder(1, 2, 100)]})
+    assert 1000 in sim_full.fleets
+    fl_full = sim_full.fleets[1000]
+    assert np.isclose(fl_full.ships, 100.0, atol=1e-12)
+    assert fl_full.num_units == 1
+    assert np.isclose(fl_full.ships_per_unit, 100.0, atol=1e-12)
+
+    # 5e. Multi-send on the same tick sees updated total_planet_ships and item_count between orders
+    sim_multi = GalconSim(
+        [
+            Planet(id=1, owner=1, ships=100.0, x=20.0, y=180.0, production=0.0, radius=24.0),
+            Planet(id=2, owner=2, ships=100.0, x=420.0, y=180.0, production=0.0, radius=24.0),
+        ],
+        [filler_3980],
+        width=480.0,
+        height=320.0,
+    )
+    assert sim_multi.item_count() == 3980
+    sim_multi.step({1: [SendOrder(1, 2, 50), SendOrder(1, 2, 100)]})
+    # Order 1: N=50, T=200, item_count=3980 (avail=50) -> int(50 * 50 / 200) = 12
+    # Order 2: N=50, T=150, item_count=3980+1+12=3993 (avail=43) -> int(43 * 50 / 150) = 14
+    assert sim_multi.fleets[1000].num_units == 12
+    assert sim_multi.fleets[1001].num_units == 14
+    assert np.isclose(sim_multi.planets[1].ships, 0.0, atol=1e-12)
+
+    # 6. clone() preserves num_units and ships_per_unit
+    cloned = sim_frac.clone()
+    assert 1000 in cloned.fleets
+    cfl = cloned.fleets[1000]
+    assert cfl.num_units == 5
+    assert np.isclose(cfl.ships_per_unit, 1.06, atol=1e-12)
+    assert cloned.item_count() == sim_frac.item_count()
+    # Mutating clone does not affect original
+    cfl.num_units = 99
+    assert sim_frac.fleets[1000].num_units == 5
+
