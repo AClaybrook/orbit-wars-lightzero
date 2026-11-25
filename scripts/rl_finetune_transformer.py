@@ -564,6 +564,7 @@ def _play_deterministic_eval_game(
     hero_slot: int,
     max_steps: int,
     force_all_in: bool,
+    launch_threshold: float = 0.50,
 ) -> Tuple[float, float]:
     sim = FastOrbitSim.from_seed(seed=seed, num_agents=num_players, max_steps=max_steps)
     last_alive = [0] * num_players
@@ -573,7 +574,13 @@ def _play_deterministic_eval_game(
             obs = sim.to_observation(player=pid)
             enc = extract_planet_features(obs, player=pid, max_speed=sim.ship_speed)
             m = policy if pid == hero_slot else opp_model
-            mv, _, _, _ = _policy_step(m, enc, sample=False, force_all_in=force_all_in)
+            mv, _, _, _ = _policy_step(
+                m,
+                enc,
+                sample=False,
+                launch_threshold=launch_threshold,
+                force_all_in=force_all_in,
+            )
             acts.append(mv)
         sim.step(acts)
         if num_players > 2:
@@ -595,10 +602,14 @@ def _play_deterministic_eval_game(
 
 
 def _worker_eval_game(
-    task: Tuple[str, int, str, str, int, int, int, int, bool]
+    task: Tuple[Any, ...]
 ) -> Tuple[str, int, float, float]:
     _configure_worker_threads()
-    policy_path, policy_version, opp_path, opp_tag, num_players, seed, hero_slot, max_steps, force_all_in = task
+    if len(task) >= 10:
+        policy_path, policy_version, opp_path, opp_tag, num_players, seed, hero_slot, max_steps, force_all_in, launch_threshold = task[:10]
+    else:
+        policy_path, policy_version, opp_path, opp_tag, num_players, seed, hero_slot, max_steps, force_all_in = task
+        launch_threshold = 0.50
     policy = _get_worker_policy(policy_path, policy_version)
     opp_model = _get_worker_opp(opp_path)
     assert opp_model is not None
@@ -610,6 +621,7 @@ def _worker_eval_game(
         hero_slot=hero_slot,
         max_steps=max_steps,
         force_all_in=force_all_in,
+        launch_threshold=launch_threshold,
     )
     return opp_tag, num_players, won, rk
 
@@ -678,6 +690,7 @@ def _eval_vs_anchors_parallel(
     two_player_only: bool,
     max_steps: int,
     force_all_in: bool,
+    launch_threshold: float = 0.50,
 ) -> Dict[str, Any]:
     """Run paired-seed deterministic 2P (and optional 4P) validation across anchor models."""
     results: List[Tuple[str, int, float, float]] = []
@@ -686,12 +699,12 @@ def _eval_vs_anchors_parallel(
         for a_idx, (tag, opp_path, _) in enumerate(eval_anchors):
             for g in range(eval_pairs):
                 s = seed_base + a_idx * 100 + g
-                tasks.append((policy_path, policy_version, opp_path, tag, 2, s, 0, max_steps, force_all_in))
-                tasks.append((policy_path, policy_version, opp_path, tag, 2, s, 1, max_steps, force_all_in))
+                tasks.append((policy_path, policy_version, opp_path, tag, 2, s, 0, max_steps, force_all_in, launch_threshold))
+                tasks.append((policy_path, policy_version, opp_path, tag, 2, s, 1, max_steps, force_all_in, launch_threshold))
         if not two_player_only and eval_anchors:
             tag0, opp_path0, _ = eval_anchors[0]
             for g in range(4):
-                tasks.append((policy_path, policy_version, opp_path0, tag0, 4, seed_base + 500 + g, g % 4, max_steps, force_all_in))
+                tasks.append((policy_path, policy_version, opp_path0, tag0, 4, seed_base + 500 + g, g % 4, max_steps, force_all_in, launch_threshold))
         results = list(pool_exec.map(_worker_eval_game, tasks))
     else:
         cpu_policy.eval()
@@ -701,14 +714,14 @@ def _eval_vs_anchors_parallel(
                 s = seed_base + a_idx * 100 + g
                 for seat in (0, 1):
                     w, rk = _play_deterministic_eval_game(
-                        cpu_policy, opp_m, num_players=2, seed=s, hero_slot=seat, max_steps=max_steps, force_all_in=force_all_in
+                        cpu_policy, opp_m, num_players=2, seed=s, hero_slot=seat, max_steps=max_steps, force_all_in=force_all_in, launch_threshold=launch_threshold
                     )
                     results.append((tag, 2, w, rk))
         if not two_player_only and eval_anchors:
             tag0, _, opp_m0 = eval_anchors[0]
             for g in range(4):
                 w, rk = _play_deterministic_eval_game(
-                    cpu_policy, opp_m0, num_players=4, seed=seed_base + 500 + g, hero_slot=g % 4, max_steps=max_steps, force_all_in=force_all_in
+                    cpu_policy, opp_m0, num_players=4, seed=seed_base + 500 + g, hero_slot=g % 4, max_steps=max_steps, force_all_in=force_all_in, launch_threshold=launch_threshold
                 )
                 results.append((tag0, 4, w, rk))
 
@@ -1021,6 +1034,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--eval-opponents", nargs="*", default=[], help="Extra checkpoints for multi-anchor eval gate.")
     parser.add_argument("--force-all-in", action="store_true", help="Train with 100% all-in sends matching Gen 8/9 2P inference.")
     parser.add_argument("--two-player-only", action="store_true", help="Focus 100% of rollouts and anchor eval on 2P matches.")
+    parser.add_argument("--no-weak-opps", action="store_true", help="Replace subham_v14/heuristic slots with 100% neural pool opponents.")
+    parser.add_argument("--save-every", type=int, default=0, help="Save periodic snapshot every N iterations (0=off).")
+    parser.add_argument("--fixed-anchor", default="", help="Optional separate fixed KL anchor checkpoint path.")
+    parser.add_argument("--launch-threshold", type=float, default=0.50, help="Deterministic eval launch threshold.")
     parser.add_argument("--midgame-adv-weight", type=float, default=1.0, help="Policy-gradient multiplier for midgame ticks t in [25, 75].")
     parser.add_argument("--seed", type=int, default=9500)
     args = parser.parse_args(argv)
@@ -1038,7 +1055,14 @@ def main(argv: list[str] | None = None) -> int:
     cpu_policy.eval()
 
     policy = copy.deepcopy(cpu_policy).to(train_dev)
-    fixed_anchor = copy.deepcopy(cpu_policy).to(train_dev).eval()
+    if args.fixed_anchor and Path(args.fixed_anchor).is_file():
+        fa_ckpt = torch.load(args.fixed_anchor, map_location="cpu", weights_only=False)
+        fa_cfg = fa_ckpt.get("model_config", cfg)
+        fixed_anchor = PlanetTimelineTransformer(**fa_cfg)
+        fixed_anchor.load_state_dict(fa_ckpt["model_state_dict"])
+        fixed_anchor = fixed_anchor.to(train_dev).eval()
+    else:
+        fixed_anchor = copy.deepcopy(cpu_policy).to(train_dev).eval()
     teacher = copy.deepcopy(cpu_policy).to(train_dev).eval()
     for m in (fixed_anchor, teacher):
         for p in m.parameters():
@@ -1077,7 +1101,9 @@ def main(argv: list[str] | None = None) -> int:
     n_pairs = args.mirror_pairs if args.mirror_pairs > 0 else max(1, args.episodes_per_iter // 2)
 
     if args.two_player_only:
-        if has_subham:
+        if args.no_weak_opps:
+            league_cycle = [(2, "pool")] * 10
+        elif has_subham:
             league_cycle = [(2, "pool")] * 8 + [(2, "subham_v14"), (2, "heuristic")]
         else:
             league_cycle = [(2, "pool")] * 9 + [(2, "heuristic")]
@@ -1139,6 +1165,7 @@ def main(argv: list[str] | None = None) -> int:
             two_player_only=args.two_player_only,
             max_steps=max(240, args.max_steps),
             force_all_in=args.force_all_in,
+            launch_threshold=args.launch_threshold,
         )
         best_eval_score = ev0["eval_score"]
         tag_str0 = " ".join(f"{t}={100*v:.1f}%" for t, v in ev0["per_tag_2p"].items())
@@ -1352,6 +1379,7 @@ def main(argv: list[str] | None = None) -> int:
                     two_player_only=args.two_player_only,
                     max_steps=max(240, args.max_steps),
                     force_all_in=args.force_all_in,
+                    launch_threshold=args.launch_threshold,
                 )
                 tag_str = " ".join(f"{t}={100*v:.1f}%" for t, v in ev["per_tag_2p"].items())
                 if args.two_player_only:
@@ -1389,6 +1417,9 @@ def main(argv: list[str] | None = None) -> int:
             torch.save(payload, latest_path)
             if save_best:
                 torch.save(payload, out_path)
+            if args.save_every > 0 and it % args.save_every == 0:
+                snap_out = out_path.with_name(f"{out_path.stem}_it{it}{out_path.suffix}")
+                torch.save(payload, snap_out)
     finally:
         if pool_exec is not None:
             pool_exec.shutdown(wait=True)

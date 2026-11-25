@@ -246,23 +246,47 @@ def _extract_aux_future_targets(
 _WORKER_CACHE: Dict[str, Any] = {}
 
 
-def _collect_soft_kd_worker(task: Tuple[int, bool, Optional[str], int, int, int]) -> Dict[str, Any]:
+def _collect_soft_kd_worker(
+    task: Tuple[int, bool, Optional[str], str, int, int, int, int, int, bool, int]
+) -> Dict[str, Any]:
     from kaggle_environments import make
 
-    from evaluate import resolve_agent
+    from scripts.evaluate import resolve_agent
 
-    seed, is_dagger, student_checkpoint, sample_stride, future_horizon, fast_rollout_opp = task
-    if fast_rollout_opp:
-        # Speed up the rollout opponent only; HoberSoftTeacher ALWAYS queries full rotation_tta=True (1800.1 2P)!
-        os.environ["OW_ROTATION_TTA"] = "0"
-        os.environ["OW_OPPONENT_TTA"] = "0"
-    if "boss_agent" not in _WORKER_CACHE:
-        _WORKER_CACHE["boss_agent"] = resolve_agent("hober_malloc")
+    torch.set_num_threads(1)
+    (
+        seed,
+        is_dagger,
+        student_checkpoint,
+        student_spec_prefix,
+        sample_stride,
+        dense_start_tick,
+        dense_end_tick,
+        future_horizon,
+        fast_rollout_opp,
+        record_opp_slot,
+        max_collect_tick,
+    ) = task
+
+    # Instantiate full-TTA HoberSoftTeacher first so its env defaults do not overwrite
+    # the rollout opponent env vars configured immediately below.
     if "teacher" not in _WORKER_CACHE:
         _WORKER_CACHE["teacher"] = HoberSoftTeacher(rotation_tta=True, opponent_tta=False)
-    stu_key = f"stu:{student_checkpoint}"
+
+    if fast_rollout_opp:
+        os.environ["OW_ROTATION_TTA"] = "0"
+        os.environ["OW_OPPONENT_TTA"] = "0"
+        os.environ["ORBIT_WARS_BC_ALL_IN_ROTATION_TTA"] = "0"
+    else:
+        os.environ["OW_ROTATION_TTA"] = "1"
+        os.environ["OW_OPPONENT_TTA"] = "0"
+        os.environ["ORBIT_WARS_BC_ALL_IN_ROTATION_TTA"] = "1"
+
+    if "boss_agent" not in _WORKER_CACHE:
+        _WORKER_CACHE["boss_agent"] = resolve_agent("hober_malloc")
+    stu_key = f"stu:{student_spec_prefix}{student_checkpoint}"
     if is_dagger and student_checkpoint and stu_key not in _WORKER_CACHE:
-        _WORKER_CACHE[stu_key] = resolve_agent(f"pt:{student_checkpoint}")
+        _WORKER_CACHE[stu_key] = resolve_agent(f"{student_spec_prefix}{student_checkpoint}")
 
     boss_agent = _WORKER_CACHE["boss_agent"]
     teacher = _WORKER_CACHE["teacher"]
@@ -274,8 +298,9 @@ def _collect_soft_kd_worker(task: Tuple[int, bool, Optional[str], int, int, int]
     if is_dagger and student_agent is not None:
         stu_slot = seed % 2
         roster = [student_agent, boss_agent] if stu_slot == 0 else [boss_agent, student_agent]
-        record_slots = [stu_slot]
+        record_slots = [stu_slot, 1 - stu_slot] if record_opp_slot else [stu_slot]
     else:
+        stu_slot = -1
         roster = [boss_agent, boss_agent]
         record_slots = [0, 1]
 
@@ -291,16 +316,23 @@ def _collect_soft_kd_worker(task: Tuple[int, bool, Optional[str], int, int, int]
         r_self = rewards[slot] or 0
         r_opp = rewards[1 - slot] or 0
         val_target = 1.0 if r_self > r_opp else (-1.0 if r_self < r_opp else 0.0)
-        stride = 1 if (is_dagger and val_target < 0) else sample_stride
+        is_counter_opp = is_dagger and stu_slot >= 0 and slot != stu_slot
 
-        for t in range(0, n_ticks):
+        tick_limit = min(n_ticks, max_collect_tick) if max_collect_tick > 0 else n_ticks
+        for t in range(0, tick_limit):
             obs_t = steps[t][slot]["observation"]
             has_comets = bool(obs_t.get("comets"))
-            in_midgame = 22 <= t <= 78
-            if not (in_midgame or has_comets or (t % stride == 0)):
+            in_dense = dense_start_tick <= t <= dense_end_tick
+            if is_counter_opp:
+                keep = ((in_dense or has_comets) and (t % 2 == 0)) or (t % max(1, sample_stride * 2) == 0)
+            else:
+                stride = 1 if (is_dagger and val_target < 0 and sample_stride > 1) else sample_stride
+                keep = in_dense or has_comets or (t % stride == 0)
+            if not keep:
                 continue
             obs_t_copy = dict(obs_t)
             obs_t_copy["player"] = slot
+            obs_t_copy["step"] = int(steps[t][0]["observation"].get("step", t))
             enc = extract_planet_features(obs_t_copy, player=slot)
             if not enc.planet_ids or not np.any(enc.owned_mask):
                 continue
@@ -315,7 +347,7 @@ def _collect_soft_kd_worker(task: Tuple[int, bool, Optional[str], int, int, int]
                 actual_srcs = {int(m[0]) for m in actual_acts}
                 for i, pid in enumerate(enc.planet_ids):
                     if enc.owned_mask[i] and np.any(enc.legal_edges[i]):
-                        pred_launch = (1.0 - float(soft_probs[i, 0])) >= 0.50
+                        pred_launch = (1.0 - float(soft_probs[i, 0])) >= 0.53
                         actual_launch = int(pid) in actual_srcs
                         tot_dec += 1
                         if pred_launch == actual_launch:
@@ -355,20 +387,51 @@ def collect_soft_kd_dataset(
     hober_games: int = 2,
     dagger_games: int = 16,
     student_checkpoint: Optional[str] = None,
+    student_spec_prefix: str = "pt_d4_allin:",
     seed: int = 12000,
     sample_stride: int = 3,
+    dense_start_tick: int = 22,
+    dense_end_tick: int = 78,
     future_horizon: int = 10,
     workers: int = 1,
+    full_boss_rollout: bool = False,
+    record_opp_slot: bool = False,
+    max_collect_tick: int = 0,
 ) -> Dict[str, np.ndarray]:
     """Collect 2P games with exact Full-TTA `#2 Hober Malloc` soft probabilities + `t+10` future targets."""
     import multiprocessing as mp
 
-    tasks: List[Tuple[int, bool, Optional[str], int, int, int]] = []
+    fast_opp = 0 if full_boss_rollout else 1
+    tasks: List[Tuple[int, bool, Optional[str], str, int, int, int, int, int, bool, int]] = []
     if student_checkpoint:
         for g in range(dagger_games):
-            tasks.append((seed + 1000 + g, True, student_checkpoint, sample_stride, future_horizon, 1))
+            tasks.append((
+                seed + 1000 + g,
+                True,
+                student_checkpoint,
+                student_spec_prefix,
+                sample_stride,
+                dense_start_tick,
+                dense_end_tick,
+                future_horizon,
+                fast_opp,
+                record_opp_slot,
+                max_collect_tick,
+            ))
     for g in range(hober_games):
-        tasks.append((seed + g, False, None, sample_stride, future_horizon, 1))
+        tasks.append((
+            seed + g,
+            False,
+            None,
+            student_spec_prefix,
+            sample_stride,
+            dense_start_tick,
+            dense_end_tick,
+            future_horizon,
+            fast_opp,
+            record_opp_slot,
+            max_collect_tick,
+        ))
 
     t0 = time.time()
     parts: List[Dict[str, Any]] = []
@@ -584,10 +647,13 @@ def train_soft_kd(
     batch_size: int = 64,
     lr: float = 3.5e-4,
     aux_weight: float = 0.20,
+    value_weight: float = 0.25,
+    weight_decay: float = 1e-4,
     launch_boost: float = 1.25,
     midgame_weight: float = 1.0,
     comet_weight: float = 1.0,
     hold_boost: float = 1.0,
+    contiguous_val: bool = False,
     seed: int = 42,
     device: str = "cpu",
     train_threads: int = 4,
@@ -603,9 +669,14 @@ def train_soft_kd(
     train_dev, use_dml = resolve_train_device(device)
 
     n = len(data["val_targets"])
-    perm = np.random.permutation(n)
-    n_val = max(1, int(0.12 * n))
-    val_idx, tr_idx = perm[:n_val], perm[n_val:]
+    if contiguous_val and n >= 10:
+        n_val = max(1, int(0.10 * n))
+        tr_idx = np.arange(0, n - n_val)
+        val_idx = np.arange(n - n_val, n)
+    else:
+        perm = np.random.permutation(n)
+        n_val = max(1, int(0.12 * n))
+        val_idx, tr_idx = perm[:n_val], perm[n_val:]
 
     def make_ds(idx: np.ndarray) -> TensorDataset:
         return TensorDataset(
@@ -652,7 +723,7 @@ def train_soft_kd(
         flush=True,
     )
 
-    opt = build_optimizer(model.parameters(), lr=lr, weight_decay=1e-4, use_dml=use_dml)
+    opt = build_optimizer(model.parameters(), lr=lr, weight_decay=weight_decay, use_dml=use_dml)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs), eta_min=lr * 0.05)
     best_kl = float("inf")
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -688,6 +759,7 @@ def train_soft_kd(
             loss, m = compute_soft_kd_loss(
                 model, pf_a, tf, ef, le, om, pm, sp, vt, ao, ash, av,
                 aux_weight=aux_weight,
+                value_weight=value_weight,
                 launch_boost=launch_boost,
                 midgame_weight=midgame_weight,
                 comet_weight=comet_weight,
@@ -714,6 +786,7 @@ def train_soft_kd(
                 _, m = compute_soft_kd_loss(
                     model, pf, tf, ef, le, om, pm, sp, vt, ao, ash, av,
                     aux_weight=aux_weight,
+                    value_weight=value_weight,
                     launch_boost=launch_boost,
                     midgame_weight=midgame_weight,
                     comet_weight=comet_weight,
@@ -771,7 +844,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hober-games", type=int, default=16)
     parser.add_argument("--dagger-games", type=int, default=20)
     parser.add_argument("--student-checkpoint", default="checkpoints/planet_transformer_gen8_2p_softkd.pt")
+    parser.add_argument("--student-spec-prefix", default="pt_d4_allin:")
     parser.add_argument("--sample-stride", type=int, default=3)
+    parser.add_argument("--dense-start-tick", type=int, default=22)
+    parser.add_argument("--dense-end-tick", type=int, default=78)
+    parser.add_argument("--max-collect-tick", type=int, default=0)
+    parser.add_argument("--full-boss-rollout", action="store_true")
+    parser.add_argument("--record-opp-slot", action="store_true")
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--append", action="store_true", help="Collect new games and append onto existing dataset-cache.")
     parser.add_argument("--collect-only", action="store_true")
@@ -779,11 +858,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=2.5e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--aux-weight", type=float, default=0.20)
+    parser.add_argument("--value-weight", type=float, default=0.25)
     parser.add_argument("--launch-boost", type=float, default=1.0)
     parser.add_argument("--midgame-weight", type=float, default=2.5)
     parser.add_argument("--comet-weight", type=float, default=2.0)
     parser.add_argument("--hold-boost", type=float, default=1.25)
+    parser.add_argument("--contiguous-val", action="store_true")
     parser.add_argument("--seed", type=int, default=15000)
     parser.add_argument("--device", choices=["cpu", "dml", "cuda", "auto"], default="cpu")
     parser.add_argument("--train-threads", type=int, default=4)
@@ -807,9 +889,15 @@ def main(argv: list[str] | None = None) -> int:
             hober_games=args.hober_games,
             dagger_games=args.dagger_games,
             student_checkpoint=args.student_checkpoint,
+            student_spec_prefix=args.student_spec_prefix,
             seed=args.seed,
             sample_stride=args.sample_stride,
+            dense_start_tick=args.dense_start_tick,
+            dense_end_tick=args.dense_end_tick,
             workers=args.workers,
+            full_boss_rollout=args.full_boss_rollout,
+            record_opp_slot=args.record_opp_slot,
+            max_collect_tick=args.max_collect_tick,
         )
         if existing is not None:
             data = {k: np.concatenate([existing[k], fresh[k]], axis=0) for k in existing}
@@ -832,10 +920,13 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=args.batch_size,
         lr=args.lr,
         aux_weight=args.aux_weight,
+        value_weight=args.value_weight,
+        weight_decay=args.weight_decay,
         launch_boost=args.launch_boost,
         midgame_weight=args.midgame_weight,
         comet_weight=args.comet_weight,
         hold_boost=args.hold_boost,
+        contiguous_val=args.contiguous_val,
         seed=args.seed,
         device=args.device,
         train_threads=args.train_threads,

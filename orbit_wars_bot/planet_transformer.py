@@ -944,6 +944,8 @@ class SearchPlanetTransformerAgent(PlanetTransformerAgent):
         launch_threshold: float = 0.50,
         use_rot_tta: bool = True,
         use_d4_tta: bool = False,
+        force_all_in: bool = False,
+        neural_mid_replan: bool = False,
         rollout_horizon: int = 10,
         time_budget_sec: float = 0.22,
         neural_value_weight: float = 0.65,
@@ -954,8 +956,10 @@ class SearchPlanetTransformerAgent(PlanetTransformerAgent):
             launch_threshold=launch_threshold,
             use_rot_tta=use_rot_tta,
             use_d4_tta=use_d4_tta,
+            force_all_in=force_all_in,
             device=device,
         )
+        self.neural_mid_replan = bool(neural_mid_replan)
         self.rollout_horizon = max(2, int(rollout_horizon))
         self.time_budget_sec = float(time_budget_sec)
         self.neural_value_weight = float(neural_value_weight)
@@ -1001,14 +1005,21 @@ class SearchPlanetTransformerAgent(PlanetTransformerAgent):
         probs, mean_fracs, _ = self.predict_probs_and_value(enc, use_rot_tta=self.use_rot_tta)
 
         # Build diverse candidate plans from the Transformer's posterior
-        raw_candidates: List[List[List[float]]] = [
-            self._decode_plan(enc, probs, mean_fracs, launch_threshold=self.launch_threshold, force_all_in=False, max_speed=max_speed),
-            self._decode_plan(enc, probs, mean_fracs, launch_threshold=0.35, force_all_in=False, max_speed=max_speed),
-            self._decode_plan(enc, probs, mean_fracs, launch_threshold=0.65, force_all_in=False, max_speed=max_speed),
-            self._decode_plan(enc, probs, mean_fracs, launch_threshold=0.45, force_all_in=True, max_speed=max_speed),
-        ]
+        if self.force_all_in:
+            raw_candidates: List[List[List[float]]] = [
+                self._decode_plan(enc, probs, mean_fracs, launch_threshold=self.launch_threshold, force_all_in=True, max_speed=max_speed),
+                self._decode_plan(enc, probs, mean_fracs, launch_threshold=max(0.36, self.launch_threshold - 0.08), force_all_in=True, max_speed=max_speed),
+                self._decode_plan(enc, probs, mean_fracs, launch_threshold=min(0.66, self.launch_threshold + 0.08), force_all_in=True, max_speed=max_speed),
+            ]
+        else:
+            raw_candidates = [
+                self._decode_plan(enc, probs, mean_fracs, launch_threshold=self.launch_threshold, force_all_in=False, max_speed=max_speed),
+                self._decode_plan(enc, probs, mean_fracs, launch_threshold=0.35, force_all_in=False, max_speed=max_speed),
+                self._decode_plan(enc, probs, mean_fracs, launch_threshold=0.65, force_all_in=False, max_speed=max_speed),
+                self._decode_plan(enc, probs, mean_fracs, launch_threshold=0.45, force_all_in=True, max_speed=max_speed),
+            ]
 
-        # Identify top-2 highest-entropy owned planets and propose single-planet flips
+        # Identify highest-entropy owned planets and propose targeted flips
         entropies: List[Tuple[float, int, int]] = []
         for i in range(n):
             if not enc.owned_mask[i] or not np.any(enc.legal_edges[i]):
@@ -1019,16 +1030,29 @@ class SearchPlanetTransformerAgent(PlanetTransformerAgent):
             if len(top2) >= 2 and p_row[top2[1]] >= 0.12:
                 entropies.append((ent, i, int(top2[1])))
         entropies.sort(reverse=True)
-        for _, p_idx, alt_cls in entropies[:2]:
+        n_single_flips = 3 if self.force_all_in else 2
+        for _, p_idx, alt_cls in entropies[:n_single_flips]:
             raw_candidates.append(
                 self._decode_plan(
                     enc,
                     probs,
                     mean_fracs,
                     launch_threshold=self.launch_threshold,
-                    force_all_in=False,
+                    force_all_in=self.force_all_in,
                     max_speed=max_speed,
                     overrides={p_idx: alt_cls},
+                )
+            )
+        if self.force_all_in and len(entropies) >= 2:
+            raw_candidates.append(
+                self._decode_plan(
+                    enc,
+                    probs,
+                    mean_fracs,
+                    launch_threshold=self.launch_threshold,
+                    force_all_in=True,
+                    max_speed=max_speed,
+                    overrides={entropies[0][1]: entropies[0][2], entropies[1][1]: entropies[1][2]},
                 )
             )
 
@@ -1065,7 +1089,7 @@ class SearchPlanetTransformerAgent(PlanetTransformerAgent):
                     opp_probs,
                     opp_fracs,
                     launch_threshold=self.launch_threshold,
-                    force_all_in=False,
+                    force_all_in=self.force_all_in,
                     max_speed=max_speed,
                 )
             else:
@@ -1092,7 +1116,23 @@ class SearchPlanetTransformerAgent(PlanetTransformerAgent):
                     # Active mid-rollout replan for all players
                     step_acts: List[List[List[float]]] = [[] for _ in range(n_players)]
                     for pid_cur in range(n_players):
-                        step_acts[pid_cur] = heuristic_moves(sim, pid_cur)
+                        if self.neural_mid_replan:
+                            m_obs = sim.to_observation(player=pid_cur)
+                            m_enc = extract_planet_features(m_obs, player=pid_cur, max_speed=max_speed)
+                            if np.any(m_enc.owned_mask):
+                                m_probs, m_fracs, _ = self.predict_probs_and_value(
+                                    m_enc, use_rot_tta=False, use_d4_tta=False
+                                )
+                                step_acts[pid_cur] = self._decode_plan(
+                                    m_enc,
+                                    m_probs,
+                                    m_fracs,
+                                    launch_threshold=self.launch_threshold,
+                                    force_all_in=self.force_all_in,
+                                    max_speed=max_speed,
+                                )
+                        else:
+                            step_acts[pid_cur] = heuristic_moves(sim, pid_cur)
                     sim.step(step_acts)
                 else:
                     sim.step([[] for _ in range(n_players)])
@@ -1241,6 +1281,8 @@ def create_search_planet_transformer_agent(
     launch_threshold: float = 0.50,
     use_rot_tta: bool = True,
     use_d4_tta: bool = False,
+    force_all_in: bool = False,
+    neural_mid_replan: bool = False,
     rollout_horizon: int = 10,
     time_budget_sec: float = 0.22,
 ):
@@ -1250,6 +1292,8 @@ def create_search_planet_transformer_agent(
         launch_threshold=launch_threshold,
         use_rot_tta=use_rot_tta,
         use_d4_tta=use_d4_tta,
+        force_all_in=force_all_in,
+        neural_mid_replan=neural_mid_replan,
         rollout_horizon=rollout_horizon,
         time_budget_sec=time_budget_sec,
     )
