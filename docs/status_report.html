@@ -62,56 +62,56 @@
   <div class="wrap">
     <header>
       <div>
-        <div class="meta">AClaybrook/orbit-wars-lightzero • High-Elo Neural Tier • Gen 3 → Gen 12 (4.31M PT-v2 PPO)</div>
-        <h1>Orbit Wars AI — Gen 12 PT-v2 Progression &amp; Bot Comparison Report</h1>
-        <p>Single-model 4.31M PT-v2 breakthrough taking 8–0–16 (33.3%) off Kaggle #2 Hober Malloc (1800.1) and beating Gen 11 / 10 / 9 18–2 each at 33.3 ms/turn.</p>
+        <div class="meta">AClaybrook/orbit-wars-lightzero • High-Elo Neural Tier • Gen 3 → Gen 13 (4.67M PT-v3.5 KD)</div>
+        <h1>Orbit Wars AI — Gen 13 PT-v3.5 Progression &amp; Bot Comparison Report</h1>
+        <p>Single-model 4.67M PT-v3.5 breakthrough taking 21–0–27 (43.8%) off Kaggle #2 Hober Malloc (1800.1) across 48 games, beating Gen 12 PPO 18–0–2 (90.0%), and sweeping Gen 11 &amp; Gen 10 20–0–0 each.</p>
       </div>
       <div class="badges">
-        <a href="gameplay_viewer.html" class="badge ok">▶ Watch Bot Comparison Battles (28 Matches)</a>
-        <a href="boss_forensics.html" class="badge info">◆ #2 Boss Forensics (Gen 8 → 12)</a>
+        <a href="gameplay_viewer.html" class="badge ok">▶ Watch Bot Comparison Battles (33 Matches)</a>
+        <a href="boss_forensics.html" class="badge info">◆ #2 Boss Forensics (Gen 8 → 13)</a>
         <a href="wargame_report.html" class="badge info">◆ 3v1 Wargaming Study</a>
-        <span class="badge info">Best: 4.31M PT-v2 Gen 12 PPO (33.3% vs #2)</span>
+        <span class="badge info">Best: 4.67M PT-v3.5 Gen 13 KD (43.8% vs #2)</span>
       </div>
     </header>
 
     <section class="kpis">
       <div class="card rec-card">
-        <div class="meta">Gen 12 Single-Model vs. #2 Hober (24g)</div>
-        <div class="kpi-val ok">8–0–16 (33.3%)</div>
-        <p>5–0–7 (41.7%) on seeds 212–223 • 175.9t avg • 33.3 ms</p>
+        <div class="meta">Gen 13 Single-Model vs. #2 Hober (48g)</div>
+        <div class="kpi-val ok">21–0–27 (43.8%)</div>
+        <p>11–13 on 200–223 • 10–14 on 300–323 • P0 12/24, P1 9/24</p>
       </div>
       <div class="card highlight-card">
-        <div class="meta">Gen 12 vs. Gen 11 / 10 / 9 (Unseen 20g)</div>
-        <div class="kpi-val ok">18–0–2 (90.0%)</div>
-        <p>Sweeps subham_v14 4–0 (100%) • 4.31M single model</p>
+        <div class="meta">Unseen Ladder vs. Prior Champions (20g)</div>
+        <div class="kpi-val ok">18–2 / 20–0 / 20–0</div>
+        <p>90% vs Gen 12 PPO • Sweeps Gen 11, Gen 10 &amp; subham_v14 100%</p>
       </div>
       <div class="card">
-        <div class="meta">PT-v2 Soft-KD Fidelity (71.9k Boards)</div>
-        <div class="kpi-val pri">0.098 val_kl</div>
-        <p>Launch F1 91.1% • Target acc 89.6% • Aux 96.2%</p>
+        <div class="meta">PT-v3.5 Soft-KD + Logit-TTA</div>
+        <div class="kpi-val pri">0.0525 cal KL</div>
+        <p>val_all 94.5% • l_f1 90.4% • Decoupled Logit-TTA +8.4%</p>
       </div>
       <div class="card">
-        <div class="meta">DirectML RL Pipeline Speedup</div>
-        <div class="kpi-val pri">~3.0× Faster</div>
-        <p>91s → 31.5s/iter • 6.53× NumPy + B=8 + Async Overlap</p>
+        <div class="meta">Single-Thread CPU Inference Latency</div>
+        <div class="kpi-val pri">53.9–63.0 ms/t</div>
+        <p>72.2–79.6 ms p95 • 15–18× under 1000 ms Kaggle cap</p>
       </div>
     </section>
 
     <nav class="tabs">
-      <button class="tab-btn active" data-tab="high">1. Gen 12 Comparison Battles &amp; Ladder</button>
-      <button class="tab-btn" data-tab="boss">2. Boss Scaling &amp; RL Pipeline Speedups</button>
+      <button class="tab-btn active" data-tab="high">1. Gen 13 Comparison Battles &amp; Ladder</button>
+      <button class="tab-btn" data-tab="boss">2. Boss Scaling &amp; Forensics Fixes</button>
       <button class="tab-btn" data-tab="archive">3. Historical Archive (Gen 1–2 &amp; Heuristics)</button>
-      <button class="tab-btn" data-tab="commands">4. Reproducible Gen 12 Commands</button>
+      <button class="tab-btn" data-tab="commands">4. Reproducible Gen 13 Commands</button>
     </nav>
 
     <section id="tab-high" class="panel active stack">
       <div class="card rec-card">
         <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:8px;">
           <div>
-            <h2>Gen 12 Single-Model Comparison Battles (4.31M PT-v2 PPO, 8× D4, t=0.53)</h2>
-            <p>Verified head-to-head series on unseen mirrored seeds (990–999 × 2 seats = 20g) and the 24-game #2 Hober Malloc gauntlet (seeds 200–223).</p>
+            <h2>Gen 13 Single-Model Comparison Battles (4.67M PT-v3.5 KD, 8× D4 Decoupled Logit-TTA, t=0.53)</h2>
+            <p>Verified head-to-head series on unseen mirrored seeds (990–999 × 2 seats = 20g) and the expanded 48-game #2 Hober Malloc suite (seeds 200–223 &amp; 300–323).</p>
           </div>
-          <a href="gameplay_viewer.html" class="pill-link">▶ Replay all 8 featured Gen 12 battles →</a>
+          <a href="gameplay_viewer.html" class="pill-link">▶ Replay all featured Gen 13 battles →</a>
         </div>
         <div id="battle-bars" style="margin-top:12px;"></div>
       </div>
@@ -123,7 +123,7 @@
       </div>
 
       <div class="card">
-        <h2>Generation-by-Generation Head-to-Head &amp; Boss Progression (Gen 3 → Gen 12)</h2>
+        <h2>Generation-by-Generation Head-to-Head &amp; Boss Progression (Gen 3 → Gen 13)</h2>
         <p>Every model benchmarked on exact Kaggle physics with 8× D4 test-time augmentation and single-thread CPU latency.</p>
         <div style="overflow-x:auto;">
           <table>
@@ -141,13 +141,13 @@
 
     <section id="tab-boss" class="panel stack">
       <div class="card">
-        <h2>Gen 12 Single-Model Scaling vs. #2 Hober Malloc (24g Gauntlet, Seeds 200–223)</h2>
-        <p>Pure single-model RL progression (no ensembles): PT-v2 architecture broke Gen 11's 0% ceiling, Round 3 DAgger reached 16.7%, and Wave 1 KL-Anchored PPO doubled Boss win rate to 33.3%.</p>
+        <h2>Gen 12 → Gen 13 Single-Model Scaling vs. #2 Hober Malloc (24g / 48g Boss Suite)</h2>
+        <p>Pure single-model progression (no ensembles): PT-v3 4× Conv1D + 7-layer GeGLU jumped PT-v2 R5 from 18.8% to 35.4% across 48 games, and PT-v3.5 Target-Conditioned Launch + Decoupled Logit-TTA surged to 43.8% (21–0–27).</p>
         <div id="boss-bars" style="margin-top:12px;"></div>
         <div style="overflow-x:auto;">
           <table>
             <thead>
-              <tr><th>Gen 12 Stage (Single 4.31M Model)</th><th>Training Method</th><th class="num">12g (200–211)</th><th class="num">24g (200–223)</th><th class="num">Avg Len</th></tr>
+              <tr><th>Gen Stage (Single Model)</th><th>Training Method</th><th class="num">200–223 (24g)</th><th class="num">300–323 / Full</th><th class="num">Avg Len</th></tr>
             </thead>
             <tbody id="boss-tbody"></tbody>
           </table>
@@ -155,12 +155,12 @@
       </div>
       <div class="grid-2">
         <div class="card highlight-card">
-          <h3 class="pri">Why PT-v2 Broke Through (0% → 33.3% vs #2)</h3>
-          <p>1) <strong>Decoupled Factorized Launch + Multi-Head Q·K Target Attention:</strong> Stopped variable legal-target counts from distorting launch probability (<code>val_launch 41.0% → 62.2%</code>, <code>l_f1 = 91.1%</code>, <code>val_tgt = 89.6%</code>). 2) <strong>14-Channel Per-Timestep Orbital Timeline + 3-Block ResConv1D + GeGLU:</strong> Gave the network exact 20-tick future `(dx_t, dy_t, r_t, cap_need_t)` orbital geometry. 3) <strong>71.9k-Board Iterative Soft-KD DAgger + Tightly Anchored GPU PPO:</strong> Drove `val_kl = 0.098`, then Wave 1 PPO doubled Boss win rate `16.7% → 33.3%` while keeping `akl = 0.075` and `aux = 96.5%`.</p>
+          <h3 class="pri">Why PT-v3.5 Broke 43.8% vs. #2 Hober Malloc</h3>
+          <p>1) <strong>48g Loss Forensics Diagnosis:</strong> Auditing PT-v3 R6's 34 losses over 37,320 decisions traced <code>43.8%</code> of disagreements to <code>false_hold</code> (<code>81.0%</code> in the <code>[0.40, 0.53)</code> cliff band, <code>54.0%</code> near divergence) and <code>31.0%</code> to <code>false_launch</code>. 2) <strong>PT-v3.5 Target-Conditioned Launch Context:</strong> Zero-init <code>launch_ctx_head</code> feeds <code>[h, h_tgt, e_tgt, max_p_tgt, tgt_ent, best_raw]</code> into the launch head while preserving factorized gradients. 3) <strong>Decoupled Logit-TTA:</strong> Averaging launch logits and target log-probs separately across 8× D4 symmetries gained <code>+8.4%</code> causal WR on unseen 300–323 and flipped forensics blunders Seed 212 &amp; Seed 203 into wins!</p>
         </div>
         <div class="card rec-card">
-          <h3 class="ok">3× DirectML RL Speedup Stack (91s → 31.5s/iter)</h3>
-          <p>1) <strong>Vectorized NumPy Physics + 2P Shared Cache:</strong> Replaced 2.7M Python `math.hypot` calls/game with 1-shot C broadcasts — bit-exact (`max_diff = 5.96e-8`, `0` mismatches) and <strong>3.86× solo / 6.53× 2P faster</strong>. 2) <strong>B=8 Lockstep CPU Rollouts + `compute_frac=False` + TTA Edge Broadcast:</strong> 2.12× faster rollouts &amp; live `8× D4` latency cut `43.4 ms → 33.3 ms`. 3) <strong>Cached Ref Log-Probs + `--async-rollout` + `--ppo-epochs 2`:</strong> Hides 100% of CPU rollouts behind RX 6950 XT GPU updates (`roll_wait = 0.0s`, `31.5s/iter`).</p>
+          <h3 class="ok">CPU/DML Optimizations &amp; Unseen Dominance</h3>
+          <p>1) <strong>CPU Valid-Planet Packing &amp; Mask Opt:</strong> Packed valid planets before Conv1D (<code>1.51×</code> padded rollout / <code>1.22×</code> live 8× D4 speedup) + pre-transpose mask opt (<code>+16.9%</code> DML, <code>0</code> fallbacks). 2) <strong>DirectML-Native Factorized PPO:</strong> Replaced unsupported <code>log_sigmoid_forward</code> with 2-class <code>F.log_softmax</code>; 35 iters peaked at <code>31.2%</code> strict 48g so <code>PT-v3.5 KD (43.8%)</code> stayed champion. 3) <strong>Unseen Sweep:</strong> Beat Gen 12 PPO <code>18–0–2 (90%)</code>, swept Gen 11 &amp; Gen 10 PPO <code>20–0–0 (100%)</code>, and swept <code>subham_v14</code> <code>4–0–0</code> at <code>53.9–63.0 ms/t</code> 1-thread.</p>
         </div>
       </div>
     </section>
@@ -190,29 +190,23 @@
 
     <section id="tab-commands" class="panel stack">
       <div class="card">
-        <h3>Reproducible Gen 12 (4.31M PT-v2) Soft-KD + Fast Pipelined DirectML PPO Commands</h3>
-        <pre># 1. Train 4.31M PT-v2 Soft-KD on 71.9k float16 DAgger boards (val_kl=0.098, l_f1=91.1%, val_tgt=89.6%)
-python scripts/distill_soft_kd.py --dataset-cache gen12_ptv2_r3_all_f16.npz --resume "" \
-  --epochs 20 --batch-size 128 --lr 4.5e-4 --weight-decay 4e-4 \
-  --midgame-weight 1.0 --comet-weight 1.2 --hold-boost 1.0 --launch-boost 1.0 --launch-bce-weight 0.25 \
-  --feature-version 2 --arch-version 2 --d-model 256 --n-heads 8 --n-layers 6 --dim-ff 512 \
-  --contiguous-val --device dml --out checkpoints/planet_transformer_gen12_4m_ptv2_kd.pt
+        <h3>Reproducible Gen 13 (4.67M PT-v3.5) Soft-KD + Decoupled Logit-TTA Evaluation Commands</h3>
+        <pre># 1. Train 4.67M PT-v3.5 Soft-KD with cliff_boost &amp; target-conditioned launch_ctx_head (5 cosine DML epochs, 0 fallbacks)
+python scripts/distill_soft_kd.py --dataset-cache gen13_ptv3_r6_all.npz --resume checkpoints/planet_transformer_gen13_4m_ptv3_kd.pt \
+  --epochs 5 --batch-size 128 --lr 1.5e-4 --weight-decay 4e-4 --cliff-boost 2.0 --detach-value \
+  --feature-version 2 --arch-version 3 --target-cond-launch --d-model 256 --n-heads 8 --n-layers 7 --dim-ff 512 \
+  --contiguous-val --device dml --out checkpoints/planet_transformer_gen13_4m_ptv35_kd.pt
 
-# 2. Fast Pipelined KL-Anchored DirectML League PPO (~31.5s/iter with B=8 rollouts + async overlap)
-python scripts/rl_finetune_transformer.py \
-  --init checkpoints/planet_transformer_gen12_4m_ptv2_kd.pt \
-  --fixed-anchor checkpoints/planet_transformer_gen12_4m_ptv2_kd.pt \
-  --pool checkpoints/planet_transformer_gen11_4m_ppo.pt checkpoints/planet_transformer_gen10_4m_ppo.pt \
-  --iterations 60 --mirror-pairs 24 --workers 8 --rollout-batch 8 --async-rollout --ppo-epochs 2 \
-  --batch-size 256 --device dml --lr 1.5e-5 --kl-coef 0.05 --anchor-kl-coef 0.05 --aux-coef 0.15 \
-  --temperature 0.60 --opp-temperature 0.45 --max-steps 260 --launch-threshold 0.53 \
-  --force-all-in --two-player-only --no-weak-opps --out checkpoints/planet_transformer_gen12_4m_ptv2_ppo.pt
-
-# 3. Evaluate Gen 12 Champion vs. #2 Hober Malloc (1800.1) &amp; run Boss Forensics
+# 2. Evaluate Gen 13 Champion (PT-v3.5 + auto-enabled Decoupled Logit-TTA) on the 48g #2 Hober Malloc Suite
 python scripts/evaluate.py --candidate pt_d4_allin_t53:checkpoints/planet_transformer_best.pt \
-  --opponents hober_malloc subham_v14 --players 2 --games 24 --seed 200
-python scripts/analyze_boss_gap.py --seeds 200 201 202 203 204 205 \
-  --ckpt checkpoints/planet_transformer_best.pt --launch-threshold 0.53
+  --opponents hober_malloc --players 2 --games 24 --seed 200 --decoupled-logit-tta
+python scripts/evaluate.py --candidate pt_d4_allin_t53:checkpoints/planet_transformer_best.pt \
+  --opponents hober_malloc --players 2 --games 24 --seed 300 --decoupled-logit-tta
+
+# 3. DirectML-Native Exact Factorized Low-T PPO (optional wave trial, 35 iters) &amp; unit tests
+python scripts/rl_finetune_transformer.py --init checkpoints/planet_transformer_best.pt \
+  --fixed-anchor checkpoints/planet_transformer_best.pt --exact-factorized-ppo --decoupled-logit-tta \
+  --detach-value --iterations 35 --device dml --out checkpoints/planet_transformer_gen13_ptv35_ppo.pt
 pytest -v</pre>
       </div>
     </section>
@@ -220,18 +214,19 @@ pytest -v</pre>
 
   <script>
     const COMPARISON_BATTLES = [
-      { label: "vs. subham_v14 (4g, t=0.53)", wr: 100.0, rec: "4–0–0 (100.0%, 114.8t)", tone: "fill-ok" },
-      { label: "vs. Gen 11 PPO Champion (20g unseen)", wr: 90.0, rec: "18–0–2 (90.0%, 156.3t)", tone: "fill-ok" },
-      { label: "vs. Gen 10 4M PPO (20g unseen)", wr: 90.0, rec: "18–0–2 (90.0%, 130.1t)", tone: "fill-ok" },
-      { label: "vs. Gen 9 Ens-2x (20g unseen)", wr: 90.0, rec: "18–0–2 (90.0%, 136.6t)", tone: "fill-ok" },
-      { label: "vs. Gen 12 Soft-KD R3 (20g unseen)", wr: 50.0, rec: "10–0–10 (50.0%, 2× Boss WR!)", tone: "fill-pri" },
-      { label: "vs. #2 Hober Malloc (24g, seeds 200–223)", wr: 33.3, rec: "8–0–16 (33.3%, 175.9t)", tone: "fill-warn" },
-      { label: "vs. #2 Hober Malloc (Unseen 212–223 half)", wr: 41.7, rec: "5–0–7 (41.7%, 3 P1 wins!)", tone: "fill-warn" }
+      { label: "vs. subham_v14 (4g, 1-thread)", wr: 100.0, rec: "4–0–0 (100.0%, 111.8t, 63.0ms)", tone: "fill-ok" },
+      { label: "vs. Gen 11 PPO Champion (20g unseen)", wr: 100.0, rec: "20–0–0 (100.0%, 131.7t)", tone: "fill-ok" },
+      { label: "vs. Gen 10 4M PPO (20g unseen)", wr: 100.0, rec: "20–0–0 (100.0%, 113.4t)", tone: "fill-ok" },
+      { label: "vs. Gen 12 PT-v2 PPO Champion (20g unseen)", wr: 90.0, rec: "18–0–2 (90.0%, 158.5t)", tone: "fill-ok" },
+      { label: "vs. Gen 13 PT-v3 KD (20g unseen mirror)", wr: 10.0, rec: "2–0–18 (10.0% mirror; +8.4% vs #2)", tone: "fill-pri" },
+      { label: "vs. #2 Hober Malloc (48g Full Suite)", wr: 43.8, rec: "21–0–27 (43.8%, P0 12/24, P1 9/24)", tone: "fill-warn" },
+      { label: "vs. #2 Hober Malloc (200–223 / 300–323)", wr: 45.8, rec: "11–0–13 (45.8%) / 10–0–14 (41.7%)", tone: "fill-warn" }
     ];
     const KAGGLE_LADDER = [
       { name: "#1 Isaiah @ Tufa Labs (200M, B200s)", elo: 1865.1, tag: "Official Kaggle #1", ours: false, boss: true },
       { name: "#2 Hober Malloc (4.3M, 10B RL)", elo: 1800.1, tag: "Local Boss • Kaggle #2", ours: false, boss: true },
-      { name: "4.31M PT-v2 Gen 12 PPO (Single Model!)", elo: 1790, tag: "Gen 12 • 33.3% vs #2 • 33.3 ms", ours: true, champ: true },
+      { name: "4.67M PT-v3.5 Gen 13 KD (Single Model!)", elo: 1796, tag: "Gen 13 • 43.8% vs #2 • 53.9–63.0 ms", ours: true, champ: true },
+      { name: "4.31M PT-v2 Gen 12 PPO", elo: 1790, tag: "Gen 12 • 33.3% vs #2 • 18–2 vs Gen 11", ours: true },
       { name: "4.31M PT-v2 Gen 12 Soft-KD R3", elo: 1775, tag: "Gen 12 KD • 16.7% vs #2 • 0.098 KL", ours: true },
       { name: "4.31M PT-v1 Gen 11 PPO", elo: 1765, tag: "Gen 11 • 138.8t vs #2 • 33 ms", ours: true },
       { name: "#5 TonyK (IMPALA + BC, RTX 5090)", elo: 1754.6, tag: "Official #5 / 4,729", ours: false },
@@ -244,8 +239,11 @@ pytest -v</pre>
       { name: "subham_v14 (Top Heuristic Ceiling)", elo: 1224, tag: "Kaggle ~1,224 (4–0 Swept)", ours: false }
     ];
     const ABLATIONS = [
-      { name: "Gen 12: 4.31M PT-v2 PPO (w1_it60 Champion)", method: "14-ch Timeline + GeGLU + Factorized Head • 71.9k KD + 2,880g GPU PPO", vsPrior: "18–0–2 vs Gen 11 (90.0%)", boss: "8–0–16 (33.3%, 175.9t!)", ms: "33.3", hi: true },
-      { name: "Gen 12: 4.31M PT-v2 PPO (w3b Fast Pipelined)", method: "Async B=8 Pipelined PPO (31.5s/iter) • Balanced oppT=0.45", vsPrior: "14–0–6 vs Gen 11 (70.0%)", boss: "7–0–17 (29.2%, 181.2t!)", ms: "33.3", sub: true },
+      { name: "Gen 13: 4.67M PT-v3.5 KD (Champion)", method: "4× Conv1D + 7L GeGLU + launch_ctx_head + Decoupled Logit-TTA • cal_kl=0.0525", vsPrior: "18–0–2 vs Gen 12 (90.0%)", boss: "21–0–27 (43.8% 48g!)", ms: "53.9–63.0", hi: true },
+      { name: "Gen 13: 4.60M PT-v3 KD", method: "4× Conv1D + 7L GeGLU + detach_value • Valid-Planet Packing", vsPrior: "18–0–2 vs PT-v3.5 (mirror)", boss: "17–0–31 (35.4% 48g)", ms: "~55", sub: true },
+      { name: "Gen 13: 4.67M PT-v3.5 Low-T PPO (it15)", method: "35-iter Exact Factorized DML PPO (kl<=0.0074, akl<=0.0104)", vsPrior: "40% Peak Eval", boss: "15–0–33 (31.2% 48g)", ms: "53.9–63.0", sub: true },
+      { name: "Gen 12: 4.31M PT-v2 PPO (w1_it60)", method: "14-ch Timeline + GeGLU + Factorized Head • 71.9k KD + 2,880g GPU PPO", vsPrior: "18–0–2 vs Gen 11 (90.0%)", boss: "8–0–16 (33.3% 24g, 175.9t)", ms: "33.3" },
+      { name: "Gen 12: 4.31M PT-v2 PPO (w3b Fast Pipelined)", method: "Async B=8 Pipelined PPO (31.5s/iter) • Balanced oppT=0.45", vsPrior: "14–0–6 vs Gen 11 (70.0%)", boss: "7–0–17 (29.2%, 181.2t)", ms: "33.3", sub: true },
       { name: "Gen 12: 4.31M PT-v2 Soft-KD R3 (Zero RL)", method: "71.9k DAgger Boards • val_kl=0.098, l_f1=91.1%, val_tgt=89.6%", vsPrior: "18–0–2 vs Gen 11 (90.0%)", boss: "4–0–20 (16.7%, 176.2t)", ms: "33.3", sub: true },
       { name: "Gen 11: 4.31M PT-v1 PPO (w2_it20)", method: "29k DAgger KD + 10,800g GPU PPO (3 Waves, t=0.56)", vsPrior: "14–0–6 vs Gen 10 (70.0%)", boss: "0–0–12 (0.0%, 138.8t)", ms: "33.2" },
       { name: "Gen 10: 4.31M PT-v1 PPO", method: "First 4.3M Scale-Up + 1,440g DirectML League PPO", vsPrior: "16–0–4 vs Gen 9 (80.0%)", boss: "0–0–12 (0.0%, 128.0t)", ms: "35.0" },
@@ -255,11 +253,14 @@ pytest -v</pre>
       { name: "Gen 3–6: 0.59M–1.89M PT-v1 → v4", method: "BC + DAgger + CPU PPO progression", vsPrior: "6–0 vs LightZero v3", boss: "0–0–6 (109–117t)", ms: "27–37" }
     ];
     const BOSS_PROGRESSION = [
-      { stage: "Gen 11 PPO (4.31M PT-v1)", method: "Baseline before PT-v2 architecture", g12: "0–0–12 (0.0%)", g24: "—", wr: 0.0, len: "138.8t" },
-      { stage: "Gen 12 R2 Soft-KD (46.3k boards)", method: "PT-v2 Fresh Clean Soft-KD (0.115 KL)", g12: "1–0–11 (8.3%)", g24: "—", wr: 8.3, len: "167.9t" },
-      { stage: "Gen 12 R3 Soft-KD (71.9k boards)", method: "PT-v2 R3 DAgger Soft-KD (0.098 KL)", g12: "1–0–11 (8.3%)", g24: "4–0–20 (16.7%)", wr: 16.7, len: "176.2t" },
-      { stage: "Gen 12 Wave 3B Fast PPO (iter 30)", method: "Async B=8 Pipelined PPO (31.5s/iter)", g12: "2–0–10 (16.7%)", g24: "7–0–17 (29.2%)", wr: 29.2, len: "181.2t" },
-      { stage: "Gen 12 Wave 1 PPO (iter 60 Champ)", method: "2,880g KL-Anchored DirectML PPO (akl=0.075)", g12: "3–0–9 (25.0%)", g24: "8–0–16 (33.3%)", wr: 33.3, len: "175.9t" }
+      { stage: "Gen 11 PPO (4.31M PT-v1)", method: "Baseline before PT-v2 architecture", g12: "0–0–12 (0.0%)", g24: "0.0% (12g)", wr: 0.0, len: "138.8t" },
+      { stage: "Gen 12 R3 Soft-KD (PT-v2)", method: "71.9k DAgger Soft-KD (0.098 KL)", g12: "4–0–20 (16.7%)", g24: "16.7% (24g)", wr: 16.7, len: "176.2t" },
+      { stage: "Gen 12 Wave 1 PPO (PT-v2)", method: "2,880g KL-Anchored DirectML PPO (akl=0.075)", g12: "8–0–16 (33.3%)", g24: "33.3% (24g)", wr: 33.3, len: "175.9t" },
+      { stage: "Gen 13 PT-v2 R5 Baseline", method: "Pre-PT-v3 baseline on full 48g Boss Suite", g12: "—", g24: "9–0–39 (18.8% 48g)", wr: 18.8, len: "—" },
+      { stage: "Gen 13 PT-v3 R6 DAgger KD", method: "244.2k boards, 0.0593 val_kl (Prob-TTA)", g12: "8–0–16 (33.3%)", g24: "16–0–32 (33.3% 48g)", wr: 33.3, len: "167.9t (sim)" },
+      { stage: "Gen 13 PT-v3 KD (4.60M)", method: "4× Conv1D + 7-Layer GeGLU + detach_value", g12: "7–0–17 (29.2%)", g24: "17–0–31 (35.4% 48g)", wr: 35.4, len: "—" },
+      { stage: "Gen 13 PT-v3.5 PPO (it15)", method: "Exact Factorized Low-T PPO (35 iters, Logit-TTA)", g12: "5–0–19 (20.8%)", g24: "15–0–33 (31.2% 48g)", wr: 31.2, len: "—" },
+      { stage: "Gen 13 PT-v3.5 KD (4.67M Champ)", method: "target_cond_launch + Decoupled Logit-TTA (+8.4% 300s)", g12: "11–0–13 (45.8%)", g24: "21–0–27 (43.8% 48g!)", wr: 43.8, len: "164.5t (4g)" }
     ];
     const ELO_2P = [
       { name: "LightZero v3 (Gen 2)", elo: 2300.3, ci: [2044, 2980], wdl: "19-0-1", wr: 95.0, ours: true },

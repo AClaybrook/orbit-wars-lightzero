@@ -533,16 +533,36 @@ def match_action_to_target(
 class _ResConv1dBlock(nn.Module):
     """Residual 1D convolution + GELU + LayerNorm over planet timeline channels."""
 
-    def __init__(self, in_ch: int, out_ch: int):
+    def __init__(self, in_ch: int, out_ch: int, kernel_size: int = 3):
         super().__init__()
-        self.conv = nn.Conv1d(in_ch, out_ch, kernel_size=3, padding=1)
+        pad = int(kernel_size) // 2
+        self.conv = nn.Conv1d(in_ch, out_ch, kernel_size=int(kernel_size), padding=pad)
         self.res_proj = nn.Conv1d(in_ch, out_ch, kernel_size=1) if in_ch != out_ch else None
         self.norm = nn.LayerNorm(out_ch)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        mask_ntc: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         res = self.res_proj(x) if self.res_proj is not None else x
         y = F.gelu(self.conv(x)) + res
-        return self.norm(y.transpose(1, 2)).transpose(1, 2)
+        is_cpu = y.device.type == "cpu"
+        y_t = y.transpose(1, 2)
+        if is_cpu:
+            y_t = y_t.contiguous()
+        y_t = self.norm(y_t)
+        if mask_ntc is not None:
+            y_t = y_t * mask_ntc
+            out = y_t.transpose(1, 2)
+            return out.contiguous() if is_cpu else out
+        out = y_t.transpose(1, 2)
+        if is_cpu:
+            out = out.contiguous()
+        if mask is not None:
+            out = out * mask
+        return out
 
 
 class _EdgeBiasedTransformerLayer(nn.Module):
@@ -597,7 +617,8 @@ class _EdgeBiasedTransformerLayer(nn.Module):
 
         # Mask out padded planet slots
         key_mask = (~pad_mask).unsqueeze(1).unsqueeze(2)  # (B, 1, 1, N)
-        attn = attn.masked_fill(key_mask, -1e9)
+        neg_inf = -1e4 if attn.dtype == torch.float16 else -1e9
+        attn = attn.masked_fill(key_mask, neg_inf)
         probs = F.softmax(attn, dim=-1)
         out = torch.matmul(probs, v).transpose(1, 2).contiguous().view(B, N, D)
         x = x + self.out_proj(out)
@@ -624,6 +645,7 @@ class PlanetTimelineTransformer(nn.Module):
         use_aux_future: bool = False,
         feature_version: int = 1,
         arch_version: int = 1,
+        target_cond_launch: bool = False,
     ):
         super().__init__()
         assert d_model % n_heads == 0
@@ -631,6 +653,7 @@ class PlanetTimelineTransformer(nn.Module):
         self.timeline_dim = int(timeline_dim)
         self.feature_version = int(feature_version)
         self.arch_version = int(arch_version)
+        self.target_cond_launch = bool(target_cond_launch)
         self.n_heads = int(n_heads)
         self.head_dim = int(d_model // n_heads)
         self.config = {
@@ -648,16 +671,30 @@ class PlanetTimelineTransformer(nn.Module):
             self.config["feature_version"] = self.feature_version
         if self.arch_version > 1:
             self.config["arch_version"] = self.arch_version
+        if self.target_cond_launch:
+            self.config["target_cond_launch"] = True
 
         # 1D-CNN encoder over the 20-step arrival & ownership timeline per planet
-        if self.arch_version >= 2:
+        if self.arch_version >= 3:
+            tl_in_ch = timeline_dim + 5  # + [lin_ships, lin_my_in, lin_en_in, lin_cap, prod]
             self.timeline_blocks = nn.ModuleList(
                 [
-                    _ResConv1dBlock(timeline_dim, 64),
-                    _ResConv1dBlock(64, 64),
-                    _ResConv1dBlock(64, 64),
+                    _ResConv1dBlock(tl_in_ch, 128, kernel_size=5),
+                    _ResConv1dBlock(128, 128, kernel_size=5),
+                    _ResConv1dBlock(128, 128, kernel_size=5),
+                    _ResConv1dBlock(128, 128, kernel_size=5),
                 ]
             )
+            tl_pool_dim = 256
+        elif self.arch_version >= 2:
+            self.timeline_blocks = nn.ModuleList(
+                [
+                    _ResConv1dBlock(timeline_dim, 64, kernel_size=3),
+                    _ResConv1dBlock(64, 64, kernel_size=3),
+                    _ResConv1dBlock(64, 64, kernel_size=3),
+                ]
+            )
+            tl_pool_dim = 128
         else:
             self.timeline_conv = nn.Sequential(
                 nn.Conv1d(timeline_dim, 48, kernel_size=3, padding=1),
@@ -665,8 +702,9 @@ class PlanetTimelineTransformer(nn.Module):
                 nn.Conv1d(48, 64, kernel_size=3, padding=1),
                 nn.GELU(),
             )
+            tl_pool_dim = 128
         self.node_in = nn.Sequential(
-            nn.Linear(planet_dim + 128, d_model),
+            nn.Linear(planet_dim + tl_pool_dim, d_model),
             nn.LayerNorm(d_model),
             nn.GELU(),
         )
@@ -697,6 +735,16 @@ class PlanetTimelineTransformer(nn.Module):
                 nn.GELU(),
                 nn.Linear(d_model // 2, 1),
             )
+            self.launch_ctx_head: Optional[nn.Module] = None
+            if self.target_cond_launch:
+                # Zero-initialized target-aware residual on launch logit for bit-exact PT-v3 warm-start
+                self.launch_ctx_head = nn.Sequential(
+                    nn.Linear(2 * d_model + edge_dim + 3, d_model // 2),
+                    nn.GELU(),
+                    nn.Linear(d_model // 2, 1),
+                )
+                nn.init.zeros_(self.launch_ctx_head[-1].weight)
+                nn.init.zeros_(self.launch_ctx_head[-1].bias)
         else:
             # Per-planet HOLD logit
             self.hold_head = nn.Sequential(
@@ -710,13 +758,22 @@ class PlanetTimelineTransformer(nn.Module):
                 nn.Linear(d_model // 2, 2),  # [target_logit, frac_logit]
             )
 
-        # Global value head (attention pooled over active planets)
+        # Global value head (attention + mean pooled in PT-v3; attention pooled in PT-v1/v2)
         self.val_attn = nn.Linear(d_model, 1)
-        self.val_head = nn.Sequential(
-            nn.Linear(d_model, 64),
-            nn.GELU(),
-            nn.Linear(64, 1),
-        )
+        if self.arch_version >= 3:
+            self.val_head = nn.Sequential(
+                nn.Linear(2 * d_model, 128),
+                nn.GELU(),
+                nn.Linear(128, 64),
+                nn.GELU(),
+                nn.Linear(64, 1),
+            )
+        else:
+            self.val_head = nn.Sequential(
+                nn.Linear(d_model, 64),
+                nn.GELU(),
+                nn.Linear(64, 1),
+            )
 
         # Optional training-only auxiliary future-state world-model head (inspired by #7 Audun):
         # predicts [owner_mine, owner_enemy, owner_neutral, log1p_ships_norm] at t + 10.
@@ -729,6 +786,19 @@ class PlanetTimelineTransformer(nn.Module):
                 nn.Linear(d_model // 2, 4),
             )
 
+    def _compute_value(self, h: torch.Tensor, pad_mask: torch.Tensor, neg_inf: float, detach_value: bool) -> torch.Tensor:
+        h_v = h.detach() if detach_value else h
+        va = self.val_attn(h_v).squeeze(-1).masked_fill(~pad_mask, neg_inf)
+        vw = F.softmax(va, dim=-1).unsqueeze(-1)
+        pooled_attn = (h_v * vw).sum(dim=1)
+        if self.arch_version >= 3:
+            pm_f = pad_mask.unsqueeze(-1).to(h_v.dtype)
+            pooled_mean = (h_v * pm_f).sum(dim=1) / pm_f.sum(dim=1).clamp_min(1.0)
+            pooled = torch.cat([pooled_attn, pooled_mean], dim=-1)
+        else:
+            pooled = pooled_attn
+        return torch.tanh(self.val_head(pooled).squeeze(-1))
+
     def forward(
         self,
         planet_feats: torch.Tensor,
@@ -739,6 +809,8 @@ class PlanetTimelineTransformer(nn.Module):
         return_aux: bool = False,
         legal_edges: Optional[torch.Tensor] = None,
         compute_frac: bool = True,
+        value_only: bool = False,
+        detach_value: bool = False,
     ):
         """Forward pass.
 
@@ -750,6 +822,7 @@ class PlanetTimelineTransformer(nn.Module):
             return_aux: When ``True`` (and ``use_aux_future=True``), returns a 4-tuple
                 including ``aux_future`` of shape ``(B, N, 4)``.
             legal_edges: Optional ``(B, N, N)`` bool mask for legal targets in ``arch_version >= 2``.
+            detach_value: When ``True``, stops gradients from ``val_head`` into the shared trunk.
 
         Returns:
             action_logits: ``(B, N, N + 1)`` where index ``0`` is HOLD and ``1 + j`` is target ``j``.
@@ -759,26 +832,130 @@ class PlanetTimelineTransformer(nn.Module):
         if timeline_feats.shape[-1] > self.timeline_dim:
             timeline_feats = timeline_feats[..., : self.timeline_dim]
         B, N, T, Ct = timeline_feats.shape
-        tl = timeline_feats.reshape(B * N, T, Ct).transpose(1, 2)  # (B*N, Ct, T)
-        if self.arch_version >= 2:
+        neg_inf = -1e4 if planet_feats.dtype == torch.float16 else -1e9
+        if self.arch_version >= 3:
+            zeros_bn = torch.zeros((B, N), dtype=planet_feats.dtype, device=planet_feats.device)
+            if Ct >= 14:
+                t0_en = (planet_feats[..., 13] + planet_feats[..., 14] + planet_feats[..., 15]).clamp(0.0, 1.0)
+                t0_ships_lin = (torch.exp((planet_feats[..., 10] * 6.0).clamp(0.0, 9.0)) - 1.0).clamp_min(0.0)
+                t0_cap_log = torch.where(
+                    planet_feats[..., 12] > 0.5,
+                    zeros_bn,
+                    torch.log1p(t0_ships_lin + 1.0) / 6.0,
+                )
+                t0_slice = torch.stack(
+                    [
+                        planet_feats[..., 11],
+                        planet_feats[..., 12],
+                        t0_en,
+                        planet_feats[..., 10],
+                        zeros_bn,
+                        zeros_bn,
+                        zeros_bn,
+                        zeros_bn,
+                        planet_feats[..., 0],
+                        planet_feats[..., 1],
+                        planet_feats[..., 4] * (50.0 / 70.0),
+                        pad_mask.to(planet_feats.dtype),
+                        t0_cap_log,
+                        planet_feats[..., 16],
+                    ],
+                    dim=-1,
+                ).unsqueeze(2)  # (B, N, 1, 14)
+                tl_seq = torch.cat([t0_slice, timeline_feats], dim=2)  # (B, N, T+1, 14)
+                t_valid = (tl_seq[..., 11] > 0.5) & pad_mask.unsqueeze(-1)
+                lin_cap = ((torch.exp((tl_seq[..., 12] * 6.0).clamp(0.0, 9.0)) - 1.0) / 100.0).clamp(0.0, 10.0)
+            else:
+                tl_seq = timeline_feats
+                t_valid = pad_mask.unsqueeze(-1).expand(B, N, T)
+                lin_cap = torch.zeros((B, N, T), dtype=planet_feats.dtype, device=planet_feats.device)
+
+            T_eff = tl_seq.shape[2]
+            if Ct >= 14:
+                lin_src = torch.cat([tl_seq[..., 3:6], tl_seq[..., 12:13]], dim=-1)
+                lin_4 = ((torch.exp((lin_src * 6.0).clamp(0.0, 9.0)) - 1.0) / 100.0).clamp(0.0, 10.0)
+            else:
+                lin_3 = ((torch.exp((tl_seq[..., 3:6] * 6.0).clamp(0.0, 9.0)) - 1.0) / 100.0).clamp(0.0, 10.0)
+                lin_4 = torch.cat([lin_3, lin_cap.unsqueeze(-1)], dim=-1)
+            prod_seq = planet_feats[..., 9:10].unsqueeze(2).expand(B, N, T_eff, 1)
+            tl_aug = torch.cat([tl_seq, lin_4, prod_seq], dim=-1)  # (B, N, T_eff, Ct+5)
+            t_valid_bn = t_valid.reshape(B * N, 1, T_eff)
+            t_valid_f = t_valid_bn.to(tl_aug.dtype)
+            t_valid_ntc = t_valid_f.transpose(1, 2)
+            tl_in = tl_aug.reshape(B * N, T_eff, -1).transpose(1, 2) * t_valid_f
+            if tl_in.device.type == "cpu":
+                tl_in = tl_in.contiguous()
+                t_valid_ntc = t_valid_ntc.contiguous()
+
+            # On CPU inference/rollouts with padded boards, pack only valid planets before 4x Conv1D
+            # (cuts Conv1D compute proportionally to padding with zero shader-cache overhead).
+            if (not tl_in.requires_grad) and tl_in.device.type == "cpu":
+                flat_pm = pad_mask.reshape(-1)
+                if not bool(flat_pm.all()):
+                    v_idx = flat_pm.nonzero(as_tuple=False).squeeze(-1)
+                    if v_idx.numel() == 0:
+                        tl_pool = torch.zeros((B, N, 256), dtype=tl_in.dtype, device=tl_in.device)
+                    else:
+                        tl_sub = tl_in.index_select(0, v_idx)
+                        tv_sub_f = t_valid_f.index_select(0, v_idx)
+                        tv_sub_ntc = t_valid_ntc.index_select(0, v_idx)
+                        tv_sub_bn = t_valid_bn.index_select(0, v_idx)
+                        tl_h = tl_sub
+                        for blk in self.timeline_blocks:
+                            tl_h = blk(tl_h, mask_ntc=tv_sub_ntc)
+                        tl_mean = tl_h.sum(dim=-1) / tv_sub_f.sum(dim=-1).clamp_min(1.0)
+                        any_v = tv_sub_bn.any(dim=-1)
+                        tl_max_raw = tl_h.masked_fill(~tv_sub_bn, neg_inf).amax(dim=-1)
+                        tl_max = torch.where(any_v, tl_max_raw, torch.zeros_like(tl_mean))
+                        pool_sub = torch.cat([tl_mean, tl_max], dim=-1)
+                        pool_full = torch.zeros((B * N, 256), dtype=pool_sub.dtype, device=pool_sub.device)
+                        pool_full.index_copy_(0, v_idx, pool_sub)
+                        tl_pool = pool_full.view(B, N, 256)
+                else:
+                    tl_h = tl_in
+                    for blk in self.timeline_blocks:
+                        tl_h = blk(tl_h, mask_ntc=t_valid_ntc)
+                    tl_mean = tl_h.sum(dim=-1) / t_valid_f.sum(dim=-1).clamp_min(1.0)
+                    any_v = t_valid_bn.any(dim=-1)
+                    tl_max_raw = tl_h.masked_fill(~t_valid_bn, neg_inf).amax(dim=-1)
+                    tl_max = torch.where(any_v, tl_max_raw, torch.zeros_like(tl_mean))
+                    tl_pool = torch.cat([tl_mean, tl_max], dim=-1).view(B, N, 256)
+            else:
+                tl_h = tl_in
+                for blk in self.timeline_blocks:
+                    tl_h = blk(tl_h, mask_ntc=t_valid_ntc)
+                tl_mean = tl_h.sum(dim=-1) / t_valid_f.sum(dim=-1).clamp_min(1.0)
+                any_v = t_valid_bn.any(dim=-1)  # (B*N, 1)
+                tl_max_raw = tl_h.masked_fill(~t_valid_bn, neg_inf).amax(dim=-1)
+                tl_max = torch.where(any_v, tl_max_raw, torch.zeros_like(tl_mean))
+                tl_pool = torch.cat([tl_mean, tl_max], dim=-1).view(B, N, 256)
+        elif self.arch_version >= 2:
+            tl = timeline_feats.reshape(B * N, T, Ct).transpose(1, 2)  # (B*N, Ct, T)
             tl_h = tl
             for blk in self.timeline_blocks:
                 tl_h = blk(tl_h)
+            tl_pool = torch.cat([tl_h.mean(dim=-1), tl_h.amax(dim=-1)], dim=-1).view(B, N, 128)
         else:
+            tl = timeline_feats.reshape(B * N, T, Ct).transpose(1, 2)  # (B*N, Ct, T)
             tl_h = self.timeline_conv(tl)  # (B*N, 64, T)
-        tl_pool = torch.cat([tl_h.mean(dim=-1), tl_h.amax(dim=-1)], dim=-1).view(B, N, 128)
+            tl_pool = torch.cat([tl_h.mean(dim=-1), tl_h.amax(dim=-1)], dim=-1).view(B, N, 128)
 
         x = self.node_in(torch.cat([planet_feats, tl_pool], dim=-1))
+        if self.arch_version >= 3:
+            x = x * pad_mask.unsqueeze(-1).to(x.dtype)
         for layer in self.layers:
             x = layer(x, edge_feats, pad_mask)
         h = self.final_norm(x)  # (B, N, D)
+        if self.arch_version >= 3:
+            h = h * pad_mask.unsqueeze(-1).to(h.dtype)
+
+        if value_only:
+            value = self._compute_value(h, pad_mask, neg_inf, detach_value=detach_value)
+            if return_aux and self.aux_future_head is not None:
+                return None, None, value, self.aux_future_head(h)
+            return None, None, value
 
         if self.arch_version >= 2:
-            launch_logit = self.launch_head(h)  # (B, N, 1)
-            launch_lp2 = F.log_softmax(torch.cat([torch.zeros_like(launch_logit), launch_logit], dim=-1), dim=-1)
-            log_p_hold = launch_lp2[..., :1]
-            log_p_launch = launch_lp2[..., 1:2]
-
             q = self.tgt_q(h).view(B, N, self.n_heads, self.head_dim).transpose(1, 2)
             k = self.tgt_k(h).view(B, N, self.n_heads, self.head_dim).transpose(1, 2)
             scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
@@ -795,7 +972,24 @@ class PlanetTimelineTransformer(nn.Module):
                 )
             has_legal = tgt_mask.any(dim=-1, keepdim=True)
             safe_mask = tgt_mask | (~has_legal)
-            log_p_tgt = F.log_softmax(raw_tgt.masked_fill(~safe_mask, -1e9), dim=-1).masked_fill(~tgt_mask, -1e9)
+            log_p_tgt = F.log_softmax(raw_tgt.masked_fill(~safe_mask, neg_inf), dim=-1).masked_fill(~tgt_mask, neg_inf)
+
+            launch_logit = self.launch_head(h)  # (B, N, 1)
+            if self.launch_ctx_head is not None:
+                p_tgt = log_p_tgt.exp().masked_fill(~tgt_mask, 0.0)
+                h_tgt = torch.bmm(p_tgt, h)
+                e_tgt = (p_tgt.unsqueeze(-1) * edge_feats).sum(dim=2)
+                max_p_tgt = p_tgt.amax(dim=-1, keepdim=True)
+                safe_lp_tgt = log_p_tgt.masked_fill(~tgt_mask, 0.0)
+                tgt_ent = -(p_tgt * safe_lp_tgt).sum(dim=-1, keepdim=True)
+                best_raw = raw_tgt.masked_fill(~safe_mask, neg_inf).amax(dim=-1, keepdim=True)
+                best_raw = torch.where(has_legal, best_raw.clamp(-10.0, 10.0) * 0.1, torch.zeros_like(best_raw))
+                launch_ctx = torch.cat([h, h_tgt, e_tgt, max_p_tgt, tgt_ent, best_raw], dim=-1)
+                launch_logit = launch_logit + self.launch_ctx_head(launch_ctx) * pad_mask.unsqueeze(-1).to(h.dtype)
+
+            launch_lp2 = F.log_softmax(torch.cat([torch.zeros_like(launch_logit), launch_logit], dim=-1), dim=-1)
+            log_p_hold = launch_lp2[..., :1]
+            log_p_launch = launch_lp2[..., 1:2]
             action_logits = torch.cat([log_p_hold, log_p_launch + log_p_tgt], dim=-1)
             if compute_frac:
                 pair_in = (
@@ -818,11 +1012,7 @@ class PlanetTimelineTransformer(nn.Module):
             frac_preds = torch.sigmoid(pair_out[..., 1])  # (B, N, N)
             action_logits = torch.cat([hold_logit, target_logits], dim=-1)  # (B, N, N + 1)
 
-        # Attention-pooled global value head
-        va = self.val_attn(h).squeeze(-1).masked_fill(~pad_mask, -1e9)
-        vw = F.softmax(va, dim=-1).unsqueeze(-1)
-        pooled = (h * vw).sum(dim=1)
-        value = torch.tanh(self.val_head(pooled).squeeze(-1))
+        value = self._compute_value(h, pad_mask, neg_inf, detach_value=detach_value)
         if return_aux and self.aux_future_head is not None:
             aux_future = self.aux_future_head(h)  # (B, N, 4)
             return action_logits, frac_preds, value, aux_future
@@ -870,6 +1060,7 @@ class PlanetTransformerAgent:
         reinforce_threshold: Optional[float] = None,
         surgical_neutral_cap: bool = False,
         anti_bounce_guard: bool = False,
+        decoupled_logit_tta: Optional[bool] = None,
         device: str = "cpu",
     ) -> None:
         torch.set_num_threads(1)
@@ -884,6 +1075,11 @@ class PlanetTransformerAgent:
 
         ckpt = torch.load(str(checkpoint_path), map_location=self.device, weights_only=False)
         cfg = ckpt.get("model_config", {})
+        self.decoupled_logit_tta = (
+            bool(cfg.get("target_cond_launch", False))
+            if decoupled_logit_tta is None
+            else bool(decoupled_logit_tta)
+        )
         self.feature_version = int(cfg.get("feature_version", 1))
         self.timeline_dim = int(cfg.get("timeline_dim", TIMELINE_FEAT_DIM))
         self.model = PlanetTimelineTransformer(**cfg).to(self.device)
@@ -971,7 +1167,21 @@ class PlanetTransformerAgent:
         )
         mask = torch.cat([torch.ones((n, 1), dtype=torch.bool, device=self.device), legal], dim=-1)
         logits = logits.masked_fill(~mask.unsqueeze(0), -1e9)
-        probs = F.softmax(logits, dim=-1).mean(dim=0).cpu().numpy()
+        if self.decoupled_logit_tta and k_batch > 1 and getattr(self.model, "arch_version", 1) >= 2:
+            lp_all = F.log_softmax(logits, dim=-1)
+            lp_h = lp_all[..., 0]
+            has_l = legal.any(dim=-1)
+            safe_l = legal | (~has_l.unsqueeze(-1))
+            lp_l = torch.logsumexp(lp_all[..., 1:].masked_fill(~safe_l.unsqueeze(0), -1e9), dim=-1)
+            launch_z = (lp_l - lp_h).clamp(-15.0, 15.0)
+            mean_p_l = torch.sigmoid(launch_z.mean(dim=0))
+            mean_p_l = torch.where(has_l, mean_p_l, torch.zeros_like(mean_p_l))
+            cond_tgt = (lp_all[..., 1:] - lp_l.unsqueeze(-1)).masked_fill(~safe_l.unsqueeze(0), -1e9)
+            mean_p_t = F.softmax(cond_tgt.mean(dim=0).masked_fill(~safe_l, -1e9), dim=-1)
+            mean_p_t = mean_p_t.masked_fill(~legal, 0.0)
+            probs = torch.cat([(1.0 - mean_p_l).unsqueeze(-1), mean_p_l.unsqueeze(-1) * mean_p_t], dim=-1).cpu().numpy()
+        else:
+            probs = F.softmax(logits, dim=-1).mean(dim=0).cpu().numpy()
         mean_fracs = (
             fracs.mean(dim=0).cpu().numpy()
             if fracs is not None
@@ -979,6 +1189,90 @@ class PlanetTransformerAgent:
         )
         val = float(vals.mean().item())
         return probs, mean_fracs, val
+
+    @torch.no_grad()
+    def predict_batch(
+        self,
+        encs: Sequence[EncodedPlanetState],
+        *,
+        compute_frac: Optional[bool] = None,
+        value_only: bool = False,
+    ) -> Tuple[List[np.ndarray], List[np.ndarray], np.ndarray]:
+        """Run a single batched forward pass over multiple distinct encoded board states.
+
+        Handles variable planet counts across branches (e.g. comet spawn/despawn) via
+        minimal right-padding when needed, with a zero-copy fast path when all states
+        share the same planet count.
+        """
+        b_size = len(encs)
+        if b_size == 0:
+            return [], [], np.zeros((0,), dtype=np.float32)
+
+        ns = [len(e.planet_ids) for e in encs]
+        max_n = max(ns)
+        if max_n == 0:
+            empty_p = [np.zeros((0, 1), dtype=np.float32) for _ in range(b_size)]
+            empty_f = [np.zeros((0, 0), dtype=np.float32) for _ in range(b_size)]
+            return empty_p, empty_f, np.zeros((b_size,), dtype=np.float32)
+
+        if all(n_i == max_n for n_i in ns):
+            pf_np = np.stack([e.planet_feats for e in encs], axis=0)
+            tf_np = np.stack([e.timeline_feats[..., : self.timeline_dim] for e in encs], axis=0)
+            ef_np = np.stack([e.edge_feats for e in encs], axis=0)
+            le_np = np.stack([e.legal_edges for e in encs], axis=0)
+            pm_np = np.ones((b_size, max_n), dtype=bool)
+        else:
+            pf_np = np.zeros((b_size, max_n, PLANET_FEAT_DIM), dtype=np.float32)
+            tf_np = np.zeros((b_size, max_n, TIMELINE_HORIZON, self.timeline_dim), dtype=np.float32)
+            ef_np = np.zeros((b_size, max_n, max_n, EDGE_FEAT_DIM), dtype=np.float32)
+            le_np = np.zeros((b_size, max_n, max_n), dtype=bool)
+            pm_np = np.zeros((b_size, max_n), dtype=bool)
+            for idx_b, (e, n_i) in enumerate(zip(encs, ns)):
+                if n_i > 0:
+                    pf_np[idx_b, :n_i] = e.planet_feats
+                    tf_np[idx_b, :n_i] = e.timeline_feats[..., : self.timeline_dim]
+                    ef_np[idx_b, :n_i, :n_i] = e.edge_feats
+                    le_np[idx_b, :n_i, :n_i] = e.legal_edges
+                    pm_np[idx_b, :n_i] = True
+                else:
+                    pm_np[idx_b, 0] = True
+
+        want_frac = (not self.force_all_in) if compute_frac is None else bool(compute_frac)
+        le_t = torch.from_numpy(le_np).to(self.device)
+        logits, fracs, vals = self.model(
+            torch.from_numpy(pf_np).to(self.device),
+            torch.from_numpy(tf_np).to(self.device),
+            torch.from_numpy(ef_np).to(self.device),
+            torch.from_numpy(pm_np).to(self.device),
+            legal_edges=le_t,
+            compute_frac=want_frac and (not value_only),
+            value_only=value_only,
+        )
+        vals_np = vals.cpu().numpy().astype(np.float32, copy=False)
+        for idx_b, n_i in enumerate(ns):
+            if n_i == 0:
+                vals_np[idx_b] = 0.0
+        if value_only:
+            return [], [], vals_np
+
+        hold_ones = torch.ones((b_size, max_n, 1), dtype=torch.bool, device=self.device)
+        mask = torch.cat([hold_ones, le_t], dim=-1)
+        probs_all = F.softmax(logits.masked_fill(~mask, -1e9), dim=-1).cpu().numpy()
+        fracs_all = fracs.cpu().numpy() if fracs is not None else None
+
+        probs_list: List[np.ndarray] = []
+        fracs_list: List[np.ndarray] = []
+        for idx_b, n_i in enumerate(ns):
+            if n_i == 0:
+                probs_list.append(np.zeros((0, 1), dtype=np.float32))
+                fracs_list.append(np.zeros((0, 0), dtype=np.float32))
+            else:
+                probs_list.append(probs_all[idx_b, :n_i, : n_i + 1])
+                if fracs_all is not None:
+                    fracs_list.append(fracs_all[idx_b, :n_i, :n_i])
+                else:
+                    fracs_list.append(np.ones((n_i, n_i), dtype=np.float32))
+        return probs_list, fracs_list, vals_np
 
     def _decode_plan(
         self,
@@ -1154,13 +1448,15 @@ class PlanetTransformerAgent:
 
 
 class SearchPlanetTransformerAgent(PlanetTransformerAgent):
-    """AlphaZero-style value-guided lookahead search over ``PlanetTimelineTransformer``.
+    """Batched multi-ply value-guided lookahead search over ``PlanetTimelineTransformer``.
 
-    Uses the Transformer's per-planet policy distribution to propose up to 6 diverse
-    high-probability full-turn plans (varying launch tempo + flipping the highest-entropy
-    borderline planets), rolls each candidate forward in ``FastOrbitSim`` with active
-    opponent responses, and selects the plan with the highest blended neural + tactical
-    value under a strict wall-clock budget.
+    Uses the Transformer's per-planet policy posterior to propose diverse, ship-weighted
+    borderline full-turn plans (surgical launch-threshold shifts, wait/hold-all, top
+    ship-weighted Launch<->Hold flips, alternative target switches, and synchronized
+    2-planet pair flips), rolls ALL candidate branches forward in lockstep inside
+    ``FastOrbitSim`` with batched neural counter-replanning for both players, and scores
+    leaves via batched symmetric zero-sum neural value (+ optional tactical blend) under
+    a strict wall-clock budget.
     """
 
     def __init__(
@@ -1173,8 +1469,16 @@ class SearchPlanetTransformerAgent(PlanetTransformerAgent):
         force_all_in: bool = False,
         neural_mid_replan: bool = False,
         rollout_horizon: int = 10,
-        time_budget_sec: float = 0.22,
-        neural_value_weight: float = 0.65,
+        time_budget_sec: float = 0.28,
+        neural_value_weight: float = 0.85,
+        replan_steps: Optional[Sequence[int]] = None,
+        max_candidates: int = 8,
+        prior_bonus: float = 0.006,
+        symmetric_value: bool = True,
+        opp_rot_tta: bool = False,
+        opp_launch_threshold: Optional[float] = None,
+        trajectory_val_blend: float = 0.0,
+        leaf_rot_tta_top_k: int = 0,
         device: str = "cpu",
     ) -> None:
         super().__init__(
@@ -1189,6 +1493,27 @@ class SearchPlanetTransformerAgent(PlanetTransformerAgent):
         self.rollout_horizon = max(2, int(rollout_horizon))
         self.time_budget_sec = float(time_budget_sec)
         self.neural_value_weight = float(neural_value_weight)
+        self.max_candidates = max(2, int(max_candidates))
+        self.prior_bonus = float(prior_bonus)
+        self.symmetric_value = bool(symmetric_value)
+        self.opp_rot_tta = bool(opp_rot_tta)
+        self.opp_launch_threshold = self.launch_threshold if opp_launch_threshold is None else float(opp_launch_threshold)
+        self.trajectory_val_blend = float(np.clip(trajectory_val_blend, 0.0, 0.9))
+        self.leaf_rot_tta_top_k = max(0, int(leaf_rot_tta_top_k))
+        if replan_steps is not None:
+            self.replan_steps: Tuple[int, ...] = tuple(
+                sorted({int(s) for s in replan_steps if 0 < int(s) < self.rollout_horizon})
+            )
+        elif self.neural_mid_replan:
+            if self.rollout_horizon >= 10:
+                raw_rs = (2, 5, 8)
+            elif self.rollout_horizon >= 7:
+                raw_rs = (2, 5)
+            else:
+                raw_rs = (max(1, self.rollout_horizon // 2),)
+            self.replan_steps = tuple(s for s in raw_rs if 0 < s < self.rollout_horizon)
+        else:
+            self.replan_steps = (max(1, self.rollout_horizon // 2),)
 
     def _plan_key(self, moves: Sequence[Sequence[float]]) -> Tuple[Tuple[int, int, int], ...]:
         return tuple(sorted((int(m[0]), int(round(float(m[1]) * 100.0)), int(m[2])) for m in moves))
@@ -1198,18 +1523,215 @@ class SearchPlanetTransformerAgent(PlanetTransformerAgent):
         enc: EncodedPlanetState,
         probs: np.ndarray,
         moves: Sequence[Sequence[float]],
+        *,
+        overrides: Optional[Dict[int, int]] = None,
+        launch_threshold: Optional[float] = None,
     ) -> float:
+        """Factorized threshold-centered log-prior (zero multi-target HOLD bias).
+
+        At ``p_launch == thr``, HOLD and launching at the top target have equal prior (0.0);
+        switching to a secondary target ``j2`` incurs ``log(p(j2) / p(j1)) <= 0``.
+        """
+        thr = float(np.clip(self.launch_threshold if launch_threshold is None else launch_threshold, 1e-3, 1.0 - 1e-3))
+        expiring_set = set(enc.expiring_comet_indices)
         by_src = {int(m[0]): m for m in moves}
         lp = 0.0
         for i in range(len(enc.planet_ids)):
-            if not enc.owned_mask[i] or not np.any(enc.legal_edges[i]):
+            if not enc.owned_mask[i] or not np.any(enc.legal_edges[i]) or i in expiring_set:
                 continue
             pid = enc.planet_ids[i]
+            p_hold = max(1e-4, float(probs[i, 0]))
+            p_launch = max(1e-4, 1.0 - float(probs[i, 0]))
             if pid not in by_src:
-                lp += math.log(max(1e-4, float(probs[i, 0])))
+                lp += math.log(p_hold / (1.0 - thr))
             else:
-                lp += math.log(max(1e-4, float(1.0 - probs[i, 0])))
+                lp += math.log(p_launch / thr)
+                legal_js = np.flatnonzero(enc.legal_edges[i])
+                p_tgt1 = max(1e-4, float(np.max(probs[i, 1 + legal_js])))
+                if overrides is not None and i in overrides and overrides[i] > 0:
+                    p_chosen = max(1e-4, float(probs[i, int(overrides[i])]))
+                    lp += math.log(min(1.0, p_chosen / p_tgt1))
         return lp
+
+    def _build_candidates(
+        self,
+        enc: EncodedPlanetState,
+        probs: np.ndarray,
+        mean_fracs: np.ndarray,
+        max_speed: float,
+        shared_physics: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[List[List[List[float]]], List[float]]:
+        """Generate deduplicated ship-weighted & tactical candidate plans with exact log-priors."""
+        n = len(enc.planet_ids)
+        expiring_set = set(enc.expiring_comet_indices)
+        thr = self.launch_threshold
+
+        # Candidate tuples: (moves, exact_log_prior)
+        raw: List[Tuple[List[List[float]], float]] = []
+
+        def _add_candidate(
+            *,
+            c_thr: float = thr,
+            c_all_in: bool = self.force_all_in,
+            overrides: Optional[Dict[int, int]] = None,
+        ) -> None:
+            mv = self._decode_plan(
+                enc,
+                probs,
+                mean_fracs,
+                launch_threshold=c_thr,
+                force_all_in=c_all_in,
+                max_speed=max_speed,
+                overrides=overrides,
+            )
+            lp = self._plan_log_prior(enc, probs, mv, overrides=overrides, launch_threshold=thr)
+            raw.append((mv, lp))
+
+        # 1. Greedy policy baseline (always index 0)
+        _add_candidate(c_thr=thr, c_all_in=self.force_all_in)
+
+        # 2. Surgical tempo shifts + wait-and-accumulate hold candidate
+        if self.force_all_in:
+            _add_candidate(c_thr=max(0.36, thr - 0.015), c_all_in=True)
+            _add_candidate(c_thr=min(0.70, thr + 0.015), c_all_in=True)
+            # Pure wait (holds non-expiring planets while still evacuating expiring comets)
+            _add_candidate(c_thr=1.01, c_all_in=True)
+        else:
+            _add_candidate(c_thr=0.35, c_all_in=False)
+            _add_candidate(c_thr=0.65, c_all_in=False)
+            _add_candidate(c_thr=0.45, c_all_in=True)
+
+        # 3. Tactical proposals from shared physics: Defensive Rescue & Synchronized 2-Planet Strike
+        best_eta = shared_physics.get("best_eta") if shared_physics is not None else None
+        if self.force_all_in and best_eta is not None and len(enc.futures) == n:
+            # (a) Urgent defensive rescue for highest-value owned planet projected to flip within 14t
+            best_rescue: Optional[Tuple[float, int, int]] = None
+            for d_idx in range(n):
+                if not enc.owned_mask[d_idx]:
+                    continue
+                fut_d = enc.futures[d_idx]
+                flip_t = None
+                for t_step in range(1, min(15, len(fut_d))):
+                    if fut_d[t_step][0] != enc.player:
+                        flip_t = t_step
+                        break
+                if flip_t is None:
+                    continue
+                val_d = float(enc.planet_rows[d_idx][6]) * 20.0 + float(enc.planet_rows[d_idx][5])
+                for s_idx in range(n):
+                    if s_idx == d_idx or (not enc.owned_mask[s_idx]) or (s_idx in expiring_set):
+                        continue
+                    if not enc.legal_edges[s_idx, d_idx]:
+                        continue
+                    eta_sd = int(best_eta[s_idx, d_idx])
+                    if 1 <= eta_sd <= flip_t:
+                        sc = val_d + float(enc.planet_rows[s_idx][5]) * 0.5
+                        if best_rescue is None or sc > best_rescue[0]:
+                            best_rescue = (sc, s_idx, d_idx)
+            if best_rescue is not None:
+                _add_candidate(overrides={best_rescue[1]: 1 + best_rescue[2]})
+
+            # (b) Synchronized 2-planet focus-fire strike onto a contested non-friendly target
+            best_sync: Optional[Tuple[float, int, int, int]] = None
+            greedy_targets: Dict[int, int] = {}
+            for i in range(n):
+                if enc.owned_mask[i] and np.any(enc.legal_edges[i]) and (1.0 - float(probs[i, 0]) >= thr):
+                    ljs = np.flatnonzero(enc.legal_edges[i])
+                    greedy_targets[i] = int(ljs[int(np.argmax(probs[i, 1 + ljs]))])
+            for i1, dst in greedy_targets.items():
+                if int(enc.planet_rows[dst][1]) == enc.player:
+                    continue
+                eta1 = int(best_eta[i1, dst])
+                if eta1 <= 0:
+                    continue
+                sh1 = float(enc.planet_rows[i1][5])
+                dst_prod = float(enc.planet_rows[dst][6])
+                for i2 in range(n):
+                    if i2 == i1 or (not enc.owned_mask[i2]) or (i2 in expiring_set):
+                        continue
+                    if not enc.legal_edges[i2, dst] or greedy_targets.get(i2) == dst:
+                        continue
+                    eta2 = int(best_eta[i2, dst])
+                    if eta2 <= 0 or abs(eta2 - eta1) > 3:
+                        continue
+                    p_l2 = 1.0 - float(probs[i2, 0])
+                    p_d2 = float(probs[i2, 1 + dst])
+                    if p_l2 >= thr - 0.10 or p_d2 >= 0.08:
+                        sc = (dst_prod + 1.0) * (sh1 + float(enc.planet_rows[i2][5]))
+                        if best_sync is None or sc > best_sync[0]:
+                            best_sync = (sc, i1, i2, dst)
+            if best_sync is not None:
+                _add_candidate(overrides={best_sync[1]: 1 + best_sync[3], best_sync[2]: 1 + best_sync[3]})
+
+        # 4. Ship-weighted borderline flips (both Launch<->Hold and 2nd-target switches)
+        flip_proposals: List[Tuple[float, int, int]] = []
+        for i in range(n):
+            if not enc.owned_mask[i] or i in expiring_set:
+                continue
+            legal_js = np.flatnonzero(enc.legal_edges[i])
+            if len(legal_js) == 0:
+                continue
+            avail = float(enc.planet_rows[i][5])
+            prod = float(enc.planet_rows[i][6])
+            if avail <= 0.0:
+                continue
+            weight = avail + 3.0 * prod
+            p_launch = 1.0 - float(probs[i, 0])
+            order = legal_js[np.argsort(-probs[i, 1 + legal_js])]
+            j1 = int(order[0])
+
+            # (a) Launch <-> Hold flip when within borderline band around threshold
+            margin = abs(p_launch - thr)
+            if margin <= 0.16:
+                alt_cls = 0 if p_launch >= thr else (1 + j1)
+                score = weight * (0.18 - margin)
+                flip_proposals.append((score, i, alt_cls))
+
+            # (b) Alternative target switch when planet launches and has a credible 2nd target
+            if p_launch >= thr and len(order) >= 2:
+                j2 = int(order[1])
+                p1 = float(probs[i, 1 + j1])
+                p2 = float(probs[i, 1 + j2])
+                if p2 >= max(0.06, 0.16 * p1):
+                    score = weight * p2 * 1.15
+                    flip_proposals.append((score, i, 1 + j2))
+
+        flip_proposals.sort(key=lambda x: x[0], reverse=True)
+
+        for _, p_idx, alt_cls in flip_proposals[:5]:
+            _add_candidate(overrides={p_idx: alt_cls})
+
+        # 5. Synchronized pair flips across top distinct borderline planets
+        top_by_planet: List[Tuple[int, int]] = []
+        seen_p: set[int] = set()
+        for _, p_idx, alt_cls in flip_proposals:
+            if p_idx not in seen_p:
+                seen_p.add(p_idx)
+                top_by_planet.append((p_idx, alt_cls))
+            if len(top_by_planet) >= 3:
+                break
+        if len(top_by_planet) >= 2:
+            p0, c0 = top_by_planet[0]
+            p1, c1 = top_by_planet[1]
+            _add_candidate(overrides={p0: c0, p1: c1})
+        if len(top_by_planet) >= 3:
+            p0, c0 = top_by_planet[0]
+            p2, c2 = top_by_planet[2]
+            _add_candidate(overrides={p0: c0, p2: c2})
+
+        # Deduplicate while preserving priority order (greedy baseline first)
+        candidates: List[List[List[float]]] = []
+        log_priors: List[float] = []
+        seen_keys: set[Tuple[Tuple[int, int, int], ...]] = set()
+        for plan, lp in raw:
+            k = self._plan_key(plan)
+            if k not in seen_keys:
+                seen_keys.add(k)
+                candidates.append(plan)
+                log_priors.append(lp)
+                if len(candidates) >= self.max_candidates:
+                    break
+        return candidates, log_priors
 
     @torch.no_grad()
     def act(self, obs: Any, config: Any = None) -> List[List[float]]:
@@ -1223,146 +1745,227 @@ class SearchPlanetTransformerAgent(PlanetTransformerAgent):
         deadline = t_start + self.time_budget_sec
         max_speed = float(_obs_get(config, "shipSpeed", DEFAULT_SHIP_SPEED)) if config else DEFAULT_SHIP_SPEED
 
-        enc = extract_planet_features(obs, max_speed=max_speed, feature_version=self.feature_version)
+        player = int(_obs_get(obs, "player", 0))
+        shared0 = build_shared_planet_physics(obs, max_speed=max_speed)
+        enc = extract_planet_features(
+            obs,
+            player=player,
+            max_speed=max_speed,
+            feature_version=self.feature_version,
+            shared_physics=shared0,
+        )
         n = len(enc.planet_ids)
         if n == 0 or not np.any(enc.owned_mask):
             return []
 
         probs, mean_fracs, _ = self.predict_probs_and_value(enc, use_rot_tta=self.use_rot_tta)
-
-        # Build diverse candidate plans from the Transformer's posterior
-        if self.force_all_in:
-            raw_candidates: List[List[List[float]]] = [
-                self._decode_plan(enc, probs, mean_fracs, launch_threshold=self.launch_threshold, force_all_in=True, max_speed=max_speed),
-                self._decode_plan(enc, probs, mean_fracs, launch_threshold=max(0.36, self.launch_threshold - 0.08), force_all_in=True, max_speed=max_speed),
-                self._decode_plan(enc, probs, mean_fracs, launch_threshold=min(0.66, self.launch_threshold + 0.08), force_all_in=True, max_speed=max_speed),
-            ]
+        dt_root = time.perf_counter() - t_start
+        candidates, log_priors = self._build_candidates(
+            enc, probs, mean_fracs, max_speed=max_speed, shared_physics=shared0
+        )
+        # Adapt candidate count on huge boards (O(N^2) attention) to respect strict turn budget
+        if n > 34:
+            cap_n = min(self.max_candidates, 5)
+        elif n > 28:
+            cap_n = min(self.max_candidates, 6)
         else:
-            raw_candidates = [
-                self._decode_plan(enc, probs, mean_fracs, launch_threshold=self.launch_threshold, force_all_in=False, max_speed=max_speed),
-                self._decode_plan(enc, probs, mean_fracs, launch_threshold=0.35, force_all_in=False, max_speed=max_speed),
-                self._decode_plan(enc, probs, mean_fracs, launch_threshold=0.65, force_all_in=False, max_speed=max_speed),
-                self._decode_plan(enc, probs, mean_fracs, launch_threshold=0.45, force_all_in=True, max_speed=max_speed),
-            ]
+            cap_n = self.max_candidates
+        if len(candidates) > cap_n:
+            candidates = candidates[:cap_n]
+            log_priors = log_priors[:cap_n]
 
-        # Identify highest-entropy owned planets and propose targeted flips
-        entropies: List[Tuple[float, int, int]] = []
-        for i in range(n):
-            if not enc.owned_mask[i] or not np.any(enc.legal_edges[i]):
-                continue
-            p_row = probs[i]
-            ent = -float(np.sum(p_row * np.log(np.clip(p_row, 1e-8, 1.0))))
-            top2 = np.argsort(p_row)[-2:][::-1]
-            if len(top2) >= 2 and p_row[top2[1]] >= 0.12:
-                entropies.append((ent, i, int(top2[1])))
-        entropies.sort(reverse=True)
-        n_single_flips = 3 if self.force_all_in else 2
-        for _, p_idx, alt_cls in entropies[:n_single_flips]:
-            raw_candidates.append(
-                self._decode_plan(
-                    enc,
-                    probs,
-                    mean_fracs,
-                    launch_threshold=self.launch_threshold,
-                    force_all_in=self.force_all_in,
-                    max_speed=max_speed,
-                    overrides={p_idx: alt_cls},
-                )
-            )
-        if self.force_all_in and len(entropies) >= 2:
-            raw_candidates.append(
-                self._decode_plan(
-                    enc,
-                    probs,
-                    mean_fracs,
-                    launch_threshold=self.launch_threshold,
-                    force_all_in=True,
-                    max_speed=max_speed,
-                    overrides={entropies[0][1]: entropies[0][2], entropies[1][1]: entropies[1][2]},
-                )
-            )
-
-        # Deduplicate candidate plans
-        candidates: List[List[List[float]]] = []
-        seen_keys = set()
-        for plan in raw_candidates:
-            k = self._plan_key(plan)
-            if k not in seen_keys:
-                seen_keys.add(k)
-                candidates.append(plan)
-
-        if len(candidates) <= 1 or time.perf_counter() >= deadline - 0.03:
+        if len(candidates) <= 1 or time.perf_counter() >= deadline - max(0.045, dt_root * 1.5):
             return candidates[0] if candidates else []
 
         base_sim = FastOrbitSim.from_observation(obs, config)
-        player = enc.player
         n_players = base_sim.num_agents
+        k_cand = len(candidates)
 
-        # Precompute turn-0 opponent responses ONCE using our own fast neural policy (no-TTA ~4ms)
-        # so every candidate plan is tested against an elite neural counter-move rather than a 1220 heuristic.
+        # Precompute simultaneous turn-0 opponent responses ONCE reusing root shared physics
         opp_moves_t0: Dict[int, List[List[float]]] = {}
+        opp_ids_active: List[int] = []
+        opp_encs_t0: List[EncodedPlanetState] = []
         for opp_id in range(n_players):
             if opp_id == player:
                 continue
-            opp_obs = base_sim.to_observation(player=opp_id)
-            opp_enc = extract_planet_features(opp_obs, player=opp_id, max_speed=max_speed, feature_version=self.feature_version)
+            opp_enc = extract_planet_features(
+                obs,
+                player=opp_id,
+                max_speed=max_speed,
+                feature_version=self.feature_version,
+                shared_physics=shared0,
+            )
             if np.any(opp_enc.owned_mask):
-                opp_probs, opp_fracs, _ = self.predict_probs_and_value(
-                    opp_enc, use_rot_tta=False, use_d4_tta=False
-                )
-                opp_moves_t0[opp_id] = self._decode_plan(
-                    opp_enc,
-                    opp_probs,
-                    opp_fracs,
-                    launch_threshold=self.launch_threshold,
-                    force_all_in=self.force_all_in,
-                    max_speed=max_speed,
-                )
+                opp_ids_active.append(opp_id)
+                opp_encs_t0.append(opp_enc)
             else:
                 opp_moves_t0[opp_id] = []
 
-        best_plan = candidates[0]
-        best_score = -1e9
-        half_step = max(2, self.rollout_horizon // 2)
+        if opp_encs_t0:
+            if self.opp_rot_tta:
+                for opp_id, opp_enc in zip(opp_ids_active, opp_encs_t0):
+                    o_probs, o_fracs, _ = self.predict_probs_and_value(
+                        opp_enc, use_rot_tta=True, use_d4_tta=False
+                    )
+                    opp_moves_t0[opp_id] = self._decode_plan(
+                        opp_enc,
+                        o_probs,
+                        o_fracs,
+                        launch_threshold=self.opp_launch_threshold,
+                        force_all_in=self.force_all_in,
+                        max_speed=max_speed,
+                    )
+            else:
+                o_probs_l, o_fracs_l, _ = self.predict_batch(
+                    opp_encs_t0, compute_frac=not self.force_all_in, value_only=False
+                )
+                for opp_id, opp_enc, o_probs, o_fracs in zip(opp_ids_active, opp_encs_t0, o_probs_l, o_fracs_l):
+                    opp_moves_t0[opp_id] = self._decode_plan(
+                        opp_enc,
+                        o_probs,
+                        o_fracs,
+                        launch_threshold=self.opp_launch_threshold,
+                        force_all_in=self.force_all_in,
+                        max_speed=max_speed,
+                    )
 
-        for idx, plan in enumerate(candidates):
-            if idx > 0 and time.perf_counter() >= deadline:
-                break
+        # Initialize K candidate rollouts in lockstep and apply simultaneous t=0 moves
+        sims: List[FastOrbitSim] = []
+        for plan in candidates:
             sim = base_sim.clone()
             actions_t0: List[List[List[float]]] = [[] for _ in range(n_players)]
             actions_t0[player] = plan
             for opp_id, omv in opp_moves_t0.items():
                 actions_t0[opp_id] = omv
             sim.step(actions_t0)
+            sims.append(sim)
 
-            for step_i in range(1, self.rollout_horizon):
-                if sim.done:
-                    break
-                if step_i == half_step:
-                    # Active mid-rollout replan for all players
-                    step_acts: List[List[List[float]]] = [[] for _ in range(n_players)]
-                    for pid_cur in range(n_players):
-                        if self.neural_mid_replan:
-                            m_obs = sim.to_observation(player=pid_cur)
-                            m_enc = extract_planet_features(m_obs, player=pid_cur, max_speed=max_speed, feature_version=self.feature_version)
+        replan_set = set(self.replan_steps)
+        empty_acts = [[] for _ in range(n_players)]
+        use_sym = self.symmetric_value and (n_players == 2)
+        # Dynamic pass-time estimate so we never blow past deadline on large N boards
+        est_replan_sec = max(0.035, dt_root * (0.28 * k_cand * (2 if n_players == 2 else 1) / 8.0))
+        est_leaf_sec = max(0.030, est_replan_sec * (0.85 if use_sym else 0.50))
+
+        # Optional zero-cost trajectory value accumulation from intermediate replan passes
+        traj_val_wsum = np.zeros((k_cand,), dtype=np.float64)
+        traj_weight = np.zeros((k_cand,), dtype=np.float64)
+
+        for step_i in range(1, self.rollout_horizon):
+            if step_i in replan_set and (time.perf_counter() + est_replan_sec + est_leaf_sec < deadline):
+                if self.neural_mid_replan:
+                    t_rep = time.perf_counter()
+                    # Extract both players' features per alive branch sharing physics once per sim
+                    req_meta: List[Tuple[int, int, EncodedPlanetState]] = []
+                    step_acts_all: List[List[List[List[float]]]] = [
+                        [[] for _ in range(n_players)] for _ in range(k_cand)
+                    ]
+                    for idx_c, sim in enumerate(sims):
+                        if sim.done:
+                            continue
+                        obs_shared = sim.to_observation(player=player)
+                        sh = build_shared_planet_physics(obs_shared, max_speed=max_speed)
+                        for pid_cur in range(n_players):
+                            m_enc = extract_planet_features(
+                                obs_shared,
+                                player=pid_cur,
+                                max_speed=max_speed,
+                                feature_version=self.feature_version,
+                                shared_physics=sh,
+                            )
                             if np.any(m_enc.owned_mask):
-                                m_probs, m_fracs, _ = self.predict_probs_and_value(
-                                    m_enc, use_rot_tta=False, use_d4_tta=False
-                                )
-                                step_acts[pid_cur] = self._decode_plan(
-                                    m_enc,
-                                    m_probs,
-                                    m_fracs,
-                                    launch_threshold=self.launch_threshold,
-                                    force_all_in=self.force_all_in,
-                                    max_speed=max_speed,
-                                )
-                        else:
-                            step_acts[pid_cur] = heuristic_moves(sim, pid_cur)
-                    sim.step(step_acts)
+                                req_meta.append((idx_c, pid_cur, m_enc))
+                    if req_meta:
+                        m_probs_l, m_fracs_l, m_vals = self.predict_batch(
+                            [m[2] for m in req_meta],
+                            compute_frac=not self.force_all_in,
+                            value_only=False,
+                        )
+                        if self.trajectory_val_blend > 0.0:
+                            step_vsum = np.zeros((k_cand,), dtype=np.float64)
+                            step_vcnt = np.zeros((k_cand,), dtype=np.int32)
+                            for (idx_c, pid_cur, _), v_raw in zip(req_meta, m_vals):
+                                if pid_cur == player:
+                                    step_vsum[idx_c] += float(v_raw)
+                                    step_vcnt[idx_c] += 1
+                                elif use_sym:
+                                    step_vsum[idx_c] -= float(v_raw)
+                                    step_vcnt[idx_c] += 1
+                            w_step = float(step_i) / float(self.rollout_horizon)
+                            for idx_c in range(k_cand):
+                                if step_vcnt[idx_c] > 0:
+                                    traj_val_wsum[idx_c] += w_step * (step_vsum[idx_c] / step_vcnt[idx_c])
+                                    traj_weight[idx_c] += w_step
+                        for (idx_c, pid_cur, m_enc), m_p, m_f in zip(req_meta, m_probs_l, m_fracs_l):
+                            step_acts_all[idx_c][pid_cur] = self._decode_plan(
+                                m_enc,
+                                m_p,
+                                m_f,
+                                launch_threshold=(
+                                    self.launch_threshold if pid_cur == player else self.opp_launch_threshold
+                                ),
+                                force_all_in=self.force_all_in,
+                                max_speed=max_speed,
+                            )
+                    for idx_c, sim in enumerate(sims):
+                        if not sim.done:
+                            sim.step(step_acts_all[idx_c])
+                    dt_rep = time.perf_counter() - t_rep
+                    est_replan_sec = max(est_replan_sec, dt_rep)
+                    est_leaf_sec = max(0.025, est_replan_sec * (0.85 if use_sym else 0.50))
                 else:
-                    sim.step([[] for _ in range(n_players)])
+                    for sim in sims:
+                        if not sim.done:
+                            sim.step([heuristic_moves(sim, pid_cur) for pid_cur in range(n_players)])
+            else:
+                for sim in sims:
+                    if not sim.done:
+                        sim.step(empty_acts)
 
+        # Batched leaf value evaluation across all non-terminal branches
+        leaf_encs: List[EncodedPlanetState] = []
+        leaf_slots: List[Tuple[int, int]] = []  # (cand_idx, +1 for hero or -1 for opp)
+        leaf_enc_by_cand: Dict[int, List[Tuple[EncodedPlanetState, int]]] = {}
+        nn_val_sum = np.zeros((k_cand,), dtype=np.float64)
+        nn_val_cnt = np.zeros((k_cand,), dtype=np.int32)
+
+        for idx_c, sim in enumerate(sims):
+            if sim.done:
+                continue
+            obs_leaf = sim.to_observation(player=player)
+            sh_leaf = build_shared_planet_physics(obs_leaf, max_speed=max_speed)
+            hero_enc = extract_planet_features(
+                obs_leaf,
+                player=player,
+                max_speed=max_speed,
+                feature_version=self.feature_version,
+                shared_physics=sh_leaf,
+            )
+            leaf_encs.append(hero_enc)
+            leaf_slots.append((idx_c, 1))
+            leaf_enc_by_cand[idx_c] = [(hero_enc, 1)]
+            if use_sym:
+                opp_enc = extract_planet_features(
+                    obs_leaf,
+                    player=1 - player,
+                    max_speed=max_speed,
+                    feature_version=self.feature_version,
+                    shared_physics=sh_leaf,
+                )
+                leaf_encs.append(opp_enc)
+                leaf_slots.append((idx_c, -1))
+                leaf_enc_by_cand[idx_c].append((opp_enc, -1))
+
+        if leaf_encs:
+            _, _, leaf_vals = self.predict_batch(leaf_encs, compute_frac=False, value_only=True)
+            for (idx_c, sign), v_raw in zip(leaf_slots, leaf_vals):
+                nn_val_sum[idx_c] += float(sign) * float(v_raw)
+                nn_val_cnt[idx_c] += 1
+
+        base_lp = log_priors[0]
+
+        def _score_candidate(idx_c: int, nn_leaf_val: float) -> float:
+            sim = sims[idx_c]
             if sim.done:
                 win_pid = sim.winner()
                 if win_pid == player:
@@ -1372,19 +1975,90 @@ class SearchPlanetTransformerAgent(PlanetTransformerAgent):
                 else:
                     v_total = -1.0
             else:
-                h_val = float(evaluate_state(sim, player))
-                fut_obs = sim.to_observation(player=player)
-                fut_enc = extract_planet_features(fut_obs, player=player, max_speed=max_speed, feature_version=self.feature_version)
-                _, _, nn_val = self.predict_probs_and_value(fut_enc, use_rot_tta=False, use_d4_tta=False)
-                v_total = self.neural_value_weight * nn_val + (1.0 - self.neural_value_weight) * h_val
+                if self.trajectory_val_blend > 0.0 and traj_weight[idx_c] > 0.0:
+                    t_avg = float(traj_val_wsum[idx_c] / traj_weight[idx_c])
+                    nn_eff = (1.0 - self.trajectory_val_blend) * nn_leaf_val + self.trajectory_val_blend * t_avg
+                else:
+                    nn_eff = nn_leaf_val
+                if self.neural_value_weight >= 0.999:
+                    v_total = nn_eff
+                else:
+                    h_val = float(evaluate_state(sim, player))
+                    v_total = self.neural_value_weight * nn_eff + (1.0 - self.neural_value_weight) * h_val
+            return v_total + self.prior_bonus * (log_priors[idx_c] - base_lp)
 
-            prior_bonus = 0.015 * self._plan_log_prior(enc, probs, plan)
-            score = v_total + prior_bonus
-            if score > best_score:
-                best_score = score
-                best_plan = plan
+        stage1_scores = [
+            _score_candidate(idx_c, float(nn_val_sum[idx_c] / max(1, int(nn_val_cnt[idx_c]))))
+            for idx_c in range(k_cand)
+        ]
 
-        return best_plan
+        # Optional Stage-2: 4x-rotation symmetric TTA value refinement on top-K non-terminal finalists
+        if self.leaf_rot_tta_top_k >= 2 and leaf_enc_by_cand:
+            alive_order = sorted(leaf_enc_by_cand.keys(), key=lambda i: stage1_scores[i], reverse=True)
+            finalists = alive_order[: self.leaf_rot_tta_top_k]
+            if 0 in leaf_enc_by_cand and 0 not in finalists:
+                finalists[-1] = 0
+            # Evaluate 3 additional rotations (k=1,2,3) reusing k=0 already computed in Stage 1
+            tta_pf: List[np.ndarray] = []
+            tta_tf: List[np.ndarray] = []
+            tta_ef: List[np.ndarray] = []
+            tta_le: List[np.ndarray] = []
+            tta_ns: List[int] = []
+            tta_slots: List[Tuple[int, int]] = []
+            for idx_c in finalists:
+                for l_enc, sign in leaf_enc_by_cand[idx_c]:
+                    n_l = len(l_enc.planet_ids)
+                    if n_l == 0:
+                        continue
+                    tf_base = l_enc.timeline_feats[..., : self.timeline_dim]
+                    for k_rot in (1, 2, 3):
+                        tta_pf.append(apply_d4_planet_feats(l_enc.planet_feats, k_rot=k_rot, flip_x=False))
+                        tta_tf.append(apply_d4_timeline_feats(tf_base, k_rot=k_rot, flip_x=False))
+                        tta_ef.append(l_enc.edge_feats)
+                        tta_le.append(l_enc.legal_edges)
+                        tta_ns.append(n_l)
+                        tta_slots.append((idx_c, sign))
+            # Check remaining budget before running Stage-2 TTA batch
+            est_tta_sec = est_leaf_sec * (len(tta_slots) / max(1, len(leaf_slots)))
+            if tta_slots and (time.perf_counter() + est_tta_sec < deadline + 0.02):
+                max_nl = max(tta_ns)
+                b_tta = len(tta_slots)
+                if all(x == max_nl for x in tta_ns):
+                    pf_t = torch.from_numpy(np.stack(tta_pf, axis=0)).to(self.device)
+                    tf_t = torch.from_numpy(np.stack(tta_tf, axis=0)).to(self.device)
+                    ef_t = torch.from_numpy(np.stack(tta_ef, axis=0)).to(self.device)
+                    le_t = torch.from_numpy(np.stack(tta_le, axis=0)).to(self.device)
+                    pm_t = torch.ones((b_tta, max_nl), dtype=torch.bool, device=self.device)
+                else:
+                    pf_np = np.zeros((b_tta, max_nl, PLANET_FEAT_DIM), dtype=np.float32)
+                    tf_np = np.zeros((b_tta, max_nl, TIMELINE_HORIZON, self.timeline_dim), dtype=np.float32)
+                    ef_np = np.zeros((b_tta, max_nl, max_nl, EDGE_FEAT_DIM), dtype=np.float32)
+                    le_np = np.zeros((b_tta, max_nl, max_nl), dtype=bool)
+                    pm_np = np.zeros((b_tta, max_nl), dtype=bool)
+                    for ib, n_l in enumerate(tta_ns):
+                        pf_np[ib, :n_l] = tta_pf[ib]
+                        tf_np[ib, :n_l] = tta_tf[ib]
+                        ef_np[ib, :n_l, :n_l] = tta_ef[ib]
+                        le_np[ib, :n_l, :n_l] = tta_le[ib]
+                        pm_np[ib, :n_l] = True
+                    pf_t = torch.from_numpy(pf_np).to(self.device)
+                    tf_t = torch.from_numpy(tf_np).to(self.device)
+                    ef_t = torch.from_numpy(ef_np).to(self.device)
+                    le_t = torch.from_numpy(le_np).to(self.device)
+                    pm_t = torch.from_numpy(pm_np).to(self.device)
+                _, _, tta_vals = self.model(
+                    pf_t, tf_t, ef_t, pm_t, legal_edges=le_t, compute_frac=False, value_only=True
+                )
+                for (idx_c, sign), v_raw in zip(tta_slots, tta_vals.cpu().numpy()):
+                    nn_val_sum[idx_c] += float(sign) * float(v_raw)
+                    nn_val_cnt[idx_c] += 1
+                for idx_c in finalists:
+                    stage1_scores[idx_c] = _score_candidate(
+                        idx_c, float(nn_val_sum[idx_c] / max(1, int(nn_val_cnt[idx_c])))
+                    )
+
+        best_idx = int(np.argmax(stage1_scores))
+        return candidates[best_idx]
 
 
 class EnsemblePlanetTransformerAgent:
@@ -1483,6 +2157,7 @@ def create_planet_transformer_agent(
     reinforce_threshold: Optional[float] = None,
     surgical_neutral_cap: bool = False,
     anti_bounce_guard: bool = False,
+    decoupled_logit_tta: Optional[bool] = None,
 ):
     """Factory returning a Kaggle ``agent(obs, config)`` callable."""
     agent_obj = PlanetTransformerAgent(
@@ -1494,6 +2169,7 @@ def create_planet_transformer_agent(
         reinforce_threshold=reinforce_threshold,
         surgical_neutral_cap=surgical_neutral_cap,
         anti_bounce_guard=anti_bounce_guard,
+        decoupled_logit_tta=decoupled_logit_tta,
     )
 
     def _kaggle_agent(obs: Any, config: Any = None) -> List[List[float]]:
@@ -1511,9 +2187,18 @@ def create_search_planet_transformer_agent(
     force_all_in: bool = False,
     neural_mid_replan: bool = False,
     rollout_horizon: int = 10,
-    time_budget_sec: float = 0.22,
+    time_budget_sec: float = 0.28,
+    neural_value_weight: float = 0.85,
+    replan_steps: Optional[Sequence[int]] = None,
+    max_candidates: int = 8,
+    prior_bonus: float = 0.006,
+    symmetric_value: bool = True,
+    opp_rot_tta: bool = False,
+    opp_launch_threshold: Optional[float] = None,
+    trajectory_val_blend: float = 0.0,
+    leaf_rot_tta_top_k: int = 0,
 ):
-    """Factory returning a value-guided lookahead ``PlanetTimelineTransformer`` Kaggle agent."""
+    """Factory returning a batched value-guided lookahead ``PlanetTimelineTransformer`` Kaggle agent."""
     agent_obj = SearchPlanetTransformerAgent(
         checkpoint_path=checkpoint_path,
         launch_threshold=launch_threshold,
@@ -1523,6 +2208,15 @@ def create_search_planet_transformer_agent(
         neural_mid_replan=neural_mid_replan,
         rollout_horizon=rollout_horizon,
         time_budget_sec=time_budget_sec,
+        neural_value_weight=neural_value_weight,
+        replan_steps=replan_steps,
+        max_candidates=max_candidates,
+        prior_bonus=prior_bonus,
+        symmetric_value=symmetric_value,
+        opp_rot_tta=opp_rot_tta,
+        opp_launch_threshold=opp_launch_threshold,
+        trajectory_val_blend=trajectory_val_blend,
+        leaf_rot_tta_top_k=leaf_rot_tta_top_k,
     )
 
     def _kaggle_agent(obs: Any, config: Any = None) -> List[List[float]]:

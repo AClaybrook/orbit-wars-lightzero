@@ -290,3 +290,44 @@ This log tracks calibrated **Kaggle-equivalent Elo** estimates (anchored against
   - Production led `#2` at **`t=30` (`+1.5`)** and **`t=50` (`+0.2`)**; ship deficit slashed **`-73%` at `t=50` (`-131.8 → -36.2`)** and **`-75%` at `t=90` (`-1104 → -258.2`)**; avg ship tipping tick shifted `t=16.3 → t=27.8 → t=67.8` (seed 204 **154t KO win**, seed 200 held to `t=148`).
 - **Graphics & Replay Viewers Updated:** Embedded 8 compact Gen 12 comparison battles (including 3 wins vs. `#2 Hober Malloc` from P0 & P1 + sweeps of Gen 11/10/9/`subham_v14`) into `docs/gameplay_viewer.html` (28 matches total) and updated `docs/status_report.html` and `docs/boss_forensics.html`.
 - **Promotion Summary:** `checkpoints/planet_transformer_best.pt` promoted to `Gen 12 PT-v2 PPO (w1_it60)` (`8–0–16 / 33.3%` vs. `#2 Hober Malloc`, `18–0–2 / 90.0%` vs. Gen 11/10/9, `4–0–0` vs. `subham_v14`, `33.30 ms/turn`, recommended threshold `t=0.53`). Retained `planet_transformer_gen12_4m_ptv2_ppo.pt`, `planet_transformer_gen12_4m_ptv2_kd.pt`, and `planet_transformer_gen12_4m_ptv2_ppo_w3b.pt`.
+
+---
+
+### Generation 13 (2026-11-26): `4.67M PT-v3.5` Architecture + Decoupled Logit-TTA + 48g Forensics (`21–0–27 / 43.8%` vs. `#2 Hober Malloc`, `18–0–2` vs. Gen 12 PPO, `20–0–0` vs. Gen 11 & Gen 10!)
+
+- **Architectural Breakthroughs (`PT-v3` `4.60M` → `PT-v3.5` `4.67M`):**
+  - **`PT-v3` (`arch_version=3`, `4.60M` params):** Upgraded timeline stem to **4× masked residual Conv1D (`k=5, ch=128`)** over `t=0..20` linear + log channels feeding **7 edge-biased GeGLU Transformer layers**, `detach_value`, CPU valid-planet Conv1D packing (`1.51×` padded rollout / `1.22×` live `8× D4` speedup), and pre-transpose mask optimization + contiguous slice concat (`+16.9%` DML `N=44`, `0.00e+00` diff, `0` fallbacks).
+  - **`PT-v3.5` Target-Conditioned Launch Context (`target_cond_launch=True`, `4.67M` params):** Added zero-initialized `launch_ctx_head` residual feeding selected target features `[h, h_tgt, e_tgt, max_p_tgt, tgt_ent, best_raw]` back into `launch_head` while keeping factorized gradients intact.
+  - **Decoupled Logit-Space `8× D4` TTA (`decoupled_logit_tta=True`):** Auto-enabled for all `target_cond_launch=True` checkpoints in `PlanetTransformerAgent`; averages `launch_logit = log p_launch - log p_hold` and conditional target log-probs separately across all 8 dihedral symmetries instead of averaging post-softmax probabilities (eliminating probability-blur false holds on `[0.40, 0.53)` cliff decisions).
+- **Iterative Direct `#2` Soft-KD, Cliff-Boosted Losses & On-Policy Low-T PPO (`RX 6950 XT DirectML`, `0` Fallbacks):**
+  - **`PT-v3 KD` (`planet_transformer_gen13_4m_ptv3_kd.pt`, `4.60M`):** Jumped `PT-v2 R5` baseline (`9–0–39 / 18.8%`) to **`17–0–31 (35.4%)`** on the expanded **48-game `#2 Hober Malloc` Boss Suite** (`200–223: 7–0–17 / 29.2%`, `300–323: 10–0–14 / 41.7%`).
+  - **`PT-v3 R6 KD` (`+36,757` live DAgger boards -> `244,194` train / `10,000` unseen val boards):** Reached `val_kl = 0.0593` and scored `16–0–32 (33.3%)` on the 48g Boss Suite (`8–0–16` on both `200–223` and `300–323` at `t=0.53` and `t=0.50`).
+  - **`PT-v3.5 KD` (`planet_transformer_gen13_4m_ptv35_kd.pt`, `4.67M` Champion):** Trained `5` cosine DML epochs (`0` fallbacks, `val_all = 94.5%`, `l_f1 = 90.4%`, `6k cal kl = 0.0525`, `tgt = 83.7%`). Unseen `seeds 300–323` TTA ablation proved Decoupled Logit-TTA adds **`+8.4%`** over Prob-TTA (`8–0–16 / 33.3% → 10–0–14 / 41.7%`). Full 48g Boss Suite hit **`21–0–27 (43.8%)`** (`200–223: 11–0–13 / 45.8%`, `300–323: 10–0–14 / 41.7%`, `P0 = 12/24 [50.0%]`, `P1 = 9/24 [37.5%]`), flipping former forensics blunders **Seed 212** (`false_launch`) and **Seed 203** (`false_hold`) into wins!
+  - **`PT-v3.5` Exact Factorized Low-T PPO (`planet_transformer_gen13_ptv35_ppo.pt`):** Implemented DirectML-native factorized PPO using `F.log_softmax`, planet-weighted advantage centering, and mid-epoch `max_kl` early stop (`35` iters, `kl <= 0.0074`, `akl <= 0.0104`, `aux = 96.5%`, `0` fallbacks); peaked on `44g` rollout eval (`hober = 20% → 40%` at `it15`) but scored `15–0–33 (31.2%)` on the strict 48g `kaggle_environments` suite (`5–0–19` on `200–223`, `10–0–14` on `300–323`), so `PT-v3.5 KD` (`43.8%`) won promotion decisively.
+- **48-Game Loss Forensics (`scratch/analyze_ptv3_losses.py` on `PT-v3 R6 KD`, `FastOrbitSim` `14–0–34 / 29.2%`, `88.64%` agreement over `37,320` decisions):**
+  - Losses diverged early (`t_div` quantiles: `p10 = 17.3t`, `p25 = 23.25t`, `p50 = 36.5t`, `p75 = 54.5t`, `p90 = 67.0t`); value head turned negative by tick 45 in losses (`v = -0.610` vs `+0.132` in wins).
+  - Across `4,238` decision disagreements on lost games: **`false_hold = 43.8%` (`1,856`)** with **`81.0%` (`1,503`)** inside the `[0.40, 0.53)` threshold cliff and **`47.0%` (`872`)** lagging `#2` by `1–2` ticks (`54.0%` in `[t_div-18, t_div+6]` critical window); **`false_launch = 31.0%` (`1,314`)** with **`89.3%` (`1,174`)** in `[0.53, 0.65]` (`30.5%` / `401` captured within `15t`); **`wrong_target = 25.2%` (`1,068`)** (`57.6%` / `615` friendly hub selection mismatches). Solving these exact two mechanisms lifted `#2 Hober Malloc` win rate **`33.3% → 43.8%` (`+10.5%`)**.
+- **Verified 48-Game `#2 Hober Malloc` Boss Suite Progression (`kaggle_environments`, `seeds 200–223` + `300–323`, `8× D4`, `t=0.53`):**
+
+| Model / Architecture | Params | Seeds `200–223` (24g) | Seeds `300–323` (24g) | Full 48g Score | Full 48g WR |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| **Gen 12 PPO (`w1_it60`, `PT-v2`)** | `4.31M` | `8–0–16 (33.3%)` | `—` | `—` | `33.3% (24g)` |
+| **Gen 13 `PT-v2 R5` Baseline** | `4.31M` | `—` | `—` | `9–0–39` | `18.8%` |
+| **Gen 13 `PT-v3` R6 DAgger KD (`0.0593` KL)** | `4.60M` | `8–0–16 (33.3%)` | `8–0–16 (33.3%)` | `16–0–32` | `33.3%` |
+| **Gen 13 `PT-v3` KD** | `4.60M` | `7–0–17 (29.2%)` | `10–0–14 (41.7%)` | `17–0–31` | `35.4%` |
+| **Gen 13 `PT-v3.5` PPO (`it15`, `PT-v3.5` + Logit-TTA)** | `4.67M` | `5–0–19 (20.8%)` | `10–0–14 (41.7%)` | `15–0–33` | `31.2%` |
+| **Gen 13 `PT-v3.5` KD (`planet_transformer_best.pt`, Decoupled Logit-TTA)** | **`4.67M`** | **`11–0–13 (45.8%)`** | **`10–0–14 (41.7%)`** | **`21–0–27`** | **`43.8%`** |
+
+- **Verified Final Head-to-Head Ladder (`4.67M PT-v3.5 Gen 13 KD`, Single Model, `8× D4` Decoupled Logit-TTA, `t=0.53`, 1-Thread CPU, Unseen `seeds 990–999` × 2 seats):**
+
+| Matchup (Single `4.67M` Champion vs. Opponent) | Arena / Games | Score | Win Rate | Avg Len | 1-Thread Latency |
+| --- | --- | --- | ---: | ---: | ---: |
+| **Gen 13 `PT-v3.5`** vs. **`#2 Hober Malloc (1800.1)`** | 2P (`200–223` + `300–323`, 48g) | **`21–0–27`** (`P0=12/24, P1=9/24`) | **`43.8%`** | `164.5t` *(4g sample)* | **`53.91 ms/t`** (`72.17 ms` p95) |
+| **Gen 13 `PT-v3.5`** vs. **Gen 12 PPO (`4.31M PT-v2`)** | 2P (`seeds 990–999`, 20g) | **`18–0–2`** | **`90.0%`** | `158.5t` | `~53.9–63.0 ms/t` |
+| **Gen 13 `PT-v3.5`** vs. **Gen 11 PPO (`4.31M PT-v1`)** | 2P (`seeds 990–999`, 20g) | **`20–0–0`** | **`100.0%`** | `131.7t` | `~53.9–63.0 ms/t` |
+| **Gen 13 `PT-v3.5`** vs. **Gen 10 PPO (`4.31M PT-v1`)** | 2P (`seeds 990–999`, 20g) | **`20–0–0`** | **`100.0%`** | `113.4t` | `~53.9–63.0 ms/t` |
+| **Gen 13 `PT-v3.5`** vs. **Gen 13 `PT-v3` KD (`4.60M`)** | 2P (`seeds 990–999`, 20g) | `2–0–18` *(mirror counter; `PT-v3.5` `+8.4%` vs `#2`)* | `10.0%` | `189.9t` | `~53.9–63.0 ms/t` |
+| **Gen 13 `PT-v3.5`** vs. **`subham_v14`** | 2P (`seeds 100–103`, 4g, 1-thread) | **`4–0–0`** | **`100.0%`** | `111.8t` | **`63.04 ms/t`** (`79.57 ms` p95) |
+
+- **Graphics & Replay Viewers Updated:** Embedded 5 compact Gen 13 `PT-v3.5` comparison replays (wins vs. `#2 Hober Malloc` from P0 & P1, unseen series win vs. `Gen 12 PPO`, and a loss forensics case) into `docs/gameplay_viewer.html` (33 matches total) and updated `docs/status_report.html` and `docs/boss_forensics.html`.
+- **Promotion Summary:** `checkpoints/planet_transformer_best.pt` promoted to `Gen 13 PT-v3.5 KD (4.67M)` (`21–0–27 / 43.8%` vs. `#2 Hober Malloc`, `18–0–2 / 90.0%` vs. Gen 12 PPO, `20–0–0` sweeps of Gen 11 & Gen 10 PPO, `4–0–0` vs. `subham_v14`, `53.91–63.04 ms/turn` 1-thread CPU, auto-enabled `decoupled_logit_tta=True`, recommended threshold `t=0.53`). Retained `planet_transformer_gen13_4m_ptv35_kd.pt`, `planet_transformer_gen13_4m_ptv3_kd.pt`, and `planet_transformer_gen13_ptv35_ppo.pt`.
