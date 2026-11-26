@@ -1261,7 +1261,10 @@ def test_wave16_def_stream_opening_guard_and_1t_ei(tmp_path):
     # Give player 1 two owned planets: one threatened by an incoming P2 fleet and one rear helper with surplus
     my_home = next(p for p in sim.planets.values() if p.owner == 1)
     opp_home = next(p for p in sim.planets.values() if p.owner == 2)
-    helper = next(p for p in sim.planets.values() if p.owner == 0)
+    helper = min(
+        (p for p in sim.planets.values() if p.owner == 0),
+        key=lambda p: sim.planet_eta_ticks(p, my_home),
+    )
     helper.owner = 1
     helper.ships = 60.0
     my_home.ships = 10.0
