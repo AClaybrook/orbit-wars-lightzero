@@ -2700,26 +2700,27 @@ def collect_gen4_multisend_ei_dataset(
             is_selfplay = False
             is_boss = False
             if lua_opp is not None and lua_opp2 is not None and lua_opp3 is not None:
-                slot = g % 6
-                if slot in (0, 1):
+                # Elo-weighted 8-game cycle: 3 Sparky (37.5%), 2 Waffle3z (25%), 1 EsparanBot (12.5%), 1 Self-Play, 1 Heur
+                slot = g % 8
+                if slot in (0, 1, 2):
                     is_boss = True
                     boss_idx += 1
                     opp_bot = lua_opp
                     our_pid = 1 if (boss_idx % 2 == 1) else 2
                     opp_pid = 2 if our_pid == 1 else 1
-                elif slot == 2:
+                elif slot in (3, 4):
                     is_boss = True
                     boss3_idx += 1
                     opp_bot = lua_opp3
                     our_pid = 1 if (boss3_idx % 2 == 1) else 2
                     opp_pid = 2 if our_pid == 1 else 1
-                elif slot == 3:
+                elif slot == 5:
                     is_boss = True
                     boss2_idx += 1
                     opp_bot = lua_opp2
                     our_pid = 1 if (boss2_idx % 2 == 1) else 2
                     opp_pid = 2 if our_pid == 1 else 1
-                elif slot == 4:
+                elif slot == 6:
                     is_selfplay = True
                     opp_bot = None
                     our_pid = opp_pid = 0
@@ -4321,6 +4322,7 @@ def rl_mirror_league_ppo_gen4(
     lr: float = 4.5e-5,
     kl_coef: float = 0.030,
     v_anchor_coef: float = 0.0,
+    freeze_value_head: bool = False,
     ema_tau: float = 0.07,
     gamma: float = 0.985,
     gae_lam: float = 0.95,
@@ -4391,7 +4393,12 @@ def rl_mirror_league_ppo_gen4(
     for p in snapshot_pool[-1].parameters():
         p.requires_grad_(False)
 
-    opt = _build_optimizer(policy.parameters(), lr=lr, weight_decay=1e-4, use_dml=use_dml)
+    if freeze_value_head:
+        for pname, p in policy.named_parameters():
+            if pname.startswith("val_") or "value_head" in pname:
+                p.requires_grad_(False)
+    trainable_params = [p for p in policy.parameters() if p.requires_grad]
+    opt = _build_optimizer(trainable_params, lr=lr, weight_decay=1e-4, use_dml=use_dml)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, iters), eta_min=lr * 0.25)
 
     redir_loader = None
@@ -4799,17 +4806,23 @@ def rl_mirror_league_ppo_gen4(
                     kl = e_p * torch.log(e_p / cur_p) + (1.0 - e_p) * torch.log((1.0 - e_p) / (1.0 - cur_p))
                     kl_mean = (kl * edge_f).sum() / edge_sum
 
-                    if wdl_logits is not None:
-                        v_clamped = ret.clamp(-1.0, 1.0)
-                        t_draw = 0.65 * (1.0 - v_clamped.abs()).pow(2)
-                        t_win = (1.0 - t_draw + v_clamped) * 0.5
-                        t_loss = (1.0 - t_draw - v_clamped) * 0.5
-                        wdl_t = torch.stack([t_loss, t_draw, t_win], dim=-1).clamp(1e-4, 1.0)
-                        wdl_t = wdl_t / wdl_t.sum(dim=-1, keepdim=True)
-                        v_loss = -(wdl_t * F.log_softmax(wdl_logits, dim=-1)).sum(dim=-1).mean() + 0.25 * F.mse_loss(val, ret)
+                    if freeze_value_head:
+                        v_loss = 0.0
+                        v_anc_eff = max(float(v_anchor_coef), 0.25)
+                        v_anc = F.mse_loss(val, e_val)
                     else:
-                        v_loss = F.mse_loss(val, ret)
-                    v_anc = F.mse_loss(val, e_val) if v_anchor_coef > 0.0 else 0.0
+                        if wdl_logits is not None:
+                            v_clamped = ret.clamp(-1.0, 1.0)
+                            t_draw = 0.65 * (1.0 - v_clamped.abs()).pow(2)
+                            t_win = (1.0 - t_draw + v_clamped) * 0.5
+                            t_loss = (1.0 - t_draw - v_clamped) * 0.5
+                            wdl_t = torch.stack([t_loss, t_draw, t_win], dim=-1).clamp(1e-4, 1.0)
+                            wdl_t = wdl_t / wdl_t.sum(dim=-1, keepdim=True)
+                            v_loss = -(wdl_t * F.log_softmax(wdl_logits, dim=-1)).sum(dim=-1).mean() + 0.25 * F.mse_loss(val, ret)
+                        else:
+                            v_loss = F.mse_loss(val, ret)
+                        v_anc_eff = float(v_anchor_coef)
+                        v_anc = F.mse_loss(val, e_val) if v_anc_eff > 0.0 else 0.0
                     pm_f = pm.float()
                     pm_sum = pm_f.sum().clamp_min(1.0)
                     aux_ce = F.cross_entropy(
@@ -4820,7 +4833,7 @@ def rl_mirror_league_ppo_gen4(
                     aux_own_loss = (aux_ce * pm_f).sum() / pm_sum
                     aux_shp_loss = (F.smooth_l1_loss(aux_pred[..., 3], aux_s, reduction="none") * pm_f).sum() / pm_sum
                     aux_loss = aux_own_loss + 0.5 * aux_shp_loss
-                    loss = -surr + 0.40 * v_loss + v_anchor_coef * v_anc + kl_coef * kl_mean - ent_coef * ent_mean + 0.14 * aux_loss
+                    loss = -surr + 0.40 * v_loss + v_anc_eff * v_anc + kl_coef * kl_mean - ent_coef * ent_mean + 0.14 * aux_loss
 
                     if r_iter is not None and (b_idx % 4 == 0):
                         try:
@@ -5020,6 +5033,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--large-map-prob", type=float, default=0.30)
     parser.add_argument("--kl-coef", type=float, default=0.030)
     parser.add_argument("--v-anchor-coef", type=float, default=0.0)
+    parser.add_argument("--freeze-value-head", action="store_true", help="Freeze WDL/scalar value head parameters and skip GAE value loss during PPO to preserve Search value calibration.")
     parser.add_argument("--kd-alpha", type=float, default=0.30)
     parser.add_argument("--arch", choices=["gen4", "gen5"], default="gen4", help="Model architecture for gen4_ei supervised/KD training (gen4=1.29M, gen5=2.93M Edge-Gated WDL).")
     parser.add_argument("--filter-draws", action="store_true", help="Mask boss stalemate draws from EI policy loss while keeping value/aux supervision.")
@@ -5217,6 +5231,7 @@ def main(argv: list[str] | None = None) -> int:
             lr=args.lr if args.lr > 0 else 4.5e-5,
             kl_coef=args.kl_coef,
             v_anchor_coef=args.v_anchor_coef,
+            freeze_value_head=args.freeze_value_head,
             boss_draw_penalty=args.boss_draw_penalty,
             sparky_share=args.sparky_share,
             esparan_share=args.esparan_share,
