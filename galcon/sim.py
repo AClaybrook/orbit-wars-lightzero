@@ -824,6 +824,11 @@ class GalconSim:
             fl_spu.append(fl.ships_per_unit)
             fl_owner.append(fl.owner)
 
+        tgt_fleets: List[List[int]] = [[] for _ in range(n_planets)]
+        for fi, ti in enumerate(fl_tgt_idx):
+            if 0 <= ti < n_planets:
+                tgt_fleets[ti].append(fi)
+
         for _s in range(substeps):
             # 1. Production on owned planets
             for i in range(n_planets):
@@ -831,67 +836,139 @@ class GalconSim:
                 if p.owner > 0:
                     p.ships += p_prod_sub[i]
 
-            # 2. Same-fleet ship-ship circle separation (Gauss-Seidel + per-ship substep cap)
+            # 2. Same-target ship-ship circle separation (Gauss-Seidel + per-ship substep cap)
             if sep_k > 0.0:
-                for fi in range(n_fleets):
-                    alive_c = fl_alive_cnt[fi]
-                    if alive_c <= 1:
+                for tgt_i in range(n_planets):
+                    grp = tgt_fleets[tgt_i]
+                    n_grp = len(grp)
+                    if n_grp == 0:
                         continue
-                    ux = fl_ux[fi]
-                    uy = fl_uy[fi]
-                    m = len(ux)
-                    all_alive = alive_c == m
-                    if max_sep_push > 0.0:
-                        ox = ux[:]
-                        oy = uy[:]
-                    if all_alive:
-                        for a in range(m):
-                            ax = ux[a]
-                            ay = uy[a]
-                            for b in range(a + 1, m):
-                                dx = ux[b] - ax
-                                dy = uy[b] - ay
-                                d2 = dx * dx + dy * dy
-                                if d2 < min_sep2:
-                                    if d2 > eps_dist2:
-                                        dist = _sqrt(d2)
-                                        nx = dx / dist
-                                        ny = dy / dist
-                                    else:
-                                        dist = 0.0
-                                        ang = golden_angle * float(a * 31 + b + 1)
-                                        nx = _cos(ang)
-                                        ny = _sin(ang)
-                                    push = half_k * (min_sep - dist)
-                                    px_d = nx * push
-                                    py_d = ny * push
-                                    ax -= px_d
-                                    ay -= py_d
-                                    ux[b] += px_d
-                                    uy[b] += py_d
-                            ux[a] = ax
-                            uy[a] = ay
+                    if n_grp == 1:
+                        fi = grp[0]
+                        alive_c = fl_alive_cnt[fi]
+                        if alive_c <= 1:
+                            continue
+                        ux = fl_ux[fi]
+                        uy = fl_uy[fi]
+                        m = len(ux)
+                        all_alive = alive_c == m
                         if max_sep_push > 0.0:
-                            for u in range(m):
-                                dx = ux[u] - ox[u]
-                                dy = uy[u] - oy[u]
-                                d2 = dx * dx + dy * dy
-                                if d2 > cap2:
-                                    sc = max_sep_push / _sqrt(d2)
-                                    ux[u] = ox[u] + dx * sc
-                                    uy[u] = oy[u] + dy * sc
+                            ox = ux[:]
+                            oy = uy[:]
+                        if all_alive:
+                            for a in range(m):
+                                ax = ux[a]
+                                ay = uy[a]
+                                for b in range(a + 1, m):
+                                    dx = ux[b] - ax
+                                    dy = uy[b] - ay
+                                    d2 = dx * dx + dy * dy
+                                    if d2 < min_sep2:
+                                        if d2 > eps_dist2:
+                                            dist = _sqrt(d2)
+                                            nx = dx / dist
+                                            ny = dy / dist
+                                        else:
+                                            dist = 0.0
+                                            ang = golden_angle * float(a * 31 + b + 1)
+                                            nx = _cos(ang)
+                                            ny = _sin(ang)
+                                        push = half_k * (min_sep - dist)
+                                        px_d = nx * push
+                                        py_d = ny * push
+                                        ax -= px_d
+                                        ay -= py_d
+                                        ux[b] += px_d
+                                        uy[b] += py_d
+                                ux[a] = ax
+                                uy[a] = ay
+                            if max_sep_push > 0.0:
+                                for u in range(m):
+                                    dx = ux[u] - ox[u]
+                                    dy = uy[u] - oy[u]
+                                    d2 = dx * dx + dy * dy
+                                    if d2 > cap2:
+                                        sc = max_sep_push / _sqrt(d2)
+                                        ux[u] = ox[u] + dx * sc
+                                        uy[u] = oy[u] + dy * sc
+                        else:
+                            alive = fl_alive[fi]
+                            for a in range(m):
+                                if not alive[a]:
+                                    continue
+                                ax = ux[a]
+                                ay = uy[a]
+                                for b in range(a + 1, m):
+                                    if not alive[b]:
+                                        continue
+                                    dx = ux[b] - ax
+                                    dy = uy[b] - ay
+                                    d2 = dx * dx + dy * dy
+                                    if d2 < min_sep2:
+                                        if d2 > eps_dist2:
+                                            dist = _sqrt(d2)
+                                            nx = dx / dist
+                                            ny = dy / dist
+                                        else:
+                                            dist = 0.0
+                                            ang = golden_angle * float(a * 31 + b + 1)
+                                            nx = _cos(ang)
+                                            ny = _sin(ang)
+                                        push = half_k * (min_sep - dist)
+                                        px_d = nx * push
+                                        py_d = ny * push
+                                        ax -= px_d
+                                        ay -= py_d
+                                        ux[b] += px_d
+                                        uy[b] += py_d
+                                ux[a] = ax
+                                uy[a] = ay
+                            if max_sep_push > 0.0:
+                                for u in range(m):
+                                    if not alive[u]:
+                                        continue
+                                    dx = ux[u] - ox[u]
+                                    dy = uy[u] - oy[u]
+                                    d2 = dx * dx + dy * dy
+                                    if d2 > cap2:
+                                        sc = max_sep_push / _sqrt(d2)
+                                        ux[u] = ox[u] + dx * sc
+                                        uy[u] = oy[u] + dy * sc
                     else:
-                        alive = fl_alive[fi]
-                        for a in range(m):
-                            if not alive[a]:
+                        gx: List[float] = []
+                        gy: List[float] = []
+                        g_ref: List[Tuple[int, int]] = []
+                        for fi in grp:
+                            alive_c = fl_alive_cnt[fi]
+                            if alive_c <= 0:
                                 continue
-                            ax = ux[a]
-                            ay = uy[a]
-                            for b in range(a + 1, m):
-                                if not alive[b]:
-                                    continue
-                                dx = ux[b] - ax
-                                dy = uy[b] - ay
+                            ux = fl_ux[fi]
+                            uy = fl_uy[fi]
+                            m_f = len(ux)
+                            if alive_c == m_f:
+                                for u in range(m_f):
+                                    gx.append(ux[u])
+                                    gy.append(uy[u])
+                                    g_ref.append((fi, u))
+                            else:
+                                alive = fl_alive[fi]
+                                for u in range(m_f):
+                                    if alive[u]:
+                                        gx.append(ux[u])
+                                        gy.append(uy[u])
+                                        g_ref.append((fi, u))
+                        m_g = len(gx)
+                        if m_g <= 1:
+                            continue
+                        if max_sep_push > 0.0:
+                            ox = gx[:]
+                            oy = gy[:]
+                        for a in range(m_g):
+                            ax = gx[a]
+                            ay = gy[a]
+                            for b in range(a + 1, m_g):
+                                dx = gx[b] - ax
+                                dy = gy[b] - ay
                                 d2 = dx * dx + dy * dy
                                 if d2 < min_sep2:
                                     if d2 > eps_dist2:
@@ -908,21 +985,23 @@ class GalconSim:
                                     py_d = ny * push
                                     ax -= px_d
                                     ay -= py_d
-                                    ux[b] += px_d
-                                    uy[b] += py_d
-                            ux[a] = ax
-                            uy[a] = ay
+                                    gx[b] += px_d
+                                    gy[b] += py_d
+                            gx[a] = ax
+                            gy[a] = ay
                         if max_sep_push > 0.0:
-                            for u in range(m):
-                                if not alive[u]:
-                                    continue
-                                dx = ux[u] - ox[u]
-                                dy = uy[u] - oy[u]
+                            for idx_g in range(m_g):
+                                dx = gx[idx_g] - ox[idx_g]
+                                dy = gy[idx_g] - oy[idx_g]
                                 d2 = dx * dx + dy * dy
                                 if d2 > cap2:
                                     sc = max_sep_push / _sqrt(d2)
-                                    ux[u] = ox[u] + dx * sc
-                                    uy[u] = oy[u] + dy * sc
+                                    gx[idx_g] = ox[idx_g] + dx * sc
+                                    gy[idx_g] = oy[idx_g] + dy * sc
+                        for idx_g in range(m_g):
+                            fi_r, u_r = g_ref[idx_g]
+                            fl_ux[fi_r][u_r] = gx[idx_g]
+                            fl_uy[fi_r][u_r] = gy[idx_g]
 
             # 3. Move toward target + 4. Planet collider pushout + 5a. Touch-to-land
             arrivals: Dict[int, Dict[int, float]] = {}

@@ -1937,20 +1937,34 @@ def test_galcon_sim_physical_ships_separation_pushout_gradual_landing_and_redir(
     assert max(radii) - spawn41_r < 3.0, f"Unexpected launch overshoot: spawn_r={spawn41_r:.2f}, max_r={max(radii):.2f}"
     assert spawn41_r - min(radii) < 5.0, f"Unexpected launch rebound: spawn_r={spawn41_r:.2f}, min_r={min(radii):.2f}"
 
-    # 2. Cross-fleet ships do NOT push each other apart (same owner AND opposing owner)
+    # 2a. Cross-fleet ships sharing the SAME target DO separate (both same-owner AND opposing-owner)
     pa = Planet(id=1, owner=1, ships=50.0, x=20.0, y=100.0, production=0.0, radius=12.0)
     pb = Planet(id=2, owner=2, ships=500.0, x=380.0, y=100.0, production=0.0, radius=12.0)
+    pc = Planet(id=3, owner=0, ships=500.0, x=380.0, y=150.0, production=0.0, radius=12.0)
     f_p1a = Fleet(id=10, owner=1, ships=5.0, x=100.0, y=100.0, source=1, target=2)
     f_p1b = Fleet(id=11, owner=1, ships=5.0, x=100.0, y=100.0, source=1, target=2)
     f_p2 = Fleet(id=12, owner=2, ships=5.0, x=100.0, y=100.0, source=1, target=2)
-    sim_cross = GalconSim([pa, pb], [f_p1a, f_p1b, f_p2], width=400.0, height=200.0)
+    sim_same_tgt = GalconSim([pa, pb, pc], [f_p1a, f_p1b, f_p2], width=400.0, height=200.0)
     for _ in range(5):
-        sim_cross.step({})
-    u10 = sim_cross.fleets[10].units[0]
-    u11 = sim_cross.fleets[11].units[0]
-    u12 = sim_cross.fleets[12].units[0]
-    assert u10 == u11 == u12
-    assert np.isclose(u10[0], 150.0, atol=1e-9) and np.isclose(u10[1], 100.0, atol=1e-9)
+        sim_same_tgt.step({})
+    u10 = sim_same_tgt.fleets[10].units[0]
+    u11 = sim_same_tgt.fleets[11].units[0]
+    u12 = sim_same_tgt.fleets[12].units[0]
+    for ua, ub in ((u10, u11), (u10, u12), (u11, u12)):
+        d_pair = math.sqrt((ua[0] - ub[0]) ** 2 + (ua[1] - ub[1]) ** 2)
+        assert d_pair >= 2.0 * SHIP_RADIUS - 0.5, f"Same-target cross-fleet ships still overlapped: d={d_pair:.3f}"
+
+    # 2b. Ships with DIFFERENT targets do NOT push each other apart
+    f_diff_a = Fleet(id=20, owner=1, ships=5.0, x=100.0, y=100.0, source=1, target=2)
+    f_diff_b = Fleet(id=21, owner=1, ships=5.0, x=100.0, y=100.0, source=1, target=3)
+    sim_diff_tgt = GalconSim([pa, pb, pc], [f_diff_a, f_diff_b], width=400.0, height=200.0)
+    sim_diff_ref = GalconSim([pa, pb, pc], [Fleet(id=20, owner=1, ships=5.0, x=100.0, y=100.0, source=1, target=2)], width=400.0, height=200.0)
+    for _ in range(5):
+        sim_diff_tgt.step({})
+        sim_diff_ref.step({})
+    assert sim_diff_tgt.fleets[20].units[0] == sim_diff_ref.fleets[20].units[0]
+    assert np.isclose(sim_diff_tgt.fleets[20].units[0][0], 150.0, atol=1e-9)
+    assert np.isclose(sim_diff_tgt.fleets[20].units[0][1], 100.0, atol=1e-9)
 
     # 3. Obstacle planet directly between src and dst pushes ships radially outward,
     #    slows arrival vs unobstructed flight, and 1-ship collinear fleet escapes cleanly

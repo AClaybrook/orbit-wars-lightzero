@@ -213,7 +213,14 @@ int32_t run_physics_substeps(
     double* __restrict__ p_min_r2,
     double* __restrict__ p_land_r,
     double* __restrict__ p_land_r2_guard,
-    double* __restrict__ p_prod_sub
+    double* __restrict__ p_prod_sub,
+    int32_t* __restrict__ tgt_head,
+    int32_t* __restrict__ tgt_tail,
+    int32_t* __restrict__ tgt_cnt,
+    int32_t* __restrict__ fl_next,
+    int32_t* __restrict__ grp_uids,
+    double* __restrict__ grp_x,
+    double* __restrict__ grp_y
 ) {
     if (n_planets <= 0) return 0;
     if (substeps < 1) substeps = 1;
@@ -265,6 +272,26 @@ int32_t run_physics_substeps(
         fl_alive_cnt[f] = fl_unit_count[f];
     }
 
+    // Group fleets by target planet index (preserving ascending fleet index order)
+    for (int32_t p = 0; p < n_planets; ++p) {
+        tgt_head[p] = -1;
+        tgt_tail[p] = -1;
+        tgt_cnt[p] = 0;
+    }
+    for (int32_t f = 0; f < n_fleets; ++f) {
+        fl_next[f] = -1;
+        const int32_t tgt = fl_target_idx[f];
+        if (tgt < 0 || tgt >= n_planets) continue;
+        if (tgt_head[tgt] < 0) {
+            tgt_head[tgt] = f;
+            tgt_tail[tgt] = f;
+        } else {
+            fl_next[tgt_tail[tgt]] = f;
+            tgt_tail[tgt] = f;
+        }
+        tgt_cnt[tgt] += 1;
+    }
+
     for (int32_t s = 0; s < substeps; ++s) {
         // 1. Production on owned planets
         for (int32_t p = 0; p < n_planets; ++p) {
@@ -273,101 +300,212 @@ int32_t run_physics_substeps(
             }
         }
 
-        // 2. Same-fleet ship-ship circle separation
+        // 2. Same-target ship-ship circle separation
         if (sep_stiffness > 0.0) {
-            for (int32_t f = 0; f < n_fleets; ++f) {
-                const int32_t alive_c = fl_alive_cnt[f];
-                if (alive_c <= 1) continue;
-                const int32_t start = fl_unit_start[f];
-                const int32_t cnt = fl_unit_count[f];
-                const int32_t end = start + cnt;
-                const bool all_alive = (alive_c == cnt);
+            const bool ship_cap = (sep_mode == 1 && max_sep_push > 0.0);
+            const bool pair_cap = (sep_mode == 0 && max_sep_push > 0.0);
+            const double cap2 = (max_sep_push > 0.0) ? (max_sep_push * max_sep_push) : 0.0;
 
-                if (sep_mode == 2) {
-                    for (int32_t u = start; u < end; ++u) {
-                        tmp_x[u] = 0.0;
-                        tmp_y[u] = 0.0;
-                    }
-                    for (int32_t a = start; a < end; ++a) {
-                        if (!all_alive && !u_alive[a]) continue;
-                        const double ax = ux[a];
-                        const double ay = uy[a];
-                        for (int32_t b = a + 1; b < end; ++b) {
-                            if (!all_alive && !u_alive[b]) continue;
-                            const double dx = ux[b] - ax;
-                            const double dy = uy[b] - ay;
-                            const double d2 = dx * dx + dy * dy;
-                            if (d2 < min_sep2) {
-                                double nx, ny, dist;
-                                if (d2 > EPS_DIST2) {
-                                    dist = std::sqrt(d2);
-                                    nx = dx / dist;
-                                    ny = dy / dist;
-                                } else {
-                                    dist = 0.0;
-                                    const double ang = GOLDEN_ANGLE * (double)((a - start) * 31 + (b - start) + 1);
-                                    nx = std::cos(ang);
-                                    ny = std::sin(ang);
+            for (int32_t tgt = 0; tgt < n_planets; ++tgt) {
+                const int32_t nf_tgt = tgt_cnt[tgt];
+                if (nf_tgt <= 0) continue;
+
+                if (nf_tgt == 1) {
+                    const int32_t f = tgt_head[tgt];
+                    const int32_t alive_c = fl_alive_cnt[f];
+                    if (alive_c <= 1) continue;
+                    const int32_t start = fl_unit_start[f];
+                    const int32_t cnt = fl_unit_count[f];
+                    const int32_t end = start + cnt;
+                    const bool all_alive = (alive_c == cnt);
+
+                    if (sep_mode == 2) {
+                        for (int32_t u = start; u < end; ++u) {
+                            tmp_x[u] = 0.0;
+                            tmp_y[u] = 0.0;
+                        }
+                        for (int32_t a = start; a < end; ++a) {
+                            if (!all_alive && !u_alive[a]) continue;
+                            const double ax = ux[a];
+                            const double ay = uy[a];
+                            for (int32_t b = a + 1; b < end; ++b) {
+                                if (!all_alive && !u_alive[b]) continue;
+                                const double dx = ux[b] - ax;
+                                const double dy = uy[b] - ay;
+                                const double d2 = dx * dx + dy * dy;
+                                if (d2 < min_sep2) {
+                                    double nx, ny, dist;
+                                    if (d2 > EPS_DIST2) {
+                                        dist = std::sqrt(d2);
+                                        nx = dx / dist;
+                                        ny = dy / dist;
+                                    } else {
+                                        dist = 0.0;
+                                        const double ang = GOLDEN_ANGLE * (double)((a - start) * 31 + (b - start) + 1);
+                                        nx = std::cos(ang);
+                                        ny = std::sin(ang);
+                                    }
+                                    const double push = half_k * (min_sep - dist);
+                                    tmp_x[a] -= nx * push;
+                                    tmp_y[a] -= ny * push;
+                                    tmp_x[b] += nx * push;
+                                    tmp_y[b] += ny * push;
                                 }
-                                const double push = half_k * (min_sep - dist);
-                                tmp_x[a] -= nx * push;
-                                tmp_y[a] -= ny * push;
-                                tmp_x[b] += nx * push;
-                                tmp_y[b] += ny * push;
                             }
                         }
-                    }
-                    const double cap2 = (max_sep_push > 0.0) ? (max_sep_push * max_sep_push) : 0.0;
-                    for (int32_t u = start; u < end; ++u) {
-                        if (!all_alive && !u_alive[u]) continue;
-                        double dx = tmp_x[u];
-                        double dy = tmp_y[u];
-                        if (cap2 > 0.0) {
-                            const double d2 = dx * dx + dy * dy;
-                            if (d2 > cap2) {
-                                const double sc = max_sep_push / std::sqrt(d2);
-                                dx *= sc;
-                                dy *= sc;
-                            }
-                        }
-                        ux[u] += dx;
-                        uy[u] += dy;
-                    }
-                } else {
-                    const bool ship_cap = (sep_mode == 1 && max_sep_push > 0.0);
-                    const bool pair_cap = (sep_mode == 0 && max_sep_push > 0.0);
-                    if (ship_cap) {
-                        std::memcpy(tmp_x + start, ux + start, (size_t)cnt * sizeof(double));
-                        std::memcpy(tmp_y + start, uy + start, (size_t)cnt * sizeof(double));
-                    }
-
-                    if (all_alive) {
-                        if (pair_cap) {
-                            separate_fleet_gs<false, true>(start, end, ux, uy, u_alive, min_sep, min_sep2, half_k, max_sep_push);
-                        } else {
-                            separate_fleet_gs<false, false>(start, end, ux, uy, u_alive, min_sep, min_sep2, half_k, max_sep_push);
-                        }
-                    } else {
-                        if (pair_cap) {
-                            separate_fleet_gs<true, true>(start, end, ux, uy, u_alive, min_sep, min_sep2, half_k, max_sep_push);
-                        } else {
-                            separate_fleet_gs<true, false>(start, end, ux, uy, u_alive, min_sep, min_sep2, half_k, max_sep_push);
-                        }
-                    }
-
-                    if (ship_cap) {
-                        const double cap2 = max_sep_push * max_sep_push;
                         for (int32_t u = start; u < end; ++u) {
                             if (!all_alive && !u_alive[u]) continue;
-                            const double dx = ux[u] - tmp_x[u];
-                            const double dy = uy[u] - tmp_y[u];
-                            const double d2 = dx * dx + dy * dy;
-                            if (d2 > cap2) {
-                                const double sc = max_sep_push / std::sqrt(d2);
-                                ux[u] = tmp_x[u] + dx * sc;
-                                uy[u] = tmp_y[u] + dy * sc;
+                            double dx = tmp_x[u];
+                            double dy = tmp_y[u];
+                            if (cap2 > 0.0) {
+                                const double d2 = dx * dx + dy * dy;
+                                if (d2 > cap2) {
+                                    const double sc = max_sep_push / std::sqrt(d2);
+                                    dx *= sc;
+                                    dy *= sc;
+                                }
+                            }
+                            ux[u] += dx;
+                            uy[u] += dy;
+                        }
+                    } else {
+                        if (ship_cap) {
+                            std::memcpy(tmp_x + start, ux + start, (size_t)cnt * sizeof(double));
+                            std::memcpy(tmp_y + start, uy + start, (size_t)cnt * sizeof(double));
+                        }
+
+                        if (all_alive) {
+                            if (pair_cap) {
+                                separate_fleet_gs<false, true>(start, end, ux, uy, u_alive, min_sep, min_sep2, half_k, max_sep_push);
+                            } else {
+                                separate_fleet_gs<false, false>(start, end, ux, uy, u_alive, min_sep, min_sep2, half_k, max_sep_push);
+                            }
+                        } else {
+                            if (pair_cap) {
+                                separate_fleet_gs<true, true>(start, end, ux, uy, u_alive, min_sep, min_sep2, half_k, max_sep_push);
+                            } else {
+                                separate_fleet_gs<true, false>(start, end, ux, uy, u_alive, min_sep, min_sep2, half_k, max_sep_push);
                             }
                         }
+
+                        if (ship_cap) {
+                            for (int32_t u = start; u < end; ++u) {
+                                if (!all_alive && !u_alive[u]) continue;
+                                const double dx = ux[u] - tmp_x[u];
+                                const double dy = uy[u] - tmp_y[u];
+                                const double d2 = dx * dx + dy * dy;
+                                if (d2 > cap2) {
+                                    const double sc = max_sep_push / std::sqrt(d2);
+                                    ux[u] = tmp_x[u] + dx * sc;
+                                    uy[u] = tmp_y[u] + dy * sc;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    int32_t m = 0;
+                    for (int32_t f = tgt_head[tgt]; f >= 0; f = fl_next[f]) {
+                        const int32_t alive_c = fl_alive_cnt[f];
+                        if (alive_c <= 0) continue;
+                        const int32_t start = fl_unit_start[f];
+                        const int32_t cnt = fl_unit_count[f];
+                        const int32_t end = start + cnt;
+                        if (alive_c == cnt) {
+                            for (int32_t u = start; u < end; ++u) {
+                                grp_uids[m] = u;
+                                grp_x[m] = ux[u];
+                                grp_y[m] = uy[u];
+                                ++m;
+                            }
+                        } else {
+                            for (int32_t u = start; u < end; ++u) {
+                                if (u_alive[u]) {
+                                    grp_uids[m] = u;
+                                    grp_x[m] = ux[u];
+                                    grp_y[m] = uy[u];
+                                    ++m;
+                                }
+                            }
+                        }
+                    }
+                    if (m <= 1) continue;
+
+                    if (sep_mode == 2) {
+                        for (int32_t u = 0; u < m; ++u) {
+                            tmp_x[u] = 0.0;
+                            tmp_y[u] = 0.0;
+                        }
+                        for (int32_t a = 0; a < m; ++a) {
+                            const double ax = grp_x[a];
+                            const double ay = grp_y[a];
+                            for (int32_t b = a + 1; b < m; ++b) {
+                                const double dx = grp_x[b] - ax;
+                                const double dy = grp_y[b] - ay;
+                                const double d2 = dx * dx + dy * dy;
+                                if (d2 < min_sep2) {
+                                    double nx, ny, dist;
+                                    if (d2 > EPS_DIST2) {
+                                        dist = std::sqrt(d2);
+                                        nx = dx / dist;
+                                        ny = dy / dist;
+                                    } else {
+                                        dist = 0.0;
+                                        const double ang = GOLDEN_ANGLE * (double)(a * 31 + b + 1);
+                                        nx = std::cos(ang);
+                                        ny = std::sin(ang);
+                                    }
+                                    const double push = half_k * (min_sep - dist);
+                                    tmp_x[a] -= nx * push;
+                                    tmp_y[a] -= ny * push;
+                                    tmp_x[b] += nx * push;
+                                    tmp_y[b] += ny * push;
+                                }
+                            }
+                        }
+                        for (int32_t u = 0; u < m; ++u) {
+                            double dx = tmp_x[u];
+                            double dy = tmp_y[u];
+                            if (cap2 > 0.0) {
+                                const double d2 = dx * dx + dy * dy;
+                                if (d2 > cap2) {
+                                    const double sc = max_sep_push / std::sqrt(d2);
+                                    dx *= sc;
+                                    dy *= sc;
+                                }
+                            }
+                            grp_x[u] += dx;
+                            grp_y[u] += dy;
+                        }
+                    } else {
+                        if (ship_cap) {
+                            std::memcpy(tmp_x, grp_x, (size_t)m * sizeof(double));
+                            std::memcpy(tmp_y, grp_y, (size_t)m * sizeof(double));
+                        }
+
+                        if (pair_cap) {
+                            separate_fleet_gs<false, true>(0, m, grp_x, grp_y, u_alive, min_sep, min_sep2, half_k, max_sep_push);
+                        } else {
+                            separate_fleet_gs<false, false>(0, m, grp_x, grp_y, u_alive, min_sep, min_sep2, half_k, max_sep_push);
+                        }
+
+                        if (ship_cap) {
+                            for (int32_t u = 0; u < m; ++u) {
+                                const double dx = grp_x[u] - tmp_x[u];
+                                const double dy = grp_y[u] - tmp_y[u];
+                                const double d2 = dx * dx + dy * dy;
+                                if (d2 > cap2) {
+                                    const double sc = max_sep_push / std::sqrt(d2);
+                                    grp_x[u] = tmp_x[u] + dx * sc;
+                                    grp_y[u] = tmp_y[u] + dy * sc;
+                                }
+                            }
+                        }
+                    }
+
+                    for (int32_t u = 0; u < m; ++u) {
+                        const int32_t uid = grp_uids[u];
+                        ux[uid] = grp_x[u];
+                        uy[uid] = grp_y[u];
                     }
                 }
             }
@@ -1079,6 +1217,13 @@ struct SimState {
         static thread_local double s_p_land_r[SIM_MAX_PLANETS];
         static thread_local double s_p_land_r2_guard[SIM_MAX_PLANETS];
         static thread_local double s_p_prod_sub[SIM_MAX_PLANETS];
+        static thread_local int32_t s_tgt_head[SIM_MAX_PLANETS];
+        static thread_local int32_t s_tgt_tail[SIM_MAX_PLANETS];
+        static thread_local int32_t s_tgt_cnt[SIM_MAX_PLANETS];
+        static thread_local int32_t s_fl_next[SIM_MAX_FLEETS];
+        static thread_local int32_t s_grp_uids[SIM_MAX_UNITS];
+        static thread_local double s_grp_x[SIM_MAX_UNITS];
+        static thread_local double s_grp_y[SIM_MAX_UNITS];
 
         n_units = run_physics_substeps(
             n_planets,
@@ -1092,7 +1237,8 @@ struct SimState {
             turn_rate, turn_min_speed_factor,
             s_u_alive, s_fl_alive_cnt, s_tmp_x, s_tmp_y,
             s_arr_buckets, s_dirty_planets, s_near_planets,
-            s_p_min_r, s_p_min_r2, s_p_land_r, s_p_land_r2_guard, s_p_prod_sub
+            s_p_min_r, s_p_min_r2, s_p_land_r, s_p_land_r2_guard, s_p_prod_sub,
+            s_tgt_head, s_tgt_tail, s_tgt_cnt, s_fl_next, s_grp_uids, s_grp_x, s_grp_y
         );
 
         int32_t wf = 0;
@@ -1239,6 +1385,13 @@ int32_t step_physics_cpp(
         static thread_local double s_p_land_r[SIM_MAX_PLANETS];
         static thread_local double s_p_land_r2_guard[SIM_MAX_PLANETS];
         static thread_local double s_p_prod_sub[SIM_MAX_PLANETS];
+        static thread_local int32_t s_tgt_head[SIM_MAX_PLANETS];
+        static thread_local int32_t s_tgt_tail[SIM_MAX_PLANETS];
+        static thread_local int32_t s_tgt_cnt[SIM_MAX_PLANETS];
+        static thread_local int32_t s_fl_next[SIM_MAX_FLEETS];
+        static thread_local int32_t s_grp_uids[SIM_MAX_UNITS];
+        static thread_local double s_grp_x[SIM_MAX_UNITS];
+        static thread_local double s_grp_y[SIM_MAX_UNITS];
 
         return run_physics_substeps(
             n_planets, p_owner, p_ships, p_x, p_y, p_prod, p_radius,
@@ -1250,7 +1403,8 @@ int32_t step_physics_cpp(
             turn_rate, turn_min_speed_factor,
             s_u_alive, s_fl_alive_cnt, s_tmp_x, s_tmp_y,
             s_arr_buckets, s_dirty_planets, s_near_planets,
-            s_p_min_r, s_p_min_r2, s_p_land_r, s_p_land_r2_guard, s_p_prod_sub
+            s_p_min_r, s_p_min_r2, s_p_land_r, s_p_land_r2_guard, s_p_prod_sub,
+            s_tgt_head, s_tgt_tail, s_tgt_cnt, s_fl_next, s_grp_uids, s_grp_x, s_grp_y
         );
     }
 
@@ -1270,6 +1424,13 @@ int32_t step_physics_cpp(
     std::vector<double> p_land_r(sz_p);
     std::vector<double> p_land_r2_guard(sz_p);
     std::vector<double> p_prod_sub(sz_p);
+    std::vector<int32_t> tgt_head(sz_p);
+    std::vector<int32_t> tgt_tail(sz_p);
+    std::vector<int32_t> tgt_cnt(sz_p);
+    std::vector<int32_t> fl_next(sz_f);
+    std::vector<int32_t> grp_uids(sz_u);
+    std::vector<double> grp_x(sz_u);
+    std::vector<double> grp_y(sz_u);
 
     return run_physics_substeps(
         n_planets, p_owner, p_ships, p_x, p_y, p_prod, p_radius,
@@ -1281,7 +1442,8 @@ int32_t step_physics_cpp(
         turn_rate, turn_min_speed_factor,
         u_alive.data(), fl_alive_cnt.data(), tmp_x.data(), tmp_y.data(),
         arr_buckets.data(), dirty_planets.data(), near_planets.data(),
-        p_min_r.data(), p_min_r2.data(), p_land_r.data(), p_land_r2_guard.data(), p_prod_sub.data()
+        p_min_r.data(), p_min_r2.data(), p_land_r.data(), p_land_r2_guard.data(), p_prod_sub.data(),
+        tgt_head.data(), tgt_tail.data(), tgt_cnt.data(), fl_next.data(), grp_uids.data(), grp_x.data(), grp_y.data()
     );
 }
 
