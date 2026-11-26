@@ -4,6 +4,7 @@ Cross-pollinates the variable-N entity + arrival-timeline Transformer from ``orb
 directly to classic Galcon / Phil Hassey's ``gbots`` protocol.
 """
 
+from galcon.fast_sim_cpp import HAS_FAST_SIM_CPP, FastGalconCppSim
 from galcon.sim import (
     ITEMS_MAX,
     ITEMS_RESERVED,
@@ -21,8 +22,10 @@ from galcon.sim import (
 )
 
 __all__ = [
+    "FastGalconCppSim",
     "Fleet",
     "GalconSim",
+    "HAS_FAST_SIM_CPP",
     "ITEMS_MAX",
     "ITEMS_RESERVED",
     "MIN_PLANET_GAP",

@@ -16,6 +16,8 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
+from galcon.fast_sim_cpp import HAS_FAST_SIM_CPP, step_physics_cpp as _step_physics_cpp
+
 PRODUCTION_DIVISOR = 50.0  # production=100 => 2.0 ships/sec (120 ships/min)
 DEFAULT_FLEET_SPEED = 40.0
 DEFAULT_TICK_DT = 0.25
@@ -583,6 +585,7 @@ class GalconSim:
         next_fleet_id: int = 1000,
         allow_redirect: bool = True,
         physics_substeps: int = DEFAULT_PHYSICS_SUBSTEPS,
+        use_cpp: Optional[bool] = None,
     ) -> None:
         self.planets: Dict[int, Planet] = {
             p.id: Planet(p.id, p.owner, float(p.ships), float(p.x), float(p.y), float(p.production), float(p.radius))
@@ -619,6 +622,7 @@ class GalconSim:
         self.next_fleet_id = int(next_fleet_id)
         self.allow_redirect = bool(allow_redirect)
         self.physics_substeps = max(1, int(physics_substeps))
+        self.use_cpp = bool(HAS_FAST_SIM_CPP) if use_cpp is None else bool(use_cpp and HAS_FAST_SIM_CPP)
         self.done = False
         self._winner = 0
 
@@ -636,6 +640,7 @@ class GalconSim:
         symmetric: bool = True,
         allow_redirect: bool = True,
         physics_substeps: int = DEFAULT_PHYSICS_SUBSTEPS,
+        use_cpp: Optional[bool] = None,
     ) -> "GalconSim":
         planets = generate_galcon_map(
             seed=seed, num_planets=num_planets, width=width, height=height, symmetric=symmetric
@@ -649,9 +654,10 @@ class GalconSim:
             max_ticks=max_ticks,
             allow_redirect=allow_redirect,
             physics_substeps=physics_substeps,
+            use_cpp=use_cpp,
         )
 
-    def clone(self) -> "GalconSim":
+    def clone(self, use_cpp: Optional[bool] = None) -> "GalconSim":
         sim = GalconSim(
             list(self.planets.values()),
             list(self.fleets.values()),
@@ -664,6 +670,7 @@ class GalconSim:
             next_fleet_id=self.next_fleet_id,
             allow_redirect=self.allow_redirect,
             physics_substeps=self.physics_substeps,
+            use_cpp=self.use_cpp if use_cpp is None else use_cpp,
         )
         sim.done = self.done
         sim._winner = self._winner
@@ -1158,7 +1165,10 @@ class GalconSim:
                         fl.target = dst.id
 
         # 2. Advance physical ship & planet dynamics across physics_substeps
-        self._step_physics_python()
+        if self.use_cpp and HAS_FAST_SIM_CPP:
+            _step_physics_cpp(self)
+        else:
+            self._step_physics_python()
 
         self.tick += 1
         self._check_terminal()

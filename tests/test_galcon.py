@@ -1962,3 +1962,245 @@ def test_galcon_sim_physical_ships_separation_pushout_gradual_landing_and_redir(
     assert sim_orig.fleets[fid_o].num_units == len(orig_units_snap)
 
 
+def test_galcon_sim_cpp_bit_exact_parity_and_fast_rollout():
+    """Verify C++ drop-in physics, FastGalconCppSim parity (<= 1e-11), clone/copy_from/step_n_ticks, and >4096-unit fallback."""
+    import random
+    import galcon
+    from galcon.fast_sim_cpp import HAS_FAST_SIM_CPP, FastGalconCppSim
+    from galcon.sim import Fleet, GalconSim, Planet, RedirOrder, SendOrder, generate_galcon_map
+
+    assert isinstance(HAS_FAST_SIM_CPP, bool)
+    assert galcon.HAS_FAST_SIM_CPP is HAS_FAST_SIM_CPP
+    assert galcon.FastGalconCppSim is FastGalconCppSim
+
+    def _compare_sims(ref: GalconSim, cand: GalconSim) -> float:
+        assert ref.tick == cand.tick
+        assert ref.done == cand.done
+        assert ref.winner() == cand.winner()
+        assert ref.next_fleet_id == cand.next_fleet_id
+        assert sorted(ref.planets.keys()) == sorted(cand.planets.keys())
+
+        max_diff = 0.0
+        for pid in sorted(ref.planets.keys()):
+            p1 = ref.planets[pid]
+            p2 = cand.planets[pid]
+            assert p1.owner == p2.owner, f"planet {pid} owner mismatch: {p1.owner} vs {p2.owner}"
+            max_diff = max(max_diff, abs(p1.ships - p2.ships))
+
+        assert list(ref.fleets.keys()) == list(cand.fleets.keys())
+        for fid, f1 in ref.fleets.items():
+            f2 = cand.fleets[fid]
+            assert f1.owner == f2.owner
+            assert f1.source == f2.source
+            assert f1.target == f2.target
+            assert f1.num_units == f2.num_units
+            assert f1.units is not None and f2.units is not None
+            assert len(f1.units) == len(f2.units) == f1.num_units
+            max_diff = max(
+                max_diff,
+                abs(f1.ships - f2.ships),
+                abs(f1.x - f2.x),
+                abs(f1.y - f2.y),
+                abs(f1.radius - f2.radius),
+            )
+            for u1, u2 in zip(f1.units, f2.units):
+                max_diff = max(max_diff, abs(u1[0] - u2[0]), abs(u1[1] - u2[1]))
+        return max_diff
+
+    # 1. Both use_cpp=False and use_cpp=True (and default None) work cleanly on all platforms
+    s_py = GalconSim.create(seed=101, num_planets=12, width=400.0, height=240.0, use_cpp=False)
+    s_cpp = GalconSim.create(seed=101, num_planets=12, width=400.0, height=240.0, use_cpp=True)
+    s_auto = GalconSim.create(seed=101, num_planets=12, width=400.0, height=240.0)
+    assert s_py.use_cpp is False
+    assert s_cpp.use_cpp is HAS_FAST_SIM_CPP
+    assert s_auto.use_cpp is HAS_FAST_SIM_CPP
+    assert s_py.clone().use_cpp is False
+    assert s_py.clone(use_cpp=True).use_cpp is HAS_FAST_SIM_CPP
+    assert s_cpp.clone(use_cpp=False).use_cpp is False
+
+    for _ in range(10):
+        ords = {1: [SendOrder(1, 3, 25)], 2: [SendOrder(2, 4, 25)]} if s_py.tick == 0 else {}
+        s_py.step(ords)
+        s_cpp.step(ords)
+    assert _compare_sims(s_py, s_cpp) <= 1e-11
+
+    if not HAS_FAST_SIM_CPP:
+        return
+
+    # 2. 150-tick 23-planet randomized multi-fleet battle across pure Python, drop-in C++, and FastGalconCppSim
+    planets = generate_galcon_map(seed=1337, num_planets=23, width=480.0, height=320.0, symmetric=True)
+    # Reinforce homes & forward outposts so the multi-fleet battle runs all 150 ticks with heavy collisions & landings
+    planets[0].ships = 350.0
+    planets[1].ships = 350.0
+    planets[2].owner, planets[2].ships = 1, 80.0
+    planets[3].owner, planets[3].ships = 2, 80.0
+
+    sim_py = GalconSim(planets, width=480.0, height=320.0, max_ticks=240, use_cpp=False)
+    sim_cpp = GalconSim(planets, width=480.0, height=320.0, max_ticks=240, use_cpp=True)
+    fast_cpp = FastGalconCppSim.from_sim(sim_py)
+    assert sim_cpp.use_cpp is True
+
+    rng = random.Random(2026)
+    planet_ids = sorted(sim_py.planets.keys())
+    max_diff_dropin = 0.0
+    max_diff_native = 0.0
+    midgame_snapshot_py: GalconSim | None = None
+    peak_units = 0
+
+    for t in range(150):
+        assert not sim_py.done
+        orders: dict[int, list] = {1: [], 2: []}
+        for pid in (1, 2):
+            owned_all = [sim_py.planets[i] for i in planet_ids if sim_py.planets[i].owner == pid]
+            opp = 2 if pid == 1 else 1
+            opp_ids = {i for i in planet_ids if sim_py.planets[i].owner == opp}
+            sendable = [p for p in owned_all if p.ships >= 1.5]
+            if sendable and (t < 12 or rng.random() < 0.70):
+                n_sends = rng.randint(1, min(3, len(sendable)))
+                for src in rng.sample(sendable, n_sends):
+                    forbidden = {src.id}
+                    if len(opp_ids) <= 1:
+                        forbidden.update(opp_ids)
+                    cands = [i for i in planet_ids if i not in forbidden]
+                    dst_id = rng.choice(cands)
+                    pct = rng.choice([20, 35, 50]) if len(owned_all) <= 2 else rng.choice([15, 33, 50, 75, 100])
+                    orders[pid].append(SendOrder(src.id, dst_id, pct))
+                    # Exercise same-tick multi-send from the same source planet (fractional packing + item_count update)
+                    if src.ships >= 25.0 and rng.random() < 0.30:
+                        dst2 = rng.choice(cands)
+                        orders[pid].append(SendOrder(src.id, dst2, 25))
+            # Occasionally submit a sub-1-ship edge-case send to verify guard parity
+            tiny = [p for p in owned_all if 0.0 < p.ships < 1.5]
+            if tiny:
+                src_t = tiny[0]
+                dst_t = next(i for i in planet_ids if i != src_t.id)
+                orders[pid].append(SendOrder(src_t.id, dst_t, 50))
+            # Mid-flight RedirOrder
+            my_fleets = [fl for fl in sim_py.fleets.values() if fl.owner == pid]
+            if my_fleets and rng.random() < 0.25:
+                fl = rng.choice(my_fleets)
+                forbidden = {fl.target}
+                if len(opp_ids) <= 1:
+                    forbidden.update(opp_ids)
+                cands = [i for i in planet_ids if i not in forbidden]
+                if cands:
+                    orders[pid].append(RedirOrder(fl.id, rng.choice(cands)))
+
+        sim_py.step(orders)
+        sim_cpp.step(orders)
+        fast_cpp.step(orders)
+
+        assert fast_cpp.num_planets == len(sim_py.planets)
+        assert fast_cpp.num_fleets == len(sim_py.fleets)
+        cur_units = sum(fl.num_units for fl in sim_py.fleets.values())
+        assert fast_cpp.num_units == cur_units
+        peak_units = max(peak_units, cur_units)
+
+        max_diff_dropin = max(max_diff_dropin, _compare_sims(sim_py, sim_cpp))
+        max_diff_native = max(max_diff_native, _compare_sims(sim_py, fast_cpp.to_sim()))
+
+        if t == 40 and len(sim_py.fleets) >= 4:
+            midgame_snapshot_py = sim_py.clone(use_cpp=False)
+
+    assert peak_units >= 50
+    assert max_diff_dropin <= 1e-11, f"drop-in C++ parity exceeded tolerance: {max_diff_dropin:.3e}"
+    assert max_diff_native <= 1e-11, f"FastGalconCppSim parity exceeded tolerance: {max_diff_native:.3e}"
+
+    # 3. Near-tie gradual combat parity in FastGalconCppSim vs pure Python
+    step_dist = 40.0 * 0.25
+    tie_planets = [
+        Planet(id=1, owner=1, ships=50.0, x=0.0, y=50.0, production=100.0, radius=12.0),
+        Planet(
+            id=2,
+            owner=2,
+            ships=4.999999999999984,
+            x=12.0 + 6.0 + step_dist + 7e-15,
+            y=0.0,
+            production=0.0,
+            radius=12.0,
+        ),
+    ]
+    tie_fleets = [Fleet(id=1000, owner=1, ships=5.0, x=0.0, y=0.0, source=1, target=2)]
+    tie_py = GalconSim(tie_planets, tie_fleets, use_cpp=False)
+    tie_cpp = GalconSim(tie_planets, tie_fleets, use_cpp=True)
+    tie_fast = FastGalconCppSim.from_sim(tie_py)
+    tie_py.step({})
+    tie_cpp.step({})
+    tie_fast.step({})
+    assert _compare_sims(tie_py, tie_cpp) <= 1e-11
+    assert _compare_sims(tie_py, tie_fast.to_sim()) <= 1e-11
+    assert tie_py.planets[2].owner == 2 and tie_py.planets[2].ships == 0.0
+
+    # 4. FastGalconCppSim.clone(), copy_from(), step_n_ticks(), and to_sim() round-trip parity
+    root_py = midgame_snapshot_py if midgame_snapshot_py is not None else sim_py.clone(use_cpp=False)
+    fc_root = FastGalconCppSim.from_sim(root_py)
+    assert _compare_sims(root_py, fc_root.to_sim()) <= 1e-11
+
+    fc_clone = fc_root.clone()
+    fc_clone.step_n_ticks(15)
+    rollout_py = root_py.clone(use_cpp=False)
+    for _ in range(15):
+        rollout_py.step({})
+    assert _compare_sims(rollout_py, fc_clone.to_sim()) <= 1e-11
+    # Cloning must leave root completely untouched
+    assert _compare_sims(root_py, fc_root.to_sim()) <= 1e-11
+
+    # Zero-alloc copy_from resets fc_clone identically to fc_root and reproduces the exact same rollout
+    fc_clone.copy_from(fc_root)
+    assert _compare_sims(root_py, fc_clone.to_sim()) <= 1e-11
+    fc_clone.step_n_ticks(15)
+    assert _compare_sims(rollout_py, fc_clone.to_sim()) <= 1e-11
+
+    # 5. Large synthetic world (> 64 planets, > 512 fleets, > 4096 physical units) exercises dynamic fallback cleanly
+    big_planets = [
+        Planet(
+            id=i + 1,
+            owner=(1 if i == 0 else (2 if i == 1 else 0)),
+            ships=50.0,
+            x=30.0 + (i % 10) * 65.0,
+            y=30.0 + (i // 10) * 65.0,
+            production=50.0,
+            radius=14.0,
+        )
+        for i in range(70)
+    ]
+    big_fleets = []
+    # 100 fleets x 45 units = 4,500 units + 430 single-unit fleets = 530 fleets & 4,930 total units
+    for fi in range(100):
+        big_fleets.append(
+            Fleet(
+                id=1000 + fi,
+                owner=1,
+                ships=45.0,
+                x=60.0 + (fi % 10) * 55.0,
+                y=60.0 + (fi // 10) * 40.0,
+                source=1,
+                target=2,
+                num_units=45,
+            )
+        )
+    for fi in range(430):
+        big_fleets.append(
+            Fleet(
+                id=2000 + fi,
+                owner=2,
+                ships=1.0,
+                x=80.0 + (fi % 20) * 25.0,
+                y=80.0 + (fi // 20) * 15.0,
+                source=2,
+                target=1,
+                num_units=1,
+            )
+        )
+    big_py = GalconSim(big_planets, big_fleets, width=800.0, height=600.0, physics_substeps=2, use_cpp=False)
+    big_cpp = GalconSim(big_planets, big_fleets, width=800.0, height=600.0, physics_substeps=2, use_cpp=True)
+    assert len(big_cpp.planets) == 70
+    assert len(big_cpp.fleets) == 530
+    assert sum(fl.num_units for fl in big_cpp.fleets.values()) == 4930
+    for _ in range(3):
+        big_py.step({})
+        big_cpp.step({})
+    assert _compare_sims(big_py, big_cpp) <= 1e-11
+
+
+
