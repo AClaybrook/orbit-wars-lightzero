@@ -1,6 +1,22 @@
-# Galcon AI Wave 16 — Gen 5 Full-Speed `1-Tick` Self-Play & `DefStream+Guard` (`73.8%` Sparky `3L` • `72.5%` Waffle3z • `70.6%` Dual Avg • `60.0%` Pure!)
+# Galcon AI Wave 17 — Gen 5 `50/50` 19.6k Balanced Self-Play (`74.6%` Triple-Boss Avg • `93.6%` `vsign` • `62.5%` Pure Waffle3z • `87.5%` EsparanBot) & Native `1-Tick` WDL PPO
 
 A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-lightzero` featuring both our **Gen 5 Edge-Gated Residual-Edge WDL Transformer** ([`galcon/gen5_model.py`](gen5_model.py), `2.93M` params) and our cross-pollinated **Gen 4 `PlanetTimelineTransformer`** (`1.29M` params), Phil Hassey's official **`gbots`** protocol, and zero-copy head-to-head benchmarking against Evan Sparano's (`esparano/GalconModVault`) unmodified Lua tournament bots (`Sparky v1.6`, `Waffle3z-GA / bots_waffle3z_optimized`, & `EsparanBot v0.2`) via [`galcon/lua_bridge.py`](lua_bridge.py).
+
+## Wave 17 Highlights — `50/50` Balanced `19,586`-State Gen 5 Self-Play, Native `1-Tick` WDL PPO & Supervised-EI Plateau Analysis
+- **Key Empirical Finding (`100% 1t` vs. `50/50` Balanced Pooling):**
+  - Training Gen 5 exclusively on sparse `1-tick` trajectories (`9,832` states) sharpened value accuracy (`vsign=87.0%`) but starved policy recall (`rec: 82.2% → 67.1%`, Pure Sparky `60.0% → 50.0%`).
+  - Pooling **50% dense high-recall policy anchors (`9,754` states)** + **50% full-speed `1-tick` Gen 5 self-play (`9,832` states across 3 rounds / `156` games)** restored full policy precision (`rec=78.8%`, `prec=67.5%`, `aux=98.0%`) while smashing our all-time value calibration record (**`vsign = 93.6%`**, **`vloss = 0.466`**, **`val_bce = 0.037`**)!
+- **New All-Round Gen 5 Triple-Boss Champion — [`checkpoints/galcon_gen5_w17.pt`](../checkpoints/galcon_gen5_w17.pt) (`74.6%` Triple-Boss Avg — `+6.7%` over `Gen5_W16`, `+2.5%` over `Gen5_W15`!):**
+  - **`Sparky v1.6` 18pl (40g, 1t):** **`20–7–13` (`66.2%`)** — **`s=14000: 10–0–10` (`75.0%` UNDEFEATED across 20 games, ZERO losses!)**
+  - **`Waffle3z-GA` 18pl (40g, 1t):** **`25–9–6` (`70.0%`, perfectly balanced `70.0% / 70.0%`)**
+  - **`EsparanBot v0.2` (24g, 2t):** **`20–2–2` (`87.5%` — `+25.0%` over `Gen5_W16`, `s=9500: 12–0–0` PERFECT SWEEP!)**
+  - **Built-in Heuristics (32g, 2t):** **`30–2–0` (`93.8%`, `+9.4%` over `Gen5_W16`)** | **Large 24pl Asym `Waffle3z-GA`:** **`7–5–0` (`58.3%`, `+16.6%`)**
+  - **Pure Neural Net (`9.6 ms/t`, ZERO Search!):** **`22–12–6` (`62.5%` — NEW ALL-TIME PURE WAFFLE3Z RECORD, `s=14000: 70.0%`!)** + **`70.0%` (`10–2–8`) Pure vs. `Sparky s=14000`** (`52.5%` overall).
+  - *(Note: `checkpoints/galcon_gen5_w16.pt` remains default `--bot search` / `--bot transformer` for peak 18pl Dual-Boss Avg `70.6%` & `60.0%` Pure Sparky; `checkpoints/galcon_gen5_w15.pt` remains `#1` Sparky `73.8% / 3L`.)*
+- **Engine Upgrades ([`galcon/train.py`](train.py), [`galcon/transformer_bot.py`](transformer_bot.py)):**
+  - Added **native `GalconGen5Transformer` Quadratic Soft-WDL PPO value loss** + **full-speed `--act-every 1` cadence** across PPO rollouts, parallel workers, and batched `val_56g`.
+  - Fixed Gen 5 `contempt` propagation to secondary members of [`EnsembleGalconSearchAgent`](transformer_bot.py).
+  - **Diagnostic Finding for Wave 18 (Breaking the `~71%–75%` Supervised-EI Plateau):** Our first `1-tick` Gen 5 PPO run boosted Pure `val_56g` (`74.1%`, iter 6 `68.8%` Sparky / `79.2%` Waffle3z), but updating the WDL value head on discounted potential-shaped GAE returns miscalibrated Search (`48.8%`). Wave 18 will target **Policy-Only / Frozen-WDL-Critic `1-tick` PPO** (preserving `Gen5_W17`'s `93.6%` WDL value head!) and/or **Gen 6 Architecture + PUCT Tree Search** upgrades to break past `80%–90%`.
 
 ## Wave 16 Highlights — Deep Loss Autopsy → Root-Cause Search Fixes & Full-Speed `1-Tick` Gen 5 Self-Play
 - **Quantitative 80-Game Loss & Draw Autopsy (Why We Were Losing):**

@@ -2941,8 +2941,51 @@ def test_visualizer_always_floors_fractional_ships():
         assert "Ships: ${Math.round(f.s[" not in html, f"{label}: found Math.round(f.s[...]) in HUD"
 
 
+def test_wave17_gen5_1t_ppo_and_ensemble_contempt(tmp_path):
+    """Verify Wave 17 Gen 5 full-speed 1-tick PPO rollouts/val, WDL PPO update compatibility, and Ensemble contempt."""
+    from galcon.gen5_model import build_galcon_gen5_transformer
+    from galcon.heuristic_bot import GalconClassicBot
+    from galcon.train import _run_gen4_ppo_episodes_batched, _run_gen4_val_wave_batched
+    from galcon.transformer_bot import EnsembleGalconSearchAgent
 
+    torch.manual_seed(17)
+    m = build_galcon_gen5_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128, edge_hidden=16).eval()
+    ckpt = tmp_path / "gen5_w17_test.pt"
+    torch.save(
+        {
+            "model_config": m.config,
+            "model_state_dict": m.state_dict(),
+            "has_trained_redir": True,
+            "has_trained_multi_send": True,
+            "use_canonical_d4": True,
+        },
+        ckpt,
+    )
 
+    # 1. Full-speed 1-tick batched PPO rollout works natively on GalconGen5Transformer
+    specs = [
+        (1701, 10, 240.0, 150.0, True, 1, None, GalconClassicBot(), False),
+        (1701, 10, 240.0, 150.0, True, 2, None, GalconClassicBot(), False),
+    ]
+    outs = _run_gen4_ppo_episodes_batched(
+        m,
+        specs,
+        gamma=0.985,
+        gae_lam=0.95,
+        frac_std=0.065,
+        draw_penalty=-0.4,
+        boss_draw_penalty=-0.1,
+        max_sends_per_planet=4,
+        act_every=1,
+    )
+    assert len(outs) == 2 and all(len(o[0]) >= 2 for o in outs)
 
+    # 2. Full-speed 1-tick batched validation wave runs cleanly on GalconGen5Transformer
+    wave = [("heur", "classic", 1702, 10, 240.0, 150.0, 60, True, 1, GalconClassicBot(), False)]
+    vres = _run_gen4_val_wave_batched(m, wave, act_every=1)
+    assert len(vres) == 1 and vres[0][1] in (0.0, 0.5, 1.0)
 
-
+    # 3. EnsembleGalconSearchAgent propagates Gen 5 contempt to secondary members
+    ens = EnsembleGalconSearchAgent([ckpt, ckpt], use_d4_canonical=True, use_d4_tta=False)
+    assert abs(ens.ensemble_agents[0].model.contempt - 0.30) < 1e-6
+    assert abs(ens.ensemble_agents[1].model.contempt - 0.30) < 1e-6

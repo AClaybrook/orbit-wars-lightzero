@@ -3404,8 +3404,10 @@ def _run_gen4_ppo_episode(
     draw_penalty: float,
     boss_draw_penalty: float,
     max_sends_per_planet: int,
+    act_every: int = 2,
 ):
-    """Run one Gen 4 multi-send PPO rollout episode and compute GAE advantages/returns."""
+    """Run one Gen 4/5 multi-send PPO rollout episode and compute GAE advantages/returns."""
+    act_every = max(1, int(act_every))
     opp_pid = 2 if ours_pid == 1 else 1
     sim = GalconSim.create(
         seed=map_seed, num_planets=n_pl, width=w, height=h, max_ticks=220 if n_pl >= 22 else 200, symmetric=sym
@@ -3414,7 +3416,7 @@ def _run_gen4_ppo_episode(
     snaps: List[Tuple[int, np.ndarray, np.ndarray]] = []
     prev_pot = evaluate_galcon_state(sim, ours_pid)
     while not sim.done:
-        if sim.tick % 2 == 0:
+        if sim.tick % act_every == 0:
             enc = extract_galcon_features(sim, ours_pid, feature_version=2)
             n = len(enc.planet_ids)
             so, ss = _snapshot_planet_state(sim, enc.planet_ids, ours_pid)
@@ -3503,8 +3505,9 @@ def _run_gen4_ppo_episode(
             o_opp = _fast_gen4_neural_act(opp_snap, sim, opp_pid) if opp_snap is not None else opp_bot.act(sim, opp_pid)
             cur_tick = sim.tick
             sim.step({ours_pid: o_ours, opp_pid: o_opp})
-            if not sim.done:
-                sim.step({})
+            for _ in range(act_every - 1):
+                if not sim.done:
+                    sim.step({})
             new_pot = evaluate_galcon_state(sim, ours_pid)
             # Uniform 0.05 potential shaping (Wave 9's 0.085 opening boost caused greedy early over-expansion vs Sparky/Waffle3z)
             step_rew = 0.05 * (new_pot - prev_pot)
@@ -3581,12 +3584,14 @@ def _run_gen4_ppo_episodes_batched(
     draw_penalty: float,
     boss_draw_penalty: float,
     max_sends_per_planet: int,
+    act_every: int = 2,
 ):
-    """Run multiple Gen 4 PPO rollout episodes in lockstep with batched policy inference.
+    """Run multiple Gen 4/5 PPO rollout episodes in lockstep with batched policy inference.
 
     Each element of ``ep_specs`` is ``(map_seed, n_pl, w, h, sym, ours_pid, opp_snap, opp_bot, is_boss)``.
     No two elements in the same batch should share a stateful ``GalconLuaBotBridge`` instance.
     """
+    act_every = max(1, int(act_every))
     m = len(ep_specs)
     if m == 0:
         return []
@@ -3597,7 +3602,7 @@ def _run_gen4_ppo_episodes_batched(
                 policy, s0[0], s0[1], s0[2], s0[3], s0[4], s0[5], s0[6], s0[7],
                 is_boss=s0[8], gamma=gamma, gae_lam=gae_lam, frac_std=frac_std,
                 draw_penalty=draw_penalty, boss_draw_penalty=boss_draw_penalty,
-                max_sends_per_planet=max_sends_per_planet,
+                max_sends_per_planet=max_sends_per_planet, act_every=act_every,
             )
         ]
 
@@ -3627,9 +3632,9 @@ def _run_gen4_ppo_episodes_batched(
         active = [idx for idx in range(m) if not sims[idx].done]
         if not active:
             break
-        even_act = [idx for idx in active if sims[idx].tick % 2 == 0]
+        even_act = [idx for idx in active if sims[idx].tick % act_every == 0]
         for idx in active:
-            if sims[idx].tick % 2 != 0:
+            if sims[idx].tick % act_every != 0:
                 sims[idx].step({})
         if not even_act:
             continue
@@ -3757,8 +3762,9 @@ def _run_gen4_ppo_episodes_batched(
                 o_opp = _fast_gen4_neural_act(opp_snap, sim, opp_pid) if opp_snap is not None else opp_bot.act(sim, opp_pid)
                 cur_tick = sim.tick
                 sim.step({ours_pid: o_ours, opp_pid: o_opp})
-                if not sim.done:
-                    sim.step({})
+                for _ in range(act_every - 1):
+                    if not sim.done:
+                        sim.step({})
                 new_pot = evaluate_galcon_state(sim, ours_pid)
                 step_rew = 0.05 * (new_pot - prev_pots[idx])
                 prev_pots[idx] = new_pot
@@ -3811,6 +3817,7 @@ def _gen4_ppo_rollout_worker(args_tuple):
         boss_draw_penalty,
         max_sends_per_planet,
         worker_seed,
+        act_every,
     ) = args_tuple
     torch.set_num_threads(1)
     torch.manual_seed(worker_seed)
@@ -3909,6 +3916,7 @@ def _gen4_ppo_rollout_worker(args_tuple):
             draw_penalty=draw_penalty,
             boss_draw_penalty=boss_draw_penalty,
             max_sends_per_planet=max_sends_per_planet,
+            act_every=act_every,
         )
         for (p_idx, side_idx), ep_out in zip(wave_refs, outs):
             pair_results[p_idx][side_idx] = ep_out
@@ -4159,8 +4167,11 @@ def _decode_gen4_ms_orders_fast(
 def _run_gen4_val_wave_batched(
     model_eval: GalconPlanetTransformer,
     wave_jobs: Sequence[Tuple[str, str, int, int, float, float, int, bool, int, object, bool]],
+    *,
+    act_every: int = 2,
 ) -> List[Tuple[str, float]]:
-    """Run a batch of up to 6 validation games in lockstep with one batched ``forward_multi_send`` call per tick."""
+    """Run a batch of up to 10 validation games in lockstep with one batched ``forward_multi_send`` call per tick."""
+    act_every = max(1, int(act_every))
     m = len(wave_jobs)
     if m == 0:
         return []
@@ -4177,9 +4188,9 @@ def _run_gen4_val_wave_batched(
         active = [idx for idx in range(m) if not sims[idx].done]
         if not active:
             break
-        even_act = [idx for idx in active if sims[idx].tick % 2 == 0]
+        even_act = [idx for idx in active if sims[idx].tick % act_every == 0]
         for idx in active:
-            if sims[idx].tick % 2 != 0:
+            if sims[idx].tick % act_every != 0:
                 sims[idx].step({})
         if not even_act:
             continue
@@ -4237,14 +4248,11 @@ def _run_gen4_val_wave_batched(
 
 def _gen4_val_worker(args_tuple):
     """Worker entrypoint for parallel batched lockstep ``val_44g`` / ``val_56g`` shards (with cached bridges)."""
-    (
-        policy_ckpt_str,
-        anchor_ckpt_str,
-        val_jobs,
-        lua1_str,
-        lua2_str,
-        lua3_str,
-    ) = args_tuple
+    if len(args_tuple) >= 7:
+        policy_ckpt_str, anchor_ckpt_str, val_jobs, lua1_str, lua2_str, lua3_str, act_every = args_tuple
+    else:
+        policy_ckpt_str, anchor_ckpt_str, val_jobs, lua1_str, lua2_str, lua3_str = args_tuple
+        act_every = 2
     torch.set_num_threads(1)
     model_eval = _load_gen4_policy_from_ckpt(Path(policy_ckpt_str)).eval()
     for p in model_eval.parameters():
@@ -4292,7 +4300,7 @@ def _gen4_val_worker(args_tuple):
             else:
                 wave.append((bucket, opp_kind, g_seed, n_p, ww, hh, max_t, sym, a_p, heur_bots.get(opp_kind, heur_bots["tactical"]), False))
         pending = still
-        for bucket, pts in _run_gen4_val_wave_batched(model_eval, wave):
+        for bucket, pts in _run_gen4_val_wave_batched(model_eval, wave, act_every=act_every):
             b_sc[bucket] += pts
             b_cnt[bucket] += 1
     return b_sc, b_cnt
@@ -4324,6 +4332,7 @@ def rl_mirror_league_ppo_gen4(
     waffle_share: float = 0.15,
     large_map_prob: float = 0.30,
     max_sends_per_planet: int = 6,
+    act_every: int = 2,
     eval_every: int = 4,
     seed: int = 34000,
     train_threads: int = 2,
@@ -4465,7 +4474,7 @@ def rl_mirror_league_ppo_gen4(
             n_w = min(int(workers), len(val_jobs_template))
             shards = [val_jobs_template[w_i::n_w] for w_i in range(n_w)]
             v_args = [
-                (str(val_pol_p), snap_ckpt_paths[0], sh, lua1_str, lua2_str, lua3_str)
+                (str(val_pol_p), snap_ckpt_paths[0], sh, lua1_str, lua2_str, lua3_str, act_every)
                 for sh in shards
                 if sh
             ]
@@ -4492,7 +4501,7 @@ def rl_mirror_league_ppo_gen4(
                 else:
                     ob = heur_bots.get(opp_kind, heur_bots["tactical"])
                 while not s.done:
-                    if s.tick % 2 == 0:
+                    if s.tick % act_every == 0:
                         oa = _fast_gen4_neural_act(model_eval, s, a_p)
                         ob_act = _fast_gen4_neural_act(ob, s, b_p) if is_nn else ob.act(s, b_p)
                         s.step({a_p: oa, b_p: ob_act})
@@ -4606,6 +4615,7 @@ def rl_mirror_league_ppo_gen4(
                         boss_draw_penalty,
                         max_sends_per_planet,
                         seed + it * 10000 + w_i,
+                        act_every,
                     )
                     for w_i, sh in enumerate(shards)
                     if sh
@@ -4675,13 +4685,13 @@ def rl_mirror_league_ppo_gen4(
                         cpu_policy, map_seed, n_pl, w, h, sym, 1, opp_snap, opp_bot,
                         is_boss=is_boss, gamma=gamma, gae_lam=gae_lam, frac_std=frac_std,
                         draw_penalty=draw_penalty, boss_draw_penalty=boss_draw_penalty,
-                        max_sends_per_planet=max_sends_per_planet,
+                        max_sends_per_planet=max_sends_per_planet, act_every=act_every,
                     )
                     ep_b = _run_gen4_ppo_episode(
                         cpu_policy, map_seed, n_pl, w, h, sym, 2, opp_snap, opp_bot,
                         is_boss=is_boss, gamma=gamma, gae_lam=gae_lam, frac_std=frac_std,
                         draw_penalty=draw_penalty, boss_draw_penalty=boss_draw_penalty,
-                        max_sends_per_planet=max_sends_per_planet,
+                        max_sends_per_planet=max_sends_per_planet, act_every=act_every,
                     )
                     total_eps += 2
                     won_a, won_b = ep_a[5], ep_b[5]
@@ -4760,7 +4770,14 @@ def rl_mirror_league_ppo_gen4(
                     pf, tf, ef, le, om, pm, acts, f_acts, aux_o, aux_s, e_p = _trim_batch_n(
                         pf, tf, ef, le, om, pm, acts, f_acts, aux_o, aux_s, e_p
                     )
-                    ms_l, ms_f, val, aux_pred = policy.forward_multi_send(pf, tf, ef, pm, return_aux=True)
+                    is_gen5_ppo = hasattr(policy, "decode_wdl_from_hidden")
+                    if is_gen5_ppo:
+                        ms_l, ms_f, val, wdl_logits, aux_pred = policy.forward_multi_send(
+                            pf, tf, ef, pm, return_aux=True, return_wdl=True
+                        )
+                    else:
+                        ms_l, ms_f, val, aux_pred = policy.forward_multi_send(pf, tf, ef, pm, return_aux=True)
+                        wdl_logits = None
                     edge_m = om.unsqueeze(-1) & le
                     edge_f = edge_m.float()
                     edge_sum = edge_f.sum().clamp_min(1.0)
@@ -4782,7 +4799,16 @@ def rl_mirror_league_ppo_gen4(
                     kl = e_p * torch.log(e_p / cur_p) + (1.0 - e_p) * torch.log((1.0 - e_p) / (1.0 - cur_p))
                     kl_mean = (kl * edge_f).sum() / edge_sum
 
-                    v_loss = F.mse_loss(val, ret)
+                    if wdl_logits is not None:
+                        v_clamped = ret.clamp(-1.0, 1.0)
+                        t_draw = 0.65 * (1.0 - v_clamped.abs()).pow(2)
+                        t_win = (1.0 - t_draw + v_clamped) * 0.5
+                        t_loss = (1.0 - t_draw - v_clamped) * 0.5
+                        wdl_t = torch.stack([t_loss, t_draw, t_win], dim=-1).clamp(1e-4, 1.0)
+                        wdl_t = wdl_t / wdl_t.sum(dim=-1, keepdim=True)
+                        v_loss = -(wdl_t * F.log_softmax(wdl_logits, dim=-1)).sum(dim=-1).mean() + 0.25 * F.mse_loss(val, ret)
+                    else:
+                        v_loss = F.mse_loss(val, ret)
                     v_anc = F.mse_loss(val, e_val) if v_anchor_coef > 0.0 else 0.0
                     pm_f = pm.float()
                     pm_sum = pm_f.sum().clamp_min(1.0)
@@ -5196,6 +5222,7 @@ def main(argv: list[str] | None = None) -> int:
             esparan_share=args.esparan_share,
             waffle_share=args.waffle_share,
             large_map_prob=args.large_map_prob,
+            act_every=args.act_every,
             eval_every=max(1, args.eval_every),
             seed=args.seed,
             train_threads=args.train_threads,
