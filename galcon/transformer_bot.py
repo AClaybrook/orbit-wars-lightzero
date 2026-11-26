@@ -2503,6 +2503,7 @@ class EnsembleGalconSearchAgent(GalconSearchTransformerAgent):
                     enable_redirect_overlay=self.enable_redirect_overlay,
                     use_native_redir=self.use_native_redir,
                     use_multi_send=self.use_multi_send,
+                    contempt=getattr(self.model, "contempt", None) if isinstance(self.model, GalconGen5Transformer) else None,
                     device=str(self.device),
                 )
             )
