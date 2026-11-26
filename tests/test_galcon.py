@@ -2829,6 +2829,56 @@ def test_galcon_search_fast_cpp_exact_parity(tmp_path):
         assert eb_c == eb_p, f"ensemble/{label}: best action mismatch"
 
 
+def test_lua_bridge_same_tick_fleet_send_visibility(tmp_path):
+    """Verify ItemMT:fleet_send immediately exposes launched fleets to g2.search and handles same-tick redirect."""
+    import shutil
+    from galcon.lua_bridge import GalconLuaBotBridge
+
+    if not (shutil.which("lua5.3") or shutil.which("lua")):
+        pytest.skip("lua5.3 / lua interpreter not installed on PATH")
+
+    bot_src = """
+function reset_bot() end
+function bot_act(user)
+    local p1 = g2.item(1)
+    local p2 = g2.item(2)
+    local p3 = g2.item(3)
+    -- Send 50% from p1 -> p2; should be immediately visible in g2.search("fleet target:2")
+    local fl = p1:fleet_send(50, p2)
+    assert(fl ~= nil and fl.has_fleet, "fleet_send should return newly created fleet")
+    local inc2 = g2.search("fleet target:" .. p2)
+    assert(#inc2 == 1 and inc2[1].fleet_ships == 50, "same-tick fleet must be visible via g2.search")
+    -- Redirect that same-tick fleet from p2 -> p3; should rewrite the pending SendOrder cleanly
+    inc2[1]:fleet_redirect(p3)
+    assert(#g2.search("fleet target:" .. p2) == 0)
+    assert(#g2.search("fleet target:" .. p3) == 1)
+    -- Second send from p1 -> p2, then redirect back to p1 (self-send cancels cleanly)
+    local fl2 = p1:fleet_send(20, p2)
+    assert(fl2 ~= nil and fl2.fleet_ships == 10)
+    fl2:fleet_redirect(p1)
+end
+"""
+    bot_file = tmp_path / "test_same_tick_bot.lua"
+    bot_file.write_text(bot_src, encoding="utf-8")
+
+    sim = GalconSim(
+        [
+            Planet(id=1, owner=1, ships=100.0, x=60.0, y=160.0, production=100.0, radius=24.0),
+            Planet(id=2, owner=0, ships=10.0, x=240.0, y=160.0, production=50.0, radius=16.0),
+            Planet(id=3, owner=2, ships=100.0, x=420.0, y=160.0, production=100.0, radius=24.0),
+        ],
+        width=480.0,
+        height=320.0,
+    )
+    bridge = GalconLuaBotBridge(bot_file, loop_fn="bot_act", reset_fn="reset_bot")
+    try:
+        orders = bridge.act(sim, 1)
+        assert orders == [SendOrder(1, 3, 50)], f"Unexpected orders: {orders}"
+    finally:
+        bridge.close()
+
+
+
 
 
 
