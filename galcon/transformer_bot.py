@@ -1511,7 +1511,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         multi_send_threshold: float = 0.45,
         use_d4_tta: bool = True,
         use_d4_canonical: Optional[bool] = True,
-        rollout_horizon: int = 16,
+        rollout_horizon: int = 20,
         num_plies: int = 2,
         time_budget_sec: float = 0.28,
         neural_value_weight: float = 0.70,
@@ -1522,7 +1522,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         enable_opp_direct_rush: bool = False,
         enable_def_stream: bool = True,
         enable_opening_def_guard: bool = True,
-        prior_bonus: float = 0.015,
+        prior_bonus: float = 0.040,
         contempt: Optional[float] = None,
         use_cpp_search: Optional[bool] = None,
         use_fast_infer: bool = True,
@@ -2477,6 +2477,35 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
             )
             if fan_open:
                 raw_cands.append(fan_open)
+        if self.enable_opening_def_guard and sim.tick <= 10:
+            has_early_rush = any(
+                isinstance(o, SendOrder)
+                and o.percent >= 35
+                and (sim.planets.get(o.dst_id) is not None and sim.planets[o.dst_id].owner not in (0, player))
+                for o in raw_cands[0]
+            )
+            if has_early_rush:
+                fan_safe_def = self._build_fanout_plan(
+                    sim, enc, probs, ms_probs=prior_ms, max_targets_per_planet=2, reserve_ratio=0.55, base_redirs=base_redirs
+                )
+                if fan_safe_def:
+                    raw_cands.append(fan_safe_def)
+                if using_ms and ms_probs is not None and ms_fracs is not None:
+                    neu_ms = ms_probs.copy()
+                    for j in range(n):
+                        if enc.planets[j].owner not in (0, player):
+                            neu_ms[:, j] = 0.0
+                    neu_plan = self._decode_multi_send_orders(
+                        sim,
+                        enc,
+                        neu_ms,
+                        ms_fracs,
+                        threshold=max(0.28, self.multi_send_threshold - 0.08),
+                        redir_enc=redir_enc,
+                        redir_probs=redir_probs,
+                    )
+                    if neu_plan:
+                        raw_cands.append(neu_plan)
 
         use_adv = self.adversarial_search and (n < 22)
         if use_adv:
@@ -2532,6 +2561,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         # Predict opponent's immediate tick-0 response (reusing fused B=2 root pass when available)
         opp_orders: List[Order] = []
         opp_adv_orders: List[Order] = []
+        opp_def_orders: List[Order] = []
         if opp_enc.planet_ids and np.any(opp_enc.owned_mask):
             if opp_pred_cached is not None:
                 op, of, oms_p, oms_f = opp_pred_cached
@@ -2540,6 +2570,10 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                     opp_enc, use_d4_tta=False, need_value=False, ms_only=(using_ms and not use_adv)
                 )
             opp_orders = self._predict_opponent_reply(sim, opp_enc, op, of, oms_p, oms_f)
+            if self.enable_opening_def_guard and sim.tick <= 10:
+                opp_def_orders = self._build_fanout_plan(
+                    sim, opp_enc, op, max_targets_per_planet=2, reserve_ratio=0.55
+                )
             if use_adv:
                 opp_adv_orders = self._build_fanout_plan(
                     sim, opp_enc, op, max_targets_per_planet=4, reserve_ratio=0.10
@@ -2791,31 +2825,29 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                     )
                     scores[cand_i] = 0.65 * scores[cand_i] + 0.35 * min(scores[cand_i], s_adv)
 
-            # Wave 16 opening deep-strike defensive soft-minimax guard:
-            # Exposes suicidal long-distance opening rushes (eta >= 14 > rollout_horizon) by testing top candidates
-            # against a calm defending opponent (opp=[]) out to min(28, max_eta + 2) ticks.
+            # Wave 16/19 opening defensive soft-minimax guard:
+            # Breaks self-mirror opening-rush delusion by testing ALL candidates against a calm defending &
+            # safe-neutral-expanding opponent (opp_def_orders) out to min(36, max_eta + 10) ticks so real C++
+            # multi-ship flocks finish gradual landing before evaluation.
             if (
                 self.enable_opening_def_guard
-                and sim.tick <= 8
+                and sim.tick <= 10
                 and len(eval_cands) > 1
                 and time.perf_counter() < deadline - 0.015
             ):
                 max_strike_eta = 0
                 for plan in eval_cands:
                     for o in plan:
-                        if isinstance(o, SendOrder) and o.percent >= 45:
+                        if isinstance(o, SendOrder) and o.percent >= 35:
                             sp = sim.planets.get(o.src_id)
                             dp = sim.planets.get(o.dst_id)
                             if sp is not None and dp is not None and dp.owner not in (0, player):
                                 eta_sd = sim.planet_eta_ticks(sp, dp)
                                 if eta_sd > max_strike_eta:
                                     max_strike_eta = eta_sd
-                if max_strike_eta >= 14:
-                    def_horizon = min(28, max_strike_eta + 2)
-                    top_k_def = sorted(
-                        range(len(eval_cands)),
-                        key=lambda i: -(scores[i] + (self.prior_bonus if i == 0 else 0.0)),
-                    )[:6]
+                if max_strike_eta >= 4:
+                    def_horizon = min(36, max_strike_eta + 10)
+                    top_k_def = list(range(len(eval_cands)))
                     def_h: List[float] = []
                     def_done: List[bool] = []
                     def_encs: List[EncodedGalconState] = []
@@ -2826,7 +2858,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                         rem_def = def_horizon - 1
                         for loc_i, cand_i in enumerate(top_k_def):
                             work_cpp.copy_from(root_cpp)
-                            work_cpp.step({player: eval_cands[cand_i], opp: []})
+                            work_cpp.step({player: eval_cands[cand_i], opp: opp_def_orders})
                             if rem_def > 0:
                                 work_cpp.step_n_ticks(rem_def)
                             d_enc, d_h, d_done = extract_galcon_features_from_cpp(
@@ -2840,7 +2872,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                     else:
                         for loc_i, cand_i in enumerate(top_k_def):
                             r_def = sim.clone()
-                            r_def.step({player: eval_cands[cand_i], opp: []})
+                            r_def.step({player: eval_cands[cand_i], opp: opp_def_orders})
                             for _ in range(1, def_horizon):
                                 if r_def.done:
                                     break
@@ -2858,7 +2890,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                             if def_done[loc_i]
                             else (self.neural_value_weight * def_nn_map[loc_i] + (1.0 - self.neural_value_weight) * def_h[loc_i])
                         )
-                        scores[cand_i] = 0.55 * scores[cand_i] + 0.45 * min(scores[cand_i], s_def)
+                        scores[cand_i] = 0.50 * scores[cand_i] + 0.50 * min(scores[cand_i], s_def)
 
             best_idx = 0
             best_score = -1e9
