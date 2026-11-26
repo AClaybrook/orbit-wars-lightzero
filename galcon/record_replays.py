@@ -149,8 +149,8 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
   <div class="wrap">
     <div class="bar">
       <div>
-        <div class="title">Galcon AI Wave 16 — Gen 5 1-Tick Self-Play &amp; DefStream+Guard (73.8% Spky 3L • 72.5% Waff • 70.6% Dual Avg • 60% Pure!)</div>
-        <div class="sub">NEW All-Time Single-Model Records: Gen5_W16 1t-Pooled (72.5% Waff #1 / 68.8% Spky 5L = 70.6% Avg #1; 60.0% Pure Spky @ 7.5ms!) • Gen5_W15 DefStream+Guard (73.8% Spky 22–3–15 #1 All-Time, 92.5% non-loss!) • W14_KD DefStream (68.1% Avg @ 15–20ms)</div>
+        <div class="title">Galcon AI Wave 17 — Gen 5 50/50 19.6k Self-Play (74.6% Triple-Boss Avg • 93.6% vsign • 62.5% Pure Waff • 87.5% Esp)</div>
+        <div class="sub">Gen5_W17 (74.6% Triple Avg: 75% 0L Spky s14k / 70% Waff / 87.5% Esp 12–0–0 / 93.8% Heur; 62.5% Pure Waff #1!) • Gen5_W16 (70.6% Dual #1: 72.5% Waff / 68.8% Spky) • Gen5_W15 (73.8% Spky 3L #1!)</div>
       </div>
       <div class="tabs">
         <button class="tab-btn active" id="tabReplays">▶ Live Replays</button>
@@ -198,7 +198,7 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
       <div class="elo-card">
         <div style="display:flex; flex-wrap:wrap; gap:8px; justify-content:space-between; align-items:center; margin-bottom:10px;">
           <div style="font-weight:700;">Galcon Elo Ladder (Anchored: ClassicBot = 1200.0 • Sparky v1.6 = 1821.4 • Waffle3z-GA ≈ 1745)</div>
-          <span class="badge ok">#1 Sparky: Gen5_W15 DefStream (~2001 Elo, 73.8% 3L!) • #1 Dual Avg: Gen5_W16 (~1985 Elo, 70.6%: 72.5% Waff / 68.8% Spky!)</span>
+          <span class="badge ok">#1 Sparky: Gen5_W15 (73.8% 3L) • #1 Dual: Gen5_W16 (70.6%) • #1 Triple Avg: Gen5_W17 (74.6% · 93.6% vsign!)</span>
         </div>
         <div id="eloRows"></div>
       </div>
@@ -210,18 +210,18 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
             <tr><th>Agent</th><th>Sparky v1.6 18pl (40g, 1t)</th><th>Waffle3z-GA 18pl (40g, 1t)</th><th>Large 22–28pl (Asym / Pair Spky)</th><th>EsparanBot / Heur</th><th>Latency</th></tr>
           </thead>
           <tbody>
+            <tr><td><strong>Wave 17 Gen 5 50/50 19.6k (Gen5_W17)</strong> <span class="badge ok">#1 Triple Avg (74.6%)!</span></td><td><strong>20–7–13 (66.2%)</strong> <span class="sub"><strong>s14k: 10–0–10 (75% 0L!)</strong></span></td><td><strong>25–9–6 (70.0%)</strong> <span class="sub">70% / 70% bal</span></td><td>33.3% / — <span class="sub">(58.3% Asym Waff)</span></td><td><strong>87.5% (12–0–0!)</strong> / <strong>93.8%</strong></td><td class="mono"><strong>44 ms</strong></td></tr>
+            <tr><td><strong>Wave 17 Gen 5 Pure (9.6ms, 0-ply!)</strong> <span class="badge ok">#1 Pure Waff (62.5%)!</span></td><td>15–13–12 (52.5%) <span class="sub"><strong>s14k: 70.0% Pure!</strong></span></td><td><strong>22–12–6 (62.5% — #1 Pure!)</strong> <span class="sub">s14k: 70.0% Pure!</span></td><td>— / —</td><td>—</td><td class="mono"><strong>7.8–9.6 ms</strong></td></tr>
             <tr><td><strong>Wave 16 Gen 5 1t-Pooled (Gen5_W16)</strong> <span class="badge ok">#1 Dual Avg (70.6%)!</span></td><td><strong>20–5–15 (68.8%, 5L!)</strong> <span class="sub">87.5% non-loss · s9.5k:77.5%</span></td><td><strong>26–8–6 (72.5% — #1 All-Time!)</strong> <span class="sub">s14k:70% s9.5k:75%</span></td><td>41.7% / — <span class="sub">(41.7% Asym Waff)</span></td><td>62.5% / 84.4%</td><td class="mono"><strong>36–39 ms</strong></td></tr>
             <tr><td><strong>Wave 16 Gen 5 W15 + DefStream+Guard</strong> <span class="badge ok">#1 Sparky (73.8%)!</span></td><td><strong>22–3–15 (73.8% — #1 All-Time!)</strong> <span class="sub"><strong>92.5% non-loss · s14k: 9–0–11!</strong></span></td><td>20–11–9 (61.3%)</td><td>33.3% / — <span class="sub">(58.3% Asym Waff)</span></td><td><strong>81.2%</strong> / 79.7%</td><td class="mono"><strong>29.9 ms</strong></td></tr>
-            <tr><td><strong>Wave 16 Gen 5 Pure (7.5ms, 0-ply!)</strong> <span class="badge ok">#1 Pure Avg (58.8%)!</span></td><td><strong>18–10–12 (60.0% — #1 1t Pure!)</strong> <span class="sub">60.0% / 60.0% bal</span></td><td><strong>20–14–6 (57.5% Pure!)</strong> <span class="sub">s14k:60% s9.5k:55%</span></td><td>— / —</td><td>—</td><td class="mono"><strong>7.5 ms</strong></td></tr>
+            <tr><td><strong>Wave 16 Gen 5 Pure (7.5ms, 0-ply!)</strong> <span class="badge ok">#1 Pure Spky (60.0%)!</span></td><td><strong>18–10–12 (60.0% — #1 1t Pure!)</strong> <span class="sub">60.0% / 60.0% bal</span></td><td><strong>20–14–6 (57.5% Pure!)</strong> <span class="sub">s14k:60% s9.5k:55%</span></td><td>— / —</td><td>—</td><td class="mono"><strong>7.5 ms</strong></td></tr>
             <tr><td><strong>Wave 16 W14_KD + DefStream+Guard</strong> <span class="badge ok">#1 20ms (68.1% Avg)!</span></td><td><strong>21–8–11 (66.2%, 8L!)</strong> <span class="sub">s9.5k:70.0%</span></td><td><strong>24–8–8 (70.0%)</strong> <span class="sub">s9.5k:82.5%</span></td><td><strong>50.0%</strong> / 33.3% <span class="sub">(75% Asym Waff)</span></td><td><strong>89.6% (#1!)</strong> / 82.8%</td><td class="mono"><strong>14.9–19.6 ms</strong></td></tr>
             <tr><td><strong>Wave 12 Surgical Ens (W9S+W6B)</strong> <span class="badge">2-Model Ens</span></td><td><strong>26–9–5 (71.2%)</strong> <span class="sub">s14k:65% s9.5k:77.5%</span></td><td>24–13–3 (63.7%) <span class="sub">s14k:65% s9.5k:62.5%</span></td><td><strong>66.7%</strong> / 33.3% <span class="sub">(75% Asym Waff)</span></td><td>64.6% / <strong>92.2%</strong></td><td class="mono"><strong>35–42 ms</strong></td></tr>
-            <tr><td><strong>Wave 12 Direct-Rush Ens (W9S+W6B)</strong></td><td>24–11–5 (66.2%) <span class="sub">s14k:60% s9.5k:72.5%</span></td><td>27–10–3 (71.2%) <span class="sub">s14k:70% s9.5k:72.5%</span></td><td><strong>66.7%</strong> / — <span class="sub">(75% Asym Waff)</span></td><td>64.6% / 89.1%</td><td class="mono"><strong>35–42 ms</strong></td></tr>
-            <tr><td><strong>Wave 13 Soft-KD Single (W13_KD)</strong> <span class="badge">s14k King</span></td><td>22–12–6 (62.5%) <span class="sub"><strong>s14k:70.0%</strong></span></td><td>25–12–3 (66.2%) <span class="sub">67.5% Surg</span></td><td>25.0% / 33.3% <span class="sub">(<strong>83.3% Asym Waff #1!</strong>)</span></td><td>85.4% / <strong>90.6%</strong></td><td class="mono"><strong>21–24 ms</strong></td></tr>
-            <tr><td><strong>Wave 11 Soft-KD Search (W11_KD)</strong> <span class="badge ok">#1 Large Pair</span></td><td>21–15–4 (57.5%) <span class="sub">57.5% / 57.5% bal</span></td><td>26–11–3 (68.8%) <span class="sub">s14k:70%</span></td><td>41.7% / <strong>58.3% (#1 All-Time!)</strong></td><td>85.4% / 84.4% <span class="sub">(92.2% Pure)</span></td><td class="mono"><strong>21–25 ms</strong></td></tr>
+            <tr><td><strong>Wave 13 Soft-KD + DefStream (20ms)</strong> <span class="badge">Waff Co-#1</span></td><td>22–12–6 (62.5%) <span class="sub"><strong>s14k: 14–4–2 (75.0%!)</strong></span></td><td><strong>26–8–6 (72.5% — Co-#1!)</strong> <span class="sub">s9.5k: 85.0%!</span></td><td>25.0% / 33.3% <span class="sub">(<strong>83.3% Asym Waff #1!</strong>)</span></td><td>85.4% / <strong>90.6%</strong></td><td class="mono"><strong>19.8–24 ms</strong></td></tr>
             <tr><td><strong>Waffle3z-GA (bots_waffle3z_optimized)</strong></td><td>9–20–11 (36.3%)</td><td>— (Self)</td><td>16.7% / 41.7%</td><td><strong>67.5% vs Esp</strong></td><td class="mono">&lt;3 ms</td></tr>
           </tbody>
         </table>
-        <div class="sub" style="margin-top:10px;"><strong>Wave 16 Highlights (Deep Loss Autopsy → Root-Cause Search &amp; Full-Speed 1-Tick Self-Play):</strong> An 80-game quantitative loss autopsy exposed 3 root causes: (1) midgame undefended planet falls (`5×` higher in losses) while sitting passive, (2) blind long-ETA (`eta &gt; 16`) opening rushes against defending opponents, and (3) a huge training cadence bug where Waves 1–15 trained at `act_every=2` (`0.5×` APM bosses) while tournaments run at `act_every=1`. Fixing all three via default <strong><code>DefStream+Guard</code></strong> (`_build_defense_and_pressure_plan` + opening deep-strike soft-minimax guard) and <strong>full-speed 1-tick EI pooling</strong> (`13,381` states) shattered EVERY major record with a single model: <strong><code>Gen5_W15 DefStream+Guard</code> hit <code>73.8%</code> vs. Sparky v1.6 (`22–3–15`, `92.5%` non-loss, undefeated `9–0–11` on `s=14000`!)</strong>, <strong><code>Gen5_W16</code> broke <code>70%</code> Dual-Boss Avg (`70.6%`: `72.5%` Waffle3z #1 + `68.8%` Sparky `5L`)</strong>, and <strong><code>Gen5_W16 Pure</code> (ZERO search, `7.5 ms/t`) jumped to `60.0%` Sparky (`18–10–12`) &amp; `57.5%` Waffle3z!</strong></div>
+        <div class="sub" style="margin-top:10px;"><strong>Wave 17 Highlights (50/50 Balanced 19.6k Self-Play &amp; Native 1-Tick WDL PPO):</strong> Balancing <strong>50% dense policy anchors (`9,754` states) + 50% pure full-speed 1-tick Gen 5 self-play (`9,832` states across 156 games)</strong> smashed our value calibration record (<strong><code>vsign=93.6%</code>, <code>vloss=0.466</code>, <code>aux=98.0%</code></strong>) and made <strong><code>Gen5_W17</code></strong> our #1 Gen 5 Triple-Boss All-Rounder (<strong><code>74.6%</code> Triple-Boss Avg</strong>: undefeated <strong><code>10–0–10 / 75.0%</code></strong> on Sparky `s14k`, <strong><code>70.0%</code></strong> Waffle3z, <strong><code>87.5%</code></strong> EsparanBot with <code>12–0–0</code> sweep, <strong><code>93.8%</code></strong> Heuristics, and a <strong>new all-time Pure Waffle3z record of <code>62.5%</code> @ <code>9.6 ms</code>!</strong>). Also added native Gen 5 WDL PPO + full-speed `--act-every 1` PPO in `galcon/train.py`, confirming a supervised-EI plateau near `~71%–75%` and setting up Wave 18's Frozen-WDL-Critic PPO / Gen 6 architecture leap.</div>
       </div>
     </div>
   </div>
@@ -231,17 +231,17 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
     const ELO_LADDER = [
       {{ name: "Wave 16 Gen 5 W15 + DefStream+Guard [73.8% Spky #1!]", elo: 2001.0, ms: "29.9 ms", col: "#10b981" }},
       {{ name: "Wave 16 Gen 5 1t-Pooled (Gen5_W16) [70.6% Dual #1!]", elo: 1985.0, ms: "36–39 ms", col: "#8b5cf6" }},
+      {{ name: "Wave 17 Gen 5 50/50 19.6k (Gen5_W17) [74.6% Triple #1!]", elo: 1982.0, ms: "44 ms", col: "#a855f7" }},
       {{ name: "Wave 12 Surgical Ens (W9S+W6B) [2-Model Ens]", elo: 1979.0, ms: "35–42 ms", col: "#059669" }},
       {{ name: "Wave 16 W14_KD + DefStream+Guard [68.1% @ 15–20ms]", elo: 1963.0, ms: "14.9–19.6 ms", col: "#34d399" }},
+      {{ name: "Wave 13 Soft-KD + DefStream (W13_KD) [72.5% Waff Co-#1]", elo: 1958.0, ms: "19.8–24 ms", col: "#2dd4bf" }},
       {{ name: "Wave 12 Direct-Rush Ens [71.2% Waff]", elo: 1955.0, ms: "35–42 ms", col: "#14b8a6" }},
       {{ name: "Wave 15 Gen 5 WDL (Baseline Search, 9ep)", elo: 1945.0, ms: "33.0 ms", col: "#7c3aed" }},
-      {{ name: "Wave 13 Soft-KD Single Search (W13_KD) [s14k #1]", elo: 1941.0, ms: "21–24 ms", col: "#2dd4bf" }},
       {{ name: "Wave 9 Single Search (W9S) [66.3% Spky]", elo: 1939.0, ms: "22–28 ms", col: "#0d9488" }},
       {{ name: "Wave 11 Soft-KD Search (W11_KD) [58.3% Lg]", elo: 1925.0, ms: "21–25 ms", col: "#22d3ee" }},
       {{ name: "Wave 16 Gen 5 Pure (7.5ms, 0-ply!) [60% Spky #1!]", elo: 1898.0, ms: "7.5 ms", col: "#a855f7" }},
+      {{ name: "Wave 17 Gen 5 Pure (9.6ms, 0-ply!) [62.5% Waff #1!]", elo: 1892.0, ms: "7.8–9.6 ms", col: "#c084fc" }},
       {{ name: "Wave 8 Pure (EI→PPO, 1× MS, 0-ply)", elo: 1890.0, ms: "5.5 ms", col: "#0891b2" }},
-      {{ name: "Wave 15 Gen 5 Pure (10ms, 0-ply, 9ep)", elo: 1872.0, ms: "10.0 ms", col: "#c084fc" }},
-      {{ name: "Wave 6B + 2-Ply Adaptive Search", elo: 1856.0, ms: "28 ms", col: "#38bdf8" }},
       {{ name: "esparano Sparky v1.6 (Lua GM)", elo: 1821.4, ms: "<2 ms", col: "#f43f5e" }},
       {{ name: "GalconPT-Gen4 + AdaptiveSearch (1×)", elo: 1800.7, ms: "34 ms", col: "#60a5fa" }},
       {{ name: "Waffle3z-GA (bots_waffle3z_optimized)", elo: 1745.0, ms: "<3 ms", col: "#f59e0b" }},
@@ -263,13 +263,13 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
     }});
 
     const BOSS_COMPARE = [
+      {{ name: "W17 Gen 5 19.6k (74.6% 3B)", spky: 66.2, waff: 70.0, lg: 87.5, lgLbl: "EsparanBot (12–0–0!)" }},
       {{ name: "W16 Gen 5 1t (70.6% #1!)", spky: 68.8, waff: 72.5, lg: 87.5, lgLbl: "Spky Non-Loss (5L)" }},
       {{ name: "W16 Gen 5 W15 DefStream", spky: 73.8, waff: 61.3, lg: 92.5, lgLbl: "Spky Non-Loss (3L #1!)" }},
+      {{ name: "W17 Gen 5 Pure (9.6ms!)", spky: 52.5, waff: 62.5, lg: 70.0, lgLbl: "Pure s14k Spky/Waff" }},
       {{ name: "W16 Gen 5 Pure (7.5ms!)", spky: 60.0, waff: 57.5, lg: 60.0, lgLbl: "Spky s14k/9.5k Pure" }},
       {{ name: "W16 W14_KD DefStream (17ms)", spky: 66.2, waff: 70.0, lg: 89.6, lgLbl: "EsparanBot (#1!)" }},
-      {{ name: "W12 Surgical Ens (2-Mod)", spky: 71.2, waff: 63.7, lg: 66.7, lgLbl: "Large Asym Spky" }},
-      {{ name: "W12 Direct-Rush Ens", spky: 66.2, waff: 71.2, lg: 66.7, lgLbl: "Large Asym Spky" }},
-      {{ name: "W13 Soft-KD (21ms)", spky: 62.5, waff: 66.2, lg: 83.3, lgLbl: "Large Asym Waff" }},
+      {{ name: "W13 Soft-KD DefStream (20ms)", spky: 62.5, waff: 72.5, lg: 85.0, lgLbl: "Waffle3z s9.5k" }},
     ];
     const bossWrap = document.getElementById("bossBars");
     BOSS_COMPARE.forEach(r => {{
@@ -480,6 +480,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--w14-kd-checkpoint", default="checkpoints/galcon_wave14_kd.pt")
     parser.add_argument("--gen5-w15-checkpoint", default="checkpoints/galcon_gen5_w15.pt")
     parser.add_argument("--gen5-w16-checkpoint", default="checkpoints/galcon_gen5_w16.pt")
+    parser.add_argument("--gen5-w17-checkpoint", default="checkpoints/galcon_gen5_w17.pt")
     parser.add_argument("--pure-checkpoint", default="checkpoints/galcon_wave8_pure.pt")
     parser.add_argument("--gen4-checkpoint", default="checkpoints/galcon_gen4_ppo_s2.pt")
     parser.add_argument("--gen2-checkpoint", default="checkpoints/galcon_gen2_champion.pt")
@@ -561,6 +562,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         if has_gen5_w16
         else None
     )
+    has_gen5_w17 = bool(args.gen5_w17_checkpoint and Path(args.gen5_w17_checkpoint).is_file())
+    gen5_w17 = (
+        GalconSearchTransformerAgent(
+            args.gen5_w17_checkpoint,
+            use_d4_canonical=True,
+            use_d4_tta=False,
+        )
+        if has_gen5_w17
+        else None
+    )
     has_ens = bool(args.checkpoint2 and Path(args.checkpoint2).is_file())
     if has_ens:
         search = EnsembleGalconSearchAgent(
@@ -574,11 +585,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     w10_search_label = "Wave 10 Single Search (22 ms, 66.3% Waff)"
     w11_kd_label = "Wave 11 Soft-KD Search (22 ms, 68.8% Waff / 58.3% Large)"
     w11_pure_label = "Wave 11 Pure (6 ms, 50.0% Large Pair!)"
-    w13_kd_label = "Wave 13 Soft-KD Single Search (21 ms, 70% s14k / 83% Lg Waff)"
+    w13_kd_label = "Wave 13 Soft-KD DefStream (20 ms, 75% s14k / 72.5% Waff Co-#1)"
     w14_kd_label = "Wave 16 W14_KD DefStream (17 ms, 66.2% Spky / 70% Waff / 89.6% Esp)"
     gen5_w15_label = "Wave 16 Gen 5 W15 DefStream+Guard (30 ms, 22–3–15 / 73.8% Spky #1!)"
     gen5_w16_label = "Wave 16 Gen 5 1t-Pooled (37 ms, 72.5% Waff #1 / 68.8% Spky = 70.6% Avg!)"
     gen5_w16_pure_label = "Wave 16 Gen 5 Pure (7.5 ms, 0-ply, 60.0% Spky #1!)"
+    gen5_w17_label = "Wave 17 Gen 5 50/50 19.6k (44 ms, 74.6% Triple Avg • 75% 0L s14k • 87.5% Esp!)"
     pure_label = "Wave 8 Pure (5.5 ms, 1× MS)" if Path(pure_ckpt).name == "galcon_wave8_pure.pt" else "Wave 6B Pure (1× Canon MS)"
     tactical = GalconTacticalBot()
     classic = GalconClassicBot()
@@ -599,6 +611,25 @@ def main(argv: Optional[List[str]] = None) -> int:
             waffle = GalconLuaBotBridge(args.lua_waffle)
 
         if sparky is not None:
+            # 0. Wave 17 Gen 5 50/50 19.6k UNDEFEATED s14k (10-0-10 / 75.0%) WIN vs. Sparky v1.6
+            if gen5_w17 is not None:
+                matches.append(
+                    _find_showcase_win(
+                        f"[WIN 18pl W17 74.6% 3B • 75% 0L s14k] {gen5_w17_label} vs. esparano Sparky v1.6",
+                        gen5_w17_label,
+                        gen5_w17.act,
+                        "esparano Sparky v1.6 (Lua)",
+                        sparky.act,
+                        seed_start=14001,
+                        num_planets=18,
+                        width=400.0,
+                        height=240.0,
+                        prefer_redir=False,
+                        max_ticks=220,
+                        max_attempts=10,
+                        target_winner=1,
+                    )
+                )
             # 0a. Wave 16 #1 All-Time Sparky Record (73.8%, 22-3-15, 92.5% non-loss!)
             if gen5_w15 is not None:
                 matches.append(
