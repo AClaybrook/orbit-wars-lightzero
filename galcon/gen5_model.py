@@ -23,6 +23,8 @@ Key architectural upgrades over Gen 4 (``1.29M`` static-edge ``GalconPlanetTrans
 
 from __future__ import annotations
 
+import copy
+import warnings
 from typing import Optional, Tuple
 
 import torch
@@ -428,3 +430,275 @@ def build_galcon_gen5_transformer(
         contempt=contempt,
         dropout=dropout,
     )
+
+
+class _FastGen5Block(nn.Module):
+    """Fused inference-only variant of ``EdgeGatedTransformerBlock`` for unpadded CPU search batches.
+
+    Fuses paired linear projections ``(edge_bias, edge_val)``, ``(out_proj, edge_msg_out)``, and
+    ``(edge_src, edge_dst)``, omits no-op eval ``Dropout`` calls, and exposes ``forward_node_only``
+    so value-only leaf evaluation skips the unused final-layer edge refinement.
+    """
+
+    def __init__(self, blk: EdgeGatedTransformerBlock) -> None:
+        super().__init__()
+        D = int(blk.d_model)
+        H = int(blk.n_heads)
+        Dh = int(blk.head_dim)
+        De = int(blk.edge_hidden)
+        self.d_model: int = D
+        self.n_heads: int = H
+        self.head_dim: int = Dh
+        self.edge_hidden: int = De
+        self.scale: float = float(blk.scale)
+
+        self.norm1 = copy.deepcopy(blk.norm1)
+        self.qkv = copy.deepcopy(blk.qkv)
+
+        self.edge_bv = nn.Linear(De, H + De, bias=True)
+        self.edge_bv.weight.copy_(
+            torch.cat([blk.edge_bias.weight.detach(), blk.edge_val.weight.detach()], dim=0)
+        )
+        self.edge_bv.bias.copy_(
+            torch.cat([blk.edge_bias.bias.detach(), blk.edge_val.bias.detach()], dim=0)
+        )
+
+        self.attn_out = nn.Linear(D + H * De, D, bias=True)
+        self.attn_out.weight.copy_(
+            torch.cat([blk.out_proj.weight.detach(), blk.edge_msg_out.weight.detach()], dim=1)
+        )
+        self.attn_out.bias.copy_(blk.out_proj.bias.detach())
+
+        self.norm2 = copy.deepcopy(blk.norm2)
+        self.w_gate_up = copy.deepcopy(blk.ffn.w_gate_up)
+        self.w_down = copy.deepcopy(blk.ffn.w_down)
+
+        self.edge_norm = copy.deepcopy(blk.edge_norm)
+        self.edge_sd = nn.Linear(D, 2 * De, bias=False)
+        self.edge_sd.weight.copy_(
+            torch.cat([blk.edge_src.weight.detach(), blk.edge_dst.weight.detach()], dim=0)
+        )
+        self.edge_upd_lin = copy.deepcopy(blk.edge_upd[1])
+
+    def forward_node_only(self, x: torch.Tensor, e: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        B = x.shape[0]
+        N = x.shape[1]
+        D = self.d_model
+        H = self.n_heads
+        Dh = self.head_dim
+        De = self.edge_hidden
+
+        xn = self.norm1(x)
+        qkv = self.qkv(xn).view(B, N, 3, H, Dh)
+        q = qkv[:, :, 0].transpose(1, 2)
+        k = qkv[:, :, 1].transpose(1, 2)
+        v = qkv[:, :, 2].transpose(1, 2)
+
+        ebv = self.edge_bv(e)
+        eb = ebv[..., :H].permute(0, 3, 1, 2)
+        ev = ebv[..., H:]
+
+        logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale + eb
+        attn = F.softmax(logits, dim=-1)
+
+        node_ctx = torch.matmul(attn, v).transpose(1, 2).reshape(B, N, D)
+        attn_bn = attn.transpose(1, 2).reshape(B * N, H, N)
+        ev_bn = ev.reshape(B * N, N, De)
+        edge_ctx = torch.bmm(attn_bn, ev_bn).reshape(B, N, H * De)
+        x = x + self.attn_out(torch.cat([node_ctx, edge_ctx], dim=-1))
+
+        xn2 = self.norm2(x)
+        gu = self.w_gate_up(xn2)
+        half = gu.shape[-1] // 2
+        x = x + self.w_down(F.silu(gu[..., :half]) * gu[..., half:])
+        return x, xn2
+
+    def forward(self, x: torch.Tensor, e: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        x, xn2 = self.forward_node_only(x, e)
+        De = self.edge_hidden
+        esd = self.edge_sd(xn2)
+        e_in = self.edge_norm(e) + esd[..., :De].unsqueeze(2) + esd[..., De:].unsqueeze(1)
+        e = e + self.edge_upd_lin(F.silu(e_in))
+        return x, e
+
+
+class FastGen5Infer(nn.Module):
+    """Dynamic-shape TorchScript-optimized CPU inference module for ``GalconGen5Transformer``.
+
+    Preserves exact float32 numerical parity (``<1e-5``) across arbitrary ``(B, N, T)`` shapes
+    while eliminating Python dispatch overhead, fusing paired linear projections, and skipping
+    dead edge-refinement work during value-only leaf evaluation.
+    """
+
+    def __init__(self, model: GalconGen5Transformer) -> None:
+        super().__init__()
+        D = int(model.d_model)
+        De = int(model.edge_hidden)
+        ms_hid = D // 2
+        edge_dim = int(model.ms_raw_edge_proj.in_features)
+        self.d_model: int = D
+        self.ms_hid: int = ms_hid
+
+        self.timeline_conv = copy.deepcopy(model.timeline_conv)
+        self.node_in = copy.deepcopy(model.node_in)
+        self.edge_in = copy.deepcopy(model.edge_in)
+
+        self.layers = nn.ModuleList([_FastGen5Block(blk) for blk in model.layers[:-1]])
+        self.last_layer = _FastGen5Block(model.layers[-1])
+        self.final_norm = copy.deepcopy(model.final_norm)
+        self.final_edge_norm = copy.deepcopy(model.final_edge_norm)
+
+        self.ms_sd = nn.Linear(D, 2 * ms_hid, bias=True)
+        self.ms_sd.weight.copy_(
+            torch.cat([model.ms_src_proj.weight.detach(), model.ms_dst_proj.weight.detach()], dim=0)
+        )
+        self.ms_sd.bias.copy_(
+            torch.cat([model.ms_src_proj.bias.detach(), model.ms_dst_proj.bias.detach()], dim=0)
+        )
+
+        self.ms_edge_both = nn.Linear(De + edge_dim, ms_hid, bias=True)
+        self.ms_edge_both.weight.copy_(
+            torch.cat([model.ms_edge_proj.weight.detach(), model.ms_raw_edge_proj.weight.detach()], dim=1)
+        )
+        self.ms_edge_both.bias.copy_(model.ms_edge_proj.bias.detach() + model.ms_raw_edge_proj.bias.detach())
+        self.ms_head = copy.deepcopy(model.ms_head)
+
+        self.register_buffer(
+            "val_queries_t",
+            (model.val_queries.detach().t() * (D ** -0.5)).contiguous(),
+        )
+        self.val_kv = nn.Linear(D, 2 * D, bias=False)
+        self.val_kv.weight.copy_(
+            torch.cat([model.val_key.weight.detach(), model.val_val.weight.detach()], dim=0)
+        )
+        self.val_wdl_head = copy.deepcopy(model.val_wdl_head)
+
+    def _embed(
+        self,
+        planet_feats: torch.Tensor,
+        timeline_feats: torch.Tensor,
+        edge_feats: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        B = timeline_feats.shape[0]
+        N = timeline_feats.shape[1]
+        T = timeline_feats.shape[2]
+        Ct = timeline_feats.shape[3]
+        tl = timeline_feats.reshape(B * N, T, Ct).transpose(1, 2)
+        tl_h = self.timeline_conv(tl)
+        tl_pool = torch.cat([tl_h.mean(dim=-1), tl_h.amax(dim=-1), tl_h[:, :, -1]], dim=-1).view(B, N, 192)
+        x = self.node_in(torch.cat([planet_feats, tl_pool], dim=-1))
+        e = self.edge_in(edge_feats)
+        return x, e
+
+    def _decode_value(self, h: torch.Tensor, contempt: float) -> torch.Tensor:
+        B = h.shape[0]
+        D = self.d_model
+        kv = self.val_kv(h)
+        k = kv[..., :D]
+        v = kv[..., D:]
+        attn_logits = torch.matmul(k, self.val_queries_t).transpose(1, 2)
+        attn_w = F.softmax(attn_logits, dim=-1)
+        q_pool = torch.matmul(attn_w, v).reshape(B, -1)
+        mean_pool = h.mean(dim=1)
+        wdl = F.softmax(self.val_wdl_head(torch.cat([q_pool, mean_pool], dim=-1)), dim=-1)
+        return (wdl[:, 2] - wdl[:, 0] - contempt * wdl[:, 1]).clamp(-1.0, 1.0)
+
+    def _decode_ms(
+        self,
+        h: torch.Tensor,
+        e: torch.Tensor,
+        edge_feats: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        H_ms = self.ms_hid
+        sd = self.ms_sd(h)
+        pair = (
+            sd[..., :H_ms].unsqueeze(2)
+            + sd[..., H_ms:].unsqueeze(1)
+            + self.ms_edge_both(torch.cat([e, edge_feats], dim=-1))
+        )
+        out = self.ms_head(pair)
+        return out[..., 0], torch.sigmoid(out[..., 1])
+
+    def forward(
+        self,
+        planet_feats: torch.Tensor,
+        timeline_feats: torch.Tensor,
+        edge_feats: torch.Tensor,
+        contempt: float,
+    ) -> torch.Tensor:
+        return self.eval_values(planet_feats, timeline_feats, edge_feats, contempt)
+
+    @torch.jit.export
+    def eval_values(
+        self,
+        planet_feats: torch.Tensor,
+        timeline_feats: torch.Tensor,
+        edge_feats: torch.Tensor,
+        contempt: float,
+    ) -> torch.Tensor:
+        x, e = self._embed(planet_feats, timeline_feats, edge_feats)
+        for layer in self.layers:
+            x, e = layer(x, e)
+        x, _ = self.last_layer.forward_node_only(x, e)
+        h = self.final_norm(x)
+        return self._decode_value(h, contempt)
+
+    @torch.jit.export
+    def eval_ms(
+        self,
+        planet_feats: torch.Tensor,
+        timeline_feats: torch.Tensor,
+        edge_feats: torch.Tensor,
+        contempt: float,
+        need_value: bool,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        x, e = self._embed(planet_feats, timeline_feats, edge_feats)
+        for layer in self.layers:
+            x, e = layer(x, e)
+        x, e = self.last_layer(x, e)
+        h = self.final_norm(x)
+        e = self.final_edge_norm(e)
+        ms_logits, ms_fracs = self._decode_ms(h, e, edge_feats)
+        if need_value:
+            vals = self._decode_value(h, contempt)
+        else:
+            vals = torch.zeros((planet_feats.shape[0],), dtype=planet_feats.dtype, device=planet_feats.device)
+        return ms_logits, ms_fracs, vals
+
+    @torch.jit.export
+    def eval_ms_with_hidden(
+        self,
+        planet_feats: torch.Tensor,
+        timeline_feats: torch.Tensor,
+        edge_feats: torch.Tensor,
+        contempt: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        x, e = self._embed(planet_feats, timeline_feats, edge_feats)
+        for layer in self.layers:
+            x, e = layer(x, e)
+        x, e = self.last_layer(x, e)
+        h = self.final_norm(x)
+        e = self.final_edge_norm(e)
+        ms_logits, ms_fracs = self._decode_ms(h, e, edge_feats)
+        vals = self._decode_value(h, contempt)
+        return ms_logits, ms_fracs, vals, h
+
+
+def build_fast_gen5_infer(model: GalconGen5Transformer) -> Optional[torch.jit.ScriptModule]:
+    """Compile a fused TorchScript CPU inference wrapper for ``GalconGen5Transformer``."""
+    if not isinstance(model, GalconGen5Transformer) or len(model.layers) < 1:
+        return None
+    try:
+        with torch.no_grad():
+            fast = FastGen5Infer(model).eval()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            scripted = torch.jit.script(fast)
+            optimized = torch.jit.optimize_for_inference(
+                scripted,
+                other_methods=["eval_values", "eval_ms", "eval_ms_with_hidden"],
+            )
+        return optimized
+    except Exception:
+        return None
+

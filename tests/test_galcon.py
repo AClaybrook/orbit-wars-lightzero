@@ -3120,3 +3120,140 @@ def test_cpp_zero_copy_features_and_heuristic_eval_parity():
     finally:
         cpp_sim.close()
 
+
+def test_gen5_fast_infer_and_fused_root_exact_parity(tmp_path):
+    """Verify FastGen5Infer dynamic-shape parity, fused B=2 root batching, and non-clobbering thread control."""
+    import torch
+    from galcon.gen5_model import build_fast_gen5_infer, build_galcon_gen5_transformer
+    from galcon.transformer_bot import (
+        EnsembleGalconSearchAgent,
+        GalconSearchTransformerAgent,
+        GalconTransformerAgent,
+    )
+
+    torch.manual_seed(77)
+    model = build_galcon_gen5_transformer(
+        d_model=64,
+        n_heads=4,
+        n_layers=2,
+        dim_ff=128,
+        edge_hidden=12,
+        num_val_queries=4,
+        contempt=0.25,
+        dropout=0.10,
+    ).eval()
+    fast = build_fast_gen5_infer(model)
+    assert fast is not None
+
+    # 1. Dynamic (B, N) exact parity across eval_values, eval_ms, eval_ms_with_hidden, and live contempt
+    for B, N in ((1, 10), (2, 18), (6, 22)):
+        pf = torch.randn(B, N, 22)
+        tf = torch.randn(B, N, 20, 8)
+        ef = torch.randn(B, N, N, 12)
+        pm = torch.ones(B, N, dtype=torch.bool)
+        with torch.inference_mode():
+            h_ref, e_ref = model.encode_planets_and_edges(pf, tf, ef, pm)
+            ml_ref, mf_ref = model.predict_multi_send(h_ref, ef, edge_hidden=e_ref)
+            for c_val in (0.0, 0.30):
+                v_ref = model.decode_value_from_hidden(h_ref, pm, contempt=c_val)
+                v_fast = fast.eval_values(pf, tf, ef, c_val)
+                ml_f, mf_f, v_f2 = fast.eval_ms(pf, tf, ef, c_val, True)
+                ml_h, mf_h, v_h, h_f = fast.eval_ms_with_hidden(pf, tf, ef, c_val)
+                assert (v_ref - v_fast).abs().max().item() < 1e-5
+                assert (v_ref - v_f2).abs().max().item() < 1e-5
+                assert (v_ref - v_h).abs().max().item() < 1e-5
+                assert (ml_ref - ml_f).abs().max().item() < 1e-5
+                assert (mf_ref - mf_f).abs().max().item() < 1e-5
+                assert (ml_ref - ml_h).abs().max().item() < 1e-5
+                assert (mf_ref - mf_h).abs().max().item() < 1e-5
+                assert (h_ref - h_f).abs().max().item() < 1e-5
+
+    # 2. Save synthetic Gen 5 checkpoint and verify Search + Ensemble parity (with & without flying fleets)
+    ckpt = tmp_path / "gen5_fast_parity.pt"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "model_config": model.config,
+            "feature_version": 2,
+            "has_trained_redir": True,
+            "has_trained_multi_send": True,
+            "use_canonical_d4_trained": True,
+        },
+        ckpt,
+    )
+
+    prev_threads = torch.get_num_threads()
+    try:
+        torch.set_num_threads(2)
+        ag_fast = GalconSearchTransformerAgent(
+            ckpt,
+            use_d4_canonical=True,
+            use_d4_tta=False,
+            time_budget_sec=5.0,
+            use_fast_infer=True,
+        )
+        # Default num_threads=None must NOT clobber caller's thread count
+        assert torch.get_num_threads() == 2
+        assert ag_fast._fast_infer is not None
+
+        ag_ref = GalconSearchTransformerAgent(
+            ckpt,
+            use_d4_canonical=True,
+            use_d4_tta=False,
+            time_budget_sec=5.0,
+            use_fast_infer=False,
+            num_threads=1,
+        )
+        assert torch.get_num_threads() == 1
+        assert ag_ref._fast_infer is None
+
+        # Opening state (no fleets -> redir_enc is None) and midgame state (flying fleets -> redir_enc active)
+        sim_open = GalconSim.create(seed=15001, num_planets=18, width=480.0, height=320.0, symmetric=True, max_ticks=60)
+        sim_mid = sim_open.clone()
+        pids = sorted(sim_mid.planets.keys())
+        p1_home = next(pid for pid in pids if sim_mid.planets[pid].owner == 1)
+        p2_home = next(pid for pid in pids if sim_mid.planets[pid].owner == 2)
+        neu = next(pid for pid in pids if sim_mid.planets[pid].owner == 0)
+        sim_mid.step({1: [SendOrder(p1_home, neu, 40)], 2: [SendOrder(p2_home, neu, 40)]})
+        sim_mid.step({})
+
+        for label, st in (("open", sim_open), ("mid_redir", sim_mid)):
+            best_f, cands_f, scores_f, bsc_f = ag_fast.act_with_search_info(st, 1)
+            best_r, cands_r, scores_r, bsc_r = ag_ref.act_with_search_info(st, 1)
+            assert cands_f == cands_r, f"{label}: candidate mismatch"
+            assert len(scores_f) == len(scores_r) >= 2
+            max_diff = max(abs(a - b) for a, b in zip(scores_f, scores_r))
+            assert max_diff < 1e-4, f"{label}: score diff {max_diff:.3e} >= 1e-4"
+            assert abs(bsc_f - bsc_r) < 1e-4
+            assert best_f == best_r, f"{label}: best action mismatch"
+
+        # Ensemble parity check
+        ens_fast = EnsembleGalconSearchAgent(
+            [ckpt, ckpt],
+            use_d4_canonical=True,
+            use_d4_tta=False,
+            time_budget_sec=5.0,
+            use_fast_infer=True,
+        )
+        ens_ref = EnsembleGalconSearchAgent(
+            [ckpt, ckpt],
+            use_d4_canonical=True,
+            use_d4_tta=False,
+            time_budget_sec=5.0,
+            use_fast_infer=False,
+        )
+        for label, st in (("ens_open", sim_open), ("ens_mid", sim_mid)):
+            eb_f, ec_f, es_f, _ = ens_fast.act_with_search_info(st, 1)
+            eb_r, ec_r, es_r, _ = ens_ref.act_with_search_info(st, 1)
+            assert ec_f == ec_r, f"{label}: candidate mismatch"
+            assert max(abs(a - b) for a, b in zip(es_f, es_r)) < 1e-4
+            assert eb_f == eb_r, f"{label}: best action mismatch"
+
+        # Pure agent parity check
+        pure_f = GalconTransformerAgent(ckpt, use_d4_canonical=True, use_d4_tta=False, use_fast_infer=True)
+        pure_r = GalconTransformerAgent(ckpt, use_d4_canonical=True, use_d4_tta=False, use_fast_infer=False)
+        assert pure_f.act(sim_mid, 1) == pure_r.act(sim_mid, 1)
+    finally:
+        torch.set_num_threads(prev_threads)
+
+
