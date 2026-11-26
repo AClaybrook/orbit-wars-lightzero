@@ -701,3 +701,200 @@ def test_gen12_fast_numpy_features_batched_rollouts_and_cached_ppo():
         _assert_no_dml_fallback(caught)
     assert all(np.isfinite(v) for v in stats.values())
 
+
+def test_gen13_hober_sparring_and_late_soft_kd():
+    """Verify Gen 13 fast Hober input builder, late-game Soft-KD weight, and live Boss-sparring rollout."""
+    from distill_soft_kd import compute_soft_kd_loss
+    from orbit_wars_bot.heuristic_bot import heuristic_moves
+    from orbit_wars_bot.hober_sparring import (
+        FastHoberSparringModel,
+        build_hober_inputs_fast,
+        is_hober_available,
+    )
+    from orbit_wars_bot.planet_transformer import TIMELINE_FEAT_DIM_V2, build_shared_planet_physics
+    from rl_finetune_transformer import collect_episodes_batched_2p
+
+    sim = FastOrbitSim.from_seed(seed=991, num_agents=2, max_steps=110)
+    for _ in range(85):
+        if sim.done:
+            break
+        sim.step([heuristic_moves(sim, 0), heuristic_moves(sim, 1)])
+    obs = sim.to_observation(player=0)
+    sh = build_shared_planet_physics(obs, max_speed=sim.ship_speed)
+    enc = extract_planet_features(obs, player=0, max_speed=sim.ship_speed, feature_version=2, shared_physics=sh)
+    n_p = len(enc.planet_ids)
+
+    x_h, tm_h, bm_h, lm_h, tgm_h = build_hober_inputs_fast(enc, sh)
+    assert x_h.shape == (n_p, 20, 10)
+    assert tm_h.shape == (20,)
+    assert bm_h.shape == (n_p,) and lm_h.shape == (n_p,) and tgm_h.shape == (n_p, n_p)
+    assert np.all(np.isfinite(x_h))
+
+    # Late-game weighting (t > 75.5) in Soft-KD loss
+    pad = pad_encoded_state(enc, MAX_PLANETS)
+    m = PlanetTimelineTransformer(
+        timeline_dim=TIMELINE_FEAT_DIM_V2,
+        d_model=32,
+        n_heads=4,
+        n_layers=1,
+        dim_ff=64,
+        use_aux_future=True,
+        feature_version=2,
+        arch_version=2,
+    )
+    pf = torch.from_numpy(pad["planet_feats"][None])
+    tf = torch.from_numpy(pad["timeline_feats"][None])
+    ef = torch.from_numpy(pad["edge_feats"][None])
+    le = torch.from_numpy(pad["legal_edges"][None])
+    om = torch.from_numpy(pad["owned_mask"][None])
+    pm = torch.from_numpy(pad["pad_mask"][None])
+    sq = torch.zeros((1, MAX_PLANETS, MAX_PLANETS + 1), dtype=torch.float32)
+    sq[..., 0] = 1.0
+    vt = torch.tensor([1.0], dtype=torch.float32)
+    ao = torch.zeros((1, MAX_PLANETS), dtype=torch.long)
+    ash = torch.zeros((1, MAX_PLANETS), dtype=torch.float32)
+    av = pm.clone()
+    loss_l, _ = compute_soft_kd_loss(
+        m, pf, tf, ef, le, om, pm, sq, vt, ao, ash, av, late_weight=1.5, launch_bce_weight=0.25
+    )
+    assert torch.isfinite(loss_l)
+
+    if not is_hober_available():
+        pytest.skip("Local Hober Malloc weights not present")
+
+    hober_m = FastHoberSparringModel()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        probs = hober_m.predict_probs_batch([enc], [sh], rotation_tta=True)[0]
+        res = collect_episodes_batched_2p(
+            m.eval(),
+            None,
+            specs=[(992, 0), (992, 1)],
+            temperature=0.55,
+            max_steps=20,
+            gamma=0.995,
+            gae_lambda=0.98,
+            force_all_in=True,
+            hober_opp=hober_m,
+            hober_tta=False,
+            hober_temperature=0.40,
+        )
+    overflow_warns = [w for w in caught if "overflow" in str(w.message).lower()]
+    assert not overflow_warns, f"Unexpected overflow warnings: {overflow_warns}"
+    assert probs.shape == (n_p, n_p + 1)
+    assert np.allclose(probs.sum(axis=-1), 1.0, atol=1e-3)
+    assert len(res) == 2 and all(st["is_hober"] == 1.0 for _, st in res)
+
+
+def test_ptv35_target_cond_launch_logit_tta_and_factorized_ppo():
+    """Verify PT-v3.5 target-conditioned launch head, decoupled logit-TTA, and exact factorized PPO log-probs."""
+    import math
+    import torch.nn.functional as F
+    from rl_finetune_transformer import factorized_log_probs
+
+    sim = FastOrbitSim.from_seed(seed=993, num_agents=2, max_steps=60)
+    for _ in range(30):
+        if sim.done:
+            break
+        sim.step([[], []])
+    obs = sim.to_observation(player=0)
+    enc = extract_planet_features(obs, player=0, max_speed=sim.ship_speed, feature_version=2)
+    pad = pad_encoded_state(enc, MAX_PLANETS)
+    n_p = len(enc.planet_ids)
+
+    torch.manual_seed(77)
+    base = PlanetTimelineTransformer(
+        timeline_dim=14,
+        d_model=64,
+        n_heads=4,
+        n_layers=2,
+        dim_ff=128,
+        use_aux_future=True,
+        feature_version=2,
+        arch_version=3,
+        target_cond_launch=False,
+    ).eval()
+    pt35 = PlanetTimelineTransformer(
+        timeline_dim=14,
+        d_model=64,
+        n_heads=4,
+        n_layers=2,
+        dim_ff=128,
+        use_aux_future=True,
+        feature_version=2,
+        arch_version=3,
+        target_cond_launch=True,
+    ).eval()
+    incomp = pt35.load_state_dict(base.state_dict(), strict=False)
+    assert all(k.startswith("launch_ctx_head.") for k in incomp.missing_keys)
+    assert not incomp.unexpected_keys
+
+    pf = torch.from_numpy(pad["planet_feats"][None])
+    tf = torch.from_numpy(pad["timeline_feats"][None])
+    ef = torch.from_numpy(pad["edge_feats"][None])
+    le = torch.from_numpy(pad["legal_edges"][None])
+    pm = torch.from_numpy(pad["pad_mask"][None])
+
+    with torch.no_grad():
+        lg_b, _, v_b = base(pf, tf, ef, pm, legal_edges=le, compute_frac=False)
+        lg_35, _, v_35 = pt35(pf, tf, ef, pm, legal_edges=le, compute_frac=False)
+    assert float((lg_b - lg_35).abs().max().item()) < 1e-5
+    assert float((v_b - v_35).abs().max().item()) < 1e-6
+
+    # Verify non-zero launch_ctx_head preserves strict padding invariance
+    with torch.no_grad():
+        for p in pt35.launch_ctx_head.parameters():
+            p.normal_(0.0, 0.25)
+    pf_mut = pf.clone()
+    tf_mut = tf.clone()
+    ef_mut = ef.clone()
+    pf_mut[:, n_p:] = 3.7
+    tf_mut[:, n_p:] = -2.1
+    ef_mut[:, :, n_p:] = 1.9
+    ef_mut[:, n_p:, :] = 1.9
+    with torch.no_grad():
+        lg_orig, _, v_orig = pt35(pf, tf, ef, pm, legal_edges=le, compute_frac=False)
+        lg_mut, _, v_mut = pt35(pf_mut, tf_mut, ef_mut, pm, legal_edges=le, compute_frac=False)
+    assert float((lg_orig[:, :n_p, : n_p + 1] - lg_mut[:, :n_p, : n_p + 1]).abs().max().item()) < 1e-5
+    assert float((v_orig - v_mut).abs().max().item()) < 1e-6
+
+    # Verify decoupled logit-TTA preserves exact p_launch without Jensen suppression
+    # 2 views both with p_launch=0.70, one prefers target 0, the other target 1
+    p_l = 0.70
+    lp_h = math.log(1.0 - p_l)
+    lp_l = math.log(p_l)
+    legal_2 = torch.zeros((n_p, n_p), dtype=torch.bool)
+    legal_2[:, :2] = True
+    t_a = F.log_softmax(torch.tensor([3.0, 0.0]), dim=0)
+    t_b = F.log_softmax(torch.tensor([0.0, 3.0]), dim=0)
+    logits_2 = torch.full((2, n_p, n_p + 1), -1e9)
+    logits_2[:, :, 0] = lp_h
+    logits_2[0, :, 1:3] = lp_l + t_a
+    logits_2[1, :, 1:3] = lp_l + t_b
+    lp_all = F.log_softmax(logits_2, dim=-1)
+    lp_l_rec = torch.logsumexp(lp_all[..., 1:].masked_fill(~legal_2.unsqueeze(0), -1e9), dim=-1)
+    mean_p_l = torch.sigmoid((lp_l_rec - lp_all[..., 0]).mean(dim=0))
+    assert torch.allclose(mean_p_l, torch.full((n_p,), p_l), atol=1e-5)
+
+    # Verify factorized_log_probs normalizes to 1.0 and passes gradients cleanly on DML/CPU
+    act_mask = torch.cat([torch.ones((1, MAX_PLANETS, 1), dtype=torch.bool), le], dim=-1)
+    logq = factorized_log_probs(lg_orig, act_mask, t_l=0.30, t_t=0.40, thr_logit=float(math.log(0.53 / 0.47)))
+    q_sums = logq[:, :n_p].exp().sum(dim=-1)
+    assert torch.allclose(q_sums, torch.ones_like(q_sums), atol=1e-5)
+
+    dev, use_dml = resolve_train_device("dml" if _HAS_DML_GPU else "cpu")
+    pt35_d = pt35.to(dev).train()
+    pf_d, tf_d, ef_d, pm_d, le_d = pf.to(dev), tf.to(dev), ef.to(dev), pm.to(dev), le.to(dev)
+    am_d = act_mask.to(dev)
+    with warnings.catch_warnings(record=True) as caught_dml:
+        warnings.simplefilter("always")
+        lg_d, _, v_d = pt35_d(pf_d, tf_d, ef_d, pm_d, legal_edges=le_d, compute_frac=False)
+        logq_d = factorized_log_probs(lg_d, am_d, t_l=0.30, t_t=0.40, thr_logit=float(math.log(0.53 / 0.47)))
+        loss_d = -logq_d[:, :n_p, 0].mean() + 0.1 * v_d.pow(2).mean()
+        loss_d.backward()
+        assert torch.isfinite(loss_d).item()
+    if use_dml:
+        _assert_no_dml_fallback(caught_dml)
+
+
+

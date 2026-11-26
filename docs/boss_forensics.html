@@ -58,14 +58,14 @@
   <div class="wrap">
     <header>
       <div>
-        <div class="meta">AClaybrook/orbit-wars-lightzero • Boss Forensics Track (Gen 8 → Gen 9 → Gen 12 PT-v2 PPO) • Seeds 200–205 &amp; 24g Gauntlet</div>
-        <h1>#2 Hober Malloc Forensics — Gen 8 → Gen 9 → Gen 12 PT-v2 Breakthrough</h1>
-        <p>Exact tick-by-tick economy, combat waste, and counterfactual policy audit comparing <code>PT-Gen8</code>, <code>PT-Gen9</code>, and <code>4.31M PT-v2 Gen 12 PPO (33.3% vs #2)</code> against Kaggle #2 <code>Hober Malloc (1800.1)</code>.</p>
+        <div class="meta">AClaybrook/orbit-wars-lightzero • Boss Forensics Track (Gen 8 → Gen 13 PT-v3.5) • Seeds 200–205 &amp; 48g Suite</div>
+        <h1>#2 Hober Malloc Forensics — Gen 8 → Gen 13 PT-v3.5 (43.8% vs #2)</h1>
+        <p>Exact tick-by-tick economy, combat waste, and counterfactual policy audit across <code>PT-Gen8</code>, <code>PT-Gen9</code>, <code>PT-v2 Gen 12</code> (<code>33.3%</code>), and <code>4.67M PT-v3.5 Gen 13 KD</code> (<code>21–0–27 / 43.8%</code>) against Kaggle #2 <code>Hober Malloc (1800.1)</code>.</p>
       </div>
       <div class="badges">
         <a href="status_report.html" class="badge">← Benchmark Report</a>
-        <a href="gameplay_viewer.html" class="badge ok">▶ Watch Gen 12 Boss Wins (28 Matches)</a>
-        <span class="badge ok">Gen 12 Single: 8–0–16 (33.3%) vs #2</span>
+        <a href="gameplay_viewer.html" class="badge ok">▶ Watch Gen 13 Boss Wins (33 Matches)</a>
+        <span class="badge ok">Gen 13 Single: 21–0–27 (43.8%) vs #2</span>
       </div>
     </header>
 
@@ -96,7 +96,7 @@
       <button data-tab="curves" class="tab-btn active">1. Economy &amp; Tipping Point (Gen 8 → 9 → 12)</button>
       <button data-tab="policy" class="tab-btn">2. Counterfactual Audit (Gen 8 → 12)</button>
       <button data-tab="combat" class="tab-btn">3. Combat Efficiency, Comets &amp; Tempo</button>
-      <button data-tab="roadmap" class="tab-btn">4. Gen 12 Breakthrough &amp; Gen 13 Roadmap</button>
+      <button data-tab="roadmap" class="tab-btn">4. Gen 13 48g Forensics &amp; PT-v3.5 Fix</button>
     </nav>
 
     <section id="panel-curves" class="panel active">
@@ -210,37 +210,37 @@
 
     <section id="panel-roadmap" class="panel">
       <div class="card">
-        <h2>Gen 12 Verified Milestones &amp; Gen 13 Roadmap to Overtake #2 (50%+)</h2>
+        <h2>Gen 13 48-Game Loss Forensics, PT-v3.5 Fix (43.8% vs #2) &amp; Gen 14 Roadmap</h2>
         <div class="grid-3" style="margin-top:10px;">
-          <div class="box ok-b">
-            <div class="mono ok" style="font-weight:700">GEN 12 • SHIPPED</div>
-            <h3 style="margin-top:4px;">PT-v2 Architecture (4.31M)</h3>
-            <p>14-ch per-timestep orbital timeline + 3-block ResConv1D + GeGLU + decoupled launch/Q·K target head cut <code>val_kl</code> to <code>0.098</code> and jumped Boss WR from <code>0% → 16.7%</code> before RL.</p>
-          </div>
-          <div class="box ok-b">
-            <div class="mono ok" style="font-weight:700">GEN 12 • SHIPPED</div>
-            <h3 style="margin-top:4px;">KL-Anchored DirectML PPO</h3>
-            <p>Wave 1 (<code>2,880</code> 2P games) doubled single-model Boss WR from <code>16.7% → 33.3%</code> (<code>8–0–16</code>, <code>5–0–7</code> on seeds 212–223) and swept Gen 11/10/9 <code>18–2</code> each.</p>
-          </div>
-          <div class="box ok-b">
-            <div class="mono ok" style="font-weight:700">GEN 12 • SHIPPED</div>
-            <h3 style="margin-top:4px;">3× Fast Pipelined RL Stack</h3>
-            <p>Bit-exact <code>6.53×</code> NumPy shared physics + <code>B=8</code> lockstep rollouts + <code>compute_frac=False</code> + cached ref log-probs + async CPU/GPU overlap cut iter time <code>91s → 31.5s</code> and live <code>8× D4</code> to <code>33.3 ms</code>.</p>
-          </div>
-          <div class="box pri-b">
-            <div class="mono pri" style="font-weight:700">GEN 13 • NEXT STEP 1</div>
-            <h3 style="margin-top:4px;">Round 4 Late-Game DAgger (100k+)</h3>
-            <p>Collect 120–160 games of our <code>33.3%</code> <code>gen12_ppo</code> vs #2 with dense late-game sampling (<code>t=65..260</code>) to teach #2's <code>74.4%</code> airborne synchronized logistics.</p>
-          </div>
-          <div class="box pri-b">
-            <div class="mono pri" style="font-weight:700">GEN 13 • NEXT STEP 2</div>
-            <h3 style="margin-top:4px;">Direct #2 Sparring Inside PPO</h3>
-            <p>Mix 10–15% live #2 Hober Malloc games directly into our 3× faster async PPO loop so RL optimizes directly to beat #2 rather than overfitting to self-play clones.</p>
-          </div>
           <div class="box warn-b">
-            <div class="mono warn" style="font-weight:700">GEN 13 • OPTIONAL</div>
-            <h3 style="margin-top:4px;">1-Ply Value-Guided Lookahead</h3>
-            <p>Our single model now runs in just <code>33.3 ms/turn</code> (15× under Kaggle's 500 ms cap), leaving wide headroom for fast 1-ply tactical value rollouts on contested late-game turns.</p>
+            <div class="mono warn" style="font-weight:700">GEN 13 • 48G LOSS AUDIT</div>
+            <h3 style="margin-top:4px;">37,320-Decision Forensics (PT-v3 R6)</h3>
+            <p>On <code>FastOrbitSim</code> (<code>14–0–34</code>), agreement was <code>88.64%</code> overall, but losses diverged early (median <code>t_div = 36.5t</code>, value <code>v = -0.610</code> by tick 45). Of <code>4,238</code> disagreements: <code>43.8%</code> were <code>false_hold</code> (<code>81.0%</code> in the <code>[0.40, 0.53)</code> cliff band, <code>47.0%</code> <code>1–2t</code> lag, rising to <code>54.0%</code> in the divergence window), <code>31.0%</code> <code>false_launch</code> (<code>89.3%</code> in <code>[0.53, 0.65]</code>), and <code>25.2%</code> <code>wrong_target</code>.</p>
+          </div>
+          <div class="box ok-b">
+            <div class="mono ok" style="font-weight:700">GEN 13 • SHIPPED FIX (+10.5%)</div>
+            <h3 style="margin-top:4px;">PT-v3.5 + Decoupled Logit-TTA (4.67M)</h3>
+            <p>Zero-init <code>launch_ctx_head</code> gives the launch gate full target context (<code>[h, h_tgt, e_tgt, max_p_tgt, tgt_ent, best_raw]</code>), while Decoupled Logit-TTA averages launch logits and conditional target log-probs separately across <code>8× D4</code> symmetries (<code>+8.4%</code> causal on unseen <code>300–323</code>), lifting the full 48g Boss Suite from <code>33.3% → 43.8% (21–0–27)</code> and flipping Blunders <strong>Seed 212</strong> &amp; <strong>Seed 203</strong> into wins.</p>
+          </div>
+          <div class="box pri-b">
+            <div class="mono pri" style="font-weight:700">GEN 13 • UNSEEN DOMINANCE</div>
+            <h3 style="margin-top:4px;">90%–100% Over Prior Champions</h3>
+            <p>Promoted <code>planet_transformer_best.pt</code> beat Gen 12 PPO <code>18–0–2 (90.0%)</code> and swept Gen 11 PPO, Gen 10 PPO (<code>20–0–0</code> each), and <code>subham_v14</code> (<code>4–0–0</code>) at <code>53.9–63.0 ms/turn</code> (1-thread CPU). Noted one non-transitive mirror counter vs <code>PT-v3 KD</code> (<code>2–0–18</code> despite <code>+8.4%</code> higher WR vs <code>#2</code>).</p>
+          </div>
+          <div class="box ok-b">
+            <div class="mono ok" style="font-weight:700">GEN 13 • INFRASTRUCTURE</div>
+            <h3 style="margin-top:4px;">DirectML Factorized PPO &amp; Packing</h3>
+            <p>Replaced unsupported <code>log_sigmoid_forward</code> with DirectML-native 2-class <code>F.log_softmax</code> for exact factorized PPO (<code>0</code> fallbacks), added planet-weighted advantage centering &amp; mid-epoch <code>max_kl</code> guard, and packed valid planets before CPU Conv1D (<code>1.51×</code> rollout / <code>1.22×</code> live <code>8× D4</code> speedup).</p>
+          </div>
+          <div class="box pri-b">
+            <div class="mono pri" style="font-weight:700">GEN 14 • OPTION A (~45–60 MIN)</div>
+            <h3 style="margin-top:4px;">Direct RL From #2 Hober Weights</h3>
+            <p>Start a fresh ~45–60 min low-LR KL-anchored PPO pass seeded directly from <code>#2 Hober Malloc</code>'s value/policy weights to push past the remaining ~4-game gap to <code>50%+</code>.</p>
+          </div>
+          <div class="box pri-b">
+            <div class="mono pri" style="font-weight:700">GEN 14 • OPTION B (~45–60 MIN)</div>
+            <h3 style="margin-top:4px;">Diverse-Pool Balanced-Advantage RL</h3>
+            <p>Run low-LR balanced-advantage PPO on <code>PT-v3.5</code> against a mixed pool containing both <code>PT-v3 KD</code> and <code>#2</code> while preserving target accuracy, hardening mirror play and closing the <code>50%+</code> Boss gap.</p>
           </div>
         </div>
       </div>

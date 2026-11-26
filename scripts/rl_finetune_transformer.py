@@ -42,10 +42,12 @@ if str(REPO_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from orbit_wars_bot.dml_utils import (  # noqa: E402
+    apply_d4_batch_gpu,
     build_optimizer,
     cpu_state_dict,
     one_hot_no_scatter,
     resolve_train_device,
+    snap_bucket_batches,
 )
 from orbit_wars_bot.fast_sim import FastOrbitSim  # noqa: E402
 from orbit_wars_bot.features import evaluate_state  # noqa: E402
@@ -65,8 +67,19 @@ from orbit_wars_bot.planet_transformer import (  # noqa: E402
 
 # Cached external opponent callable and model caches per worker process
 _SUBHAM_AGENT: Any = None
+_WORKER_HOBER: Any = None
 _WORKER_POLICY_CACHE: Dict[str, Any] = {}
 _WORKER_OPP_CACHE: Dict[str, PlanetTimelineTransformer] = {}
+_HOBER_SENTINEL = "__HOBER__"
+
+
+def _get_worker_hober():
+    global _WORKER_HOBER
+    if _WORKER_HOBER is None:
+        from orbit_wars_bot.hober_sparring import FastHoberSparringModel
+
+        _WORKER_HOBER = FastHoberSparringModel()
+    return _WORKER_HOBER
 
 
 def _get_subham_agent():
@@ -345,6 +358,21 @@ def collect_episode(
             else:
                 if opponent_kind == "heuristic":
                     actions[pid] = heuristic_moves(sim, pid)
+                elif opponent_kind == "hober":
+                    enc_o = extract_planet_features(
+                        obs_shared,
+                        player=pid,
+                        max_speed=sim.ship_speed,
+                        feature_version=feat_ver,
+                        shared_physics=shared_phys,
+                    )
+                    actions[pid] = _get_worker_hober().act_batch(
+                        [enc_o],
+                        [shared_phys],
+                        rotation_tta=False,
+                        launch_threshold=0.53,
+                        temperature=0.0,
+                    )[0]
                 elif opponent_kind == "subham_v14":
                     try:
                         sub_fn = _get_subham_agent()
@@ -458,6 +486,7 @@ def collect_episode(
             "advantages": np.zeros((0,), np.float32),
             "returns": np.zeros((0,), np.float32),
             "step_ticks": np.zeros((0,), np.int32),
+            "is_hober": np.zeros((0,), bool),
             "aux_owner": np.zeros((0, MAX_PLANETS), np.int64),
             "aux_ships": np.zeros((0, MAX_PLANETS), np.float32),
             "aux_valid": np.zeros((0, MAX_PLANETS), bool),
@@ -504,6 +533,7 @@ def collect_episode(
         "advantages": advs,
         "returns": rets,
         "step_ticks": np.asarray(traj_steps, dtype=np.int32),
+        "is_hober": np.full((T,), opponent_kind == "hober", dtype=bool),
         "aux_owner": np.stack(traj_ao, axis=0),
         "aux_ships": np.stack(traj_ash, axis=0),
         "aux_valid": np.stack(traj_av, axis=0),
@@ -528,6 +558,35 @@ def _configure_worker_threads() -> None:
         pass
 
 
+def factorized_log_probs(
+    logits: torch.Tensor,
+    act_mask: torch.Tensor,
+    t_l: float,
+    t_t: float,
+    thr_logit: float,
+) -> torch.Tensor:
+    """Exact normalized log-probabilities for threshold-centered factorized sampling q_theta(a|s)."""
+    neg_inf = -1e4 if logits.dtype == torch.float16 else -1e9
+    masked = logits.masked_fill(~act_mask, neg_inf)
+    logp_base = F.log_softmax(masked, dim=-1)
+    log_p_h = logp_base[..., 0]
+    tgt_mask = act_mask[..., 1:]
+    has_t = tgt_mask.any(dim=-1, keepdim=True)
+    safe_t = tgt_mask | (~has_t)
+    log_p_l = torch.logsumexp(logp_base[..., 1:].masked_fill(~safe_t, neg_inf), dim=-1)
+    l_z = (log_p_l - log_p_h).clamp(-15.0, 15.0)
+    z_s = ((l_z - float(thr_logit)) / max(1e-3, float(t_l))).clamp(-15.0, 15.0)
+    lp2 = F.log_softmax(torch.stack([torch.zeros_like(z_s), z_s], dim=-1), dim=-1)
+    log_q_h = lp2[..., 0]
+    log_q_l = lp2[..., 1]
+    raw_t = logp_base[..., 1:].masked_fill(~safe_t, neg_inf) / max(1e-3, float(t_t))
+    log_q_t = F.log_softmax(raw_t, dim=-1).masked_fill(~tgt_mask, neg_inf)
+    has_t_1 = has_t.squeeze(-1)
+    log_q_h = torch.where(has_t_1, log_q_h, torch.zeros_like(log_q_h))
+    log_q_l = torch.where(has_t_1, log_q_l, torch.full_like(log_q_l, neg_inf))
+    return torch.cat([log_q_h.unsqueeze(-1), log_q_l.unsqueeze(-1) + log_q_t], dim=-1)
+
+
 @torch.no_grad()
 def _batched_policy_steps(
     model: PlanetTimelineTransformer,
@@ -540,6 +599,9 @@ def _batched_policy_steps(
     launch_threshold: float = 0.50,
     force_all_in: bool = False,
     rngs: Sequence[np.random.Generator],
+    factorized_sample: bool = False,
+    target_temperature: float = 0.30,
+    exact_factorized_ppo: bool = False,
 ) -> List[Tuple[List[List[float]], np.ndarray, np.ndarray, float]]:
     """Run one batched CPU forward pass over ``len(encs)`` active games simultaneously."""
     b_cnt = len(encs)
@@ -577,8 +639,14 @@ def _batched_policy_steps(
     hold_ok = torch.ones((b_cnt, max_n, 1), dtype=torch.bool)
     mask = torch.cat([hold_ok, le_t], dim=-1)
     logits = logits.masked_fill(~mask, -1e9)
-    logp = F.log_softmax(logits, dim=-1).numpy()
-    if sample and temperature > 1e-4:
+    thr_logit = float(np.log(max(1e-5, launch_threshold) / max(1e-5, 1.0 - launch_threshold)))
+    t_l = max(1e-3, float(temperature))
+    t_t = max(1e-3, float(target_temperature))
+    if exact_factorized_ppo and sample and factorized_sample:
+        logp = factorized_log_probs(logits, mask, t_l, t_t, thr_logit).numpy()
+    else:
+        logp = F.log_softmax(logits, dim=-1).numpy()
+    if sample and (not factorized_sample) and temperature > 1e-4:
         sprobs = F.softmax(logits / temperature, dim=-1).numpy()
     else:
         sprobs = F.softmax(logits, dim=-1).numpy()
@@ -598,7 +666,28 @@ def _batched_policy_steps(
         for i in range(n):
             if not e.owned_mask[i] or not np.any(e.legal_edges[i]):
                 continue
-            if sample:
+            if sample and factorized_sample:
+                # Decoupled Launch vs Target sampling centered on launch_threshold:
+                # eliminates multi-target HOLD collapse (sum p_j^(1/T) << 1) in PT-v2!
+                p_l_raw = float(np.clip(1.0 - sprobs[b, i, 0], 1e-6, 1.0 - 1e-6))
+                l_z = float(np.log(p_l_raw / (1.0 - p_l_raw)))
+                p_l_s = 1.0 if (i in exp_set) else float(1.0 / (1.0 + np.exp(-np.clip((l_z - thr_logit) / t_l, -20.0, 20.0))))
+                if rng_b.random() < p_l_s:
+                    t_raw = sprobs[b, i, 1 : n + 1].astype(np.float64)
+                    t_lgt = np.where(e.legal_edges[i], np.log(np.clip(t_raw, 1e-9, 1.0)) / t_t, -1e9)
+                    t_lgt -= t_lgt.max()
+                    tw = np.where(e.legal_edges[i], np.exp(t_lgt), 0.0)
+                    tw_sum = float(tw.sum())
+                    if tw_sum <= 0.0:
+                        cls = 0
+                    else:
+                        tw /= tw_sum
+                        cls = 1 + int(np.searchsorted(np.cumsum(tw), rng_b.random()))
+                        if cls > n:
+                            cls = n
+                else:
+                    cls = 0
+            elif sample:
                 p_row = sprobs[b, i, : n + 1].astype(np.float64)
                 if i in exp_set and p_row[1:].sum() > 1e-9:
                     p_row[0] = 0.0
@@ -626,7 +715,7 @@ def _batched_policy_steps(
 
 def collect_episodes_batched_2p(
     policy: PlanetTimelineTransformer,
-    opp_model: PlanetTimelineTransformer,
+    opp_model: Optional[PlanetTimelineTransformer],
     *,
     specs: Sequence[Tuple[int, int]],  # list of (seed, hero_slot)
     temperature: float = 0.80,
@@ -639,12 +728,21 @@ def collect_episodes_batched_2p(
     rollout_d4: bool = True,
     future_horizon: int = 10,
     opp_temperature: float = 0.0,
+    hober_opp: Optional[Any] = None,
+    hober_tta: bool = False,
+    hober_temperature: float = 0.0,
+    hober_launch_threshold: float = 0.53,
+    launch_threshold: float = 0.50,
+    factorized_sample: bool = False,
+    target_temperature: float = 0.30,
+    exact_factorized_ppo: bool = False,
 ) -> List[Tuple[Dict[str, np.ndarray], Dict[str, float]]]:
-    """Run ``len(specs)`` 2P neural-pool games in lockstep with batched forward passes + shared physics."""
+    """Run ``len(specs)`` 2P neural-pool or live `#2 Hober Malloc` games in lockstep with shared physics."""
     m = len(specs)
     if m == 0:
         return []
-    feat_ver = max(int(getattr(policy, "feature_version", 1)), int(getattr(opp_model, "feature_version", 1)))
+    opp_fv = int(getattr(opp_model, "feature_version", 1)) if opp_model is not None else 1
+    feat_ver = max(int(getattr(policy, "feature_version", 1)), opp_fv)
     tl_dim_pol = int(getattr(policy, "timeline_dim", 8))
 
     rngs = [np.random.default_rng(s) for s, _ in specs]
@@ -652,6 +750,7 @@ def collect_episodes_batched_2p(
     hero_slots = [int(sl) for _, sl in specs]
     k_rots = [int(rngs[i].integers(0, 4)) if rollout_d4 else 0 for i in range(m)]
     flip_xs = [bool(rngs[i].integers(0, 2)) if rollout_d4 else False for i in range(m)]
+    opp_k_rots = [int(rngs[i].integers(0, 4)) for i in range(m)]
 
     traj_pf: List[List[np.ndarray]] = [[] for _ in range(m)]
     traj_tf: List[List[np.ndarray]] = [[] for _ in range(m)]
@@ -679,9 +778,11 @@ def collect_episodes_batched_2p(
         active = [i for i in range(m) if not done_flags[i]]
         h_encs: List[EncodedPlanetState] = []
         o_encs: List[EncodedPlanetState] = []
+        active_sh_phys: List[Dict[str, Any]] = []
         h_has_owned: List[bool] = []
         act_kr: List[int] = []
         act_fx: List[bool] = []
+        act_okr: List[int] = []
         act_rngs: List[np.random.Generator] = []
 
         for idx in active:
@@ -698,9 +799,11 @@ def collect_episodes_batched_2p(
             )
             h_encs.append(eh)
             o_encs.append(eo)
+            active_sh_phys.append(sh_phys)
             h_has_owned.append(bool(np.any(eh.owned_mask)))
             act_kr.append(k_rots[idx])
             act_fx.append(flip_xs[idx])
+            act_okr.append(opp_k_rots[idx])
             act_rngs.append(rngs[idx])
 
         h_out = _batched_policy_steps(
@@ -710,26 +813,45 @@ def collect_episodes_batched_2p(
             flip_xs=act_fx,
             sample=True,
             temperature=temperature,
+            launch_threshold=launch_threshold,
             force_all_in=force_all_in,
             rngs=act_rngs,
+            factorized_sample=factorized_sample,
+            target_temperature=target_temperature,
+            exact_factorized_ppo=exact_factorized_ppo,
         )
-        o_out = _batched_policy_steps(
-            opp_model,
-            o_encs,
-            k_rots=zero_kr[: len(active)],
-            flip_xs=zero_fx[: len(active)],
-            sample=opp_sample,
-            temperature=opp_temp,
-            force_all_in=force_all_in,
-            rngs=act_rngs,
-        )
+        if hober_opp is not None:
+            o_moves_list = hober_opp.act_batch(
+                o_encs,
+                active_sh_phys,
+                rotation_tta=hober_tta,
+                launch_threshold=hober_launch_threshold,
+                temperature=hober_temperature,
+                k_rots=act_okr,
+                rngs=act_rngs,
+            )
+        else:
+            o_out = _batched_policy_steps(
+                opp_model if opp_model is not None else policy,
+                o_encs,
+                k_rots=zero_kr[: len(active)],
+                flip_xs=zero_fx[: len(active)],
+                sample=opp_sample,
+                temperature=opp_temp,
+                launch_threshold=launch_threshold,
+                force_all_in=force_all_in,
+                rngs=act_rngs,
+                factorized_sample=factorized_sample,
+                target_temperature=target_temperature,
+            )
+            o_moves_list = [o_out[k][0] for k in range(len(active))]
 
         for k, idx in enumerate(active):
             sim = sims[idx]
             hp = hero_slots[idx]
             eh = h_encs[k]
             moves_h, act_cls, old_lp, val_h = h_out[k]
-            moves_o = o_out[k][0]
+            moves_o = o_moves_list[k]
             recorded = h_has_owned[k]
             if recorded:
                 padded = pad_encoded_state(eh, MAX_PLANETS)
@@ -812,6 +934,7 @@ def collect_episodes_batched_2p(
             "term_rew": float(term_rew),
             "num_players": 2.0,
             "hero_slot": float(hp),
+            "is_hober": 1.0 if hober_opp is not None else 0.0,
         }
         if t_len == 0:
             empty = {
@@ -826,6 +949,7 @@ def collect_episodes_batched_2p(
                 "advantages": np.zeros((0,), np.float32),
                 "returns": np.zeros((0,), np.float32),
                 "step_ticks": np.zeros((0,), np.int32),
+                "is_hober": np.zeros((0,), bool),
                 "aux_owner": np.zeros((0, MAX_PLANETS), np.int64),
                 "aux_ships": np.zeros((0, MAX_PLANETS), np.float32),
                 "aux_valid": np.zeros((0, MAX_PLANETS), bool),
@@ -869,6 +993,7 @@ def collect_episodes_batched_2p(
             "advantages": advs,
             "returns": rets,
             "step_ticks": np.asarray(steps_i, dtype=np.int32),
+            "is_hober": np.full((t_len,), hober_opp is not None, dtype=bool),
             "aux_owner": np.stack(traj_ao, axis=0),
             "aux_ships": np.stack(traj_ash, axis=0),
             "aux_valid": np.stack(traj_av, axis=0),
@@ -878,9 +1003,9 @@ def collect_episodes_batched_2p(
 
 
 def _worker_collect_batch(
-    task: Tuple[str, int, Optional[str], List[Tuple[int, int]], float, int, float, bool, bool, bool, float]
+    task: Tuple[Any, ...]
 ) -> List[Tuple[Dict[str, np.ndarray], Dict[str, float]]]:
-    """Persistent worker entry point running a batched lockstep chunk of 2P pool games."""
+    """Persistent worker entry point running a batched lockstep chunk of 2P pool or `#2 Hober` games."""
     _configure_worker_threads()
     (
         policy_path,
@@ -894,20 +1019,43 @@ def _worker_collect_batch(
         force_all_in,
         rollout_d4,
         opp_temperature,
-    ) = task
+    ) = task[:11]
+    gamma = float(task[11]) if len(task) > 11 else 0.99
+    gae_lambda = float(task[12]) if len(task) > 12 else 0.95
+    hober_tta = bool(task[13]) if len(task) > 13 else False
+    hober_temp = float(task[14]) if len(task) > 14 else 0.0
+    launch_threshold = float(task[15]) if len(task) > 15 else 0.50
+    factorized_sample = bool(task[16]) if len(task) > 16 else False
+    target_temperature = float(task[17]) if len(task) > 17 else 0.30
+    exact_factorized_ppo = bool(task[18]) if len(task) > 18 else False
+
     policy = _get_worker_policy(policy_path, policy_version)
-    opp_model = _get_worker_opp(opp_path)
+    if opp_path == _HOBER_SENTINEL:
+        hober_opp = _get_worker_hober()
+        opp_model = None
+    else:
+        hober_opp = None
+        opp_model = _get_worker_opp(opp_path)
     return collect_episodes_batched_2p(
         policy,
-        opp_model if opp_model is not None else policy,
+        opp_model if opp_model is not None else (None if hober_opp is not None else policy),
         specs=specs,
         temperature=temperature,
         max_steps=max_steps,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
         shaping_coef=shaping_coef,
         early_reset=early_reset,
         force_all_in=force_all_in,
         rollout_d4=rollout_d4,
         opp_temperature=opp_temperature,
+        hober_opp=hober_opp,
+        hober_tta=hober_tta,
+        hober_temperature=hober_temp,
+        launch_threshold=launch_threshold,
+        factorized_sample=factorized_sample,
+        target_temperature=target_temperature,
+        exact_factorized_ppo=exact_factorized_ppo,
     )
 
 
@@ -969,7 +1117,7 @@ def _worker_collect_episode(
 
 def _play_deterministic_eval_game(
     policy: PlanetTimelineTransformer,
-    opp_model: PlanetTimelineTransformer,
+    opp_model: Optional[PlanetTimelineTransformer],
     *,
     num_players: int,
     seed: int,
@@ -977,9 +1125,13 @@ def _play_deterministic_eval_game(
     max_steps: int,
     force_all_in: bool,
     launch_threshold: float = 0.50,
+    hober_opp: Optional[Any] = None,
+    hober_tta: bool = True,
+    decoupled_logit_tta: bool = False,
 ) -> Tuple[float, float]:
     sim = FastOrbitSim.from_seed(seed=seed, num_agents=num_players, max_steps=max_steps)
-    feat_ver = max(int(getattr(policy, "feature_version", 1)), int(getattr(opp_model, "feature_version", 1)))
+    opp_fv = int(getattr(opp_model, "feature_version", 1)) if opp_model is not None else 1
+    feat_ver = max(int(getattr(policy, "feature_version", 1)), opp_fv)
     last_alive = [0] * num_players
     while not sim.done:
         acts = []
@@ -993,14 +1145,78 @@ def _play_deterministic_eval_game(
                 feature_version=feat_ver,
                 shared_physics=shared_phys,
             )
-            m = policy if pid == hero_slot else opp_model
-            mv, _, _, _ = _policy_step(
-                m,
-                enc,
-                sample=False,
-                launch_threshold=launch_threshold,
-                force_all_in=force_all_in,
-            )
+            if pid == hero_slot:
+                if hober_opp is not None and hober_tta:
+                    # Fair 4x rotational TTA for Hero when evaluated against 4x-TTA #2 Hober
+                    n_p = len(enc.planet_ids)
+                    if n_p == 0 or not np.any(enc.owned_mask):
+                        mv = []
+                    else:
+                        tl_d = int(getattr(policy, "timeline_dim", 8))
+                        tf_raw = enc.timeline_feats[..., :tl_d]
+                        pf_4 = np.stack([apply_d4_planet_feats(enc.planet_feats, k_rot=k, flip_x=False) for k in range(4)], 0)
+                        tf_4 = np.stack([apply_d4_timeline_feats(tf_raw, k_rot=k, flip_x=False) for k in range(4)], 0)
+                        ef_1 = enc.edge_feats[None]
+                        pm_4 = np.ones((4, n_p), dtype=bool)
+                        le_t = torch.from_numpy(enc.legal_edges)
+                        with torch.no_grad():
+                            lg, _, _ = policy(
+                                torch.from_numpy(pf_4),
+                                torch.from_numpy(tf_4),
+                                torch.from_numpy(ef_1),
+                                torch.from_numpy(pm_4),
+                                legal_edges=le_t.unsqueeze(0).expand(4, n_p, n_p),
+                                compute_frac=False,
+                            )
+                            mk = torch.cat([torch.ones((n_p, 1), dtype=torch.bool), le_t], dim=-1)
+                            lg_m = lg.masked_fill(~mk.unsqueeze(0), -1e9)
+                            if decoupled_logit_tta and getattr(policy, "arch_version", 1) >= 2:
+                                lp_all = F.log_softmax(lg_m, dim=-1)
+                                lp_h = lp_all[..., 0]
+                                has_l = le_t.any(dim=-1)
+                                safe_l = le_t | (~has_l.unsqueeze(-1))
+                                lp_l = torch.logsumexp(lp_all[..., 1:].masked_fill(~safe_l.unsqueeze(0), -1e9), dim=-1)
+                                mean_p_l = torch.where(has_l, torch.sigmoid((lp_l - lp_h).clamp(-15.0, 15.0).mean(dim=0)), torch.zeros_like(has_l, dtype=torch.float32))
+                                cond_tgt = (lp_all[..., 1:] - lp_l.unsqueeze(-1)).masked_fill(~safe_l.unsqueeze(0), -1e9)
+                                mean_p_t = F.softmax(cond_tgt.mean(dim=0).masked_fill(~safe_l, -1e9), dim=-1).masked_fill(~le_t, 0.0)
+                                pr4 = torch.cat([(1.0 - mean_p_l).unsqueeze(-1), mean_p_l.unsqueeze(-1) * mean_p_t], dim=-1).numpy()
+                            else:
+                                pr4 = F.softmax(lg_m, dim=-1).mean(dim=0).numpy()
+                        act_cls = np.zeros((MAX_PLANETS,), dtype=np.int64)
+                        exp_set = set(enc.expiring_comet_indices)
+                        for i_p in range(n_p):
+                            if not enc.owned_mask[i_p] or not np.any(enc.legal_edges[i_p]):
+                                continue
+                            if (1.0 - float(pr4[i_p, 0])) >= launch_threshold or (i_p in exp_set):
+                                act_cls[i_p] = 1 + int(np.argmax(pr4[i_p, 1 : n_p + 1]))
+                        mv = _decode_sampled_actions(
+                            enc, act_cls, np.ones((n_p, n_p), dtype=np.float32), force_all_in=force_all_in
+                        )
+                else:
+                    mv, _, _, _ = _policy_step(
+                        policy,
+                        enc,
+                        sample=False,
+                        launch_threshold=launch_threshold,
+                        force_all_in=force_all_in,
+                    )
+            elif hober_opp is not None:
+                mv = hober_opp.act_batch(
+                    [enc],
+                    [shared_phys],
+                    rotation_tta=hober_tta,
+                    launch_threshold=0.53,
+                    temperature=0.0,
+                )[0]
+            else:
+                assert opp_model is not None
+                mv, _, _, _ = _policy_step(
+                    opp_model,
+                    enc,
+                    sample=False,
+                    launch_threshold=launch_threshold,
+                    force_all_in=force_all_in,
+                )
             acts.append(mv)
         sim.step(acts)
         if num_players > 2:
@@ -1025,14 +1241,23 @@ def _worker_eval_game(
     task: Tuple[Any, ...]
 ) -> Tuple[str, int, float, float]:
     _configure_worker_threads()
-    if len(task) >= 10:
+    if len(task) >= 11:
+        policy_path, policy_version, opp_path, opp_tag, num_players, seed, hero_slot, max_steps, force_all_in, launch_threshold, decoupled_logit_tta = task[:11]
+    elif len(task) >= 10:
         policy_path, policy_version, opp_path, opp_tag, num_players, seed, hero_slot, max_steps, force_all_in, launch_threshold = task[:10]
+        decoupled_logit_tta = False
     else:
         policy_path, policy_version, opp_path, opp_tag, num_players, seed, hero_slot, max_steps, force_all_in = task
         launch_threshold = 0.50
+        decoupled_logit_tta = False
     policy = _get_worker_policy(policy_path, policy_version)
-    opp_model = _get_worker_opp(opp_path)
-    assert opp_model is not None
+    if opp_path == _HOBER_SENTINEL:
+        hober_opp = _get_worker_hober()
+        opp_model = None
+    else:
+        hober_opp = None
+        opp_model = _get_worker_opp(opp_path)
+        assert opp_model is not None
     won, rk = _play_deterministic_eval_game(
         policy,
         opp_model,
@@ -1042,6 +1267,9 @@ def _worker_eval_game(
         max_steps=max_steps,
         force_all_in=force_all_in,
         launch_threshold=launch_threshold,
+        hober_opp=hober_opp,
+        hober_tta=True,
+        decoupled_logit_tta=bool(decoupled_logit_tta),
     )
     return opp_tag, num_players, won, rk
 
@@ -1103,7 +1331,7 @@ def _eval_vs_anchors_parallel(
     cpu_policy: PlanetTimelineTransformer,
     policy_path: Optional[str],
     policy_version: int,
-    eval_anchors: Sequence[Tuple[str, str, PlanetTimelineTransformer]],
+    eval_anchors: Sequence[Tuple[str, str, Optional[PlanetTimelineTransformer]]],
     pool_exec: Optional[ProcessPoolExecutor],
     seed_base: int,
     eval_pairs: int,
@@ -1111,9 +1339,13 @@ def _eval_vs_anchors_parallel(
     max_steps: int,
     force_all_in: bool,
     launch_threshold: float = 0.50,
+    hober_eval_pairs: int = 0,
+    hober_eval_seed_base: int = 500,
+    decoupled_logit_tta: bool = False,
 ) -> Dict[str, Any]:
-    """Run paired-seed deterministic 2P (and optional 4P) validation across anchor models."""
+    """Run paired-seed deterministic 2P (and optional 4P + live `#2 Hober`) validation."""
     results: List[Tuple[str, int, float, float]] = []
+    want_hober = hober_eval_pairs > 0
     if pool_exec is not None and policy_path is not None:
         tasks = []
         for a_idx, (tag, opp_path, _) in enumerate(eval_anchors):
@@ -1121,6 +1353,11 @@ def _eval_vs_anchors_parallel(
                 s = seed_base + a_idx * 100 + g
                 tasks.append((policy_path, policy_version, opp_path, tag, 2, s, 0, max_steps, force_all_in, launch_threshold))
                 tasks.append((policy_path, policy_version, opp_path, tag, 2, s, 1, max_steps, force_all_in, launch_threshold))
+        if want_hober:
+            for g in range(hober_eval_pairs):
+                s = hober_eval_seed_base + g
+                tasks.append((policy_path, policy_version, _HOBER_SENTINEL, "hober", 2, s, 0, max(360, max_steps), force_all_in, launch_threshold, decoupled_logit_tta))
+                tasks.append((policy_path, policy_version, _HOBER_SENTINEL, "hober", 2, s, 1, max(360, max_steps), force_all_in, launch_threshold, decoupled_logit_tta))
         if not two_player_only and eval_anchors:
             tag0, opp_path0, _ = eval_anchors[0]
             for g in range(4):
@@ -1129,6 +1366,7 @@ def _eval_vs_anchors_parallel(
     else:
         cpu_policy.eval()
         for a_idx, (tag, _, opp_m) in enumerate(eval_anchors):
+            assert opp_m is not None
             opp_m.eval()
             for g in range(eval_pairs):
                 s = seed_base + a_idx * 100 + g
@@ -1137,8 +1375,28 @@ def _eval_vs_anchors_parallel(
                         cpu_policy, opp_m, num_players=2, seed=s, hero_slot=seat, max_steps=max_steps, force_all_in=force_all_in, launch_threshold=launch_threshold
                     )
                     results.append((tag, 2, w, rk))
+        if want_hober:
+            hober_local = _get_worker_hober()
+            for g in range(hober_eval_pairs):
+                s = hober_eval_seed_base + g
+                for seat in (0, 1):
+                    w, rk = _play_deterministic_eval_game(
+                        cpu_policy,
+                        None,
+                        num_players=2,
+                        seed=s,
+                        hero_slot=seat,
+                        max_steps=max(360, max_steps),
+                        force_all_in=force_all_in,
+                        launch_threshold=launch_threshold,
+                        hober_opp=hober_local,
+                        hober_tta=True,
+                        decoupled_logit_tta=decoupled_logit_tta,
+                    )
+                    results.append(("hober", 2, w, rk))
         if not two_player_only and eval_anchors:
             tag0, _, opp_m0 = eval_anchors[0]
+            assert opp_m0 is not None
             for g in range(4):
                 w, rk = _play_deterministic_eval_game(
                     cpu_policy, opp_m0, num_players=4, seed=seed_base + 500 + g, hero_slot=g % 4, max_steps=max_steps, force_all_in=force_all_in, launch_threshold=launch_threshold
@@ -1146,6 +1404,8 @@ def _eval_vs_anchors_parallel(
                 results.append((tag0, 4, w, rk))
 
     per_tag_2p: Dict[str, List[float]] = {tag: [] for tag, _, _ in eval_anchors}
+    if want_hober:
+        per_tag_2p["hober"] = []
     wr4_list: List[float] = []
     rk4_list: List[float] = []
     for tag, n_pl, won, rk in results:
@@ -1156,7 +1416,13 @@ def _eval_vs_anchors_parallel(
             rk4_list.append(rk)
 
     per_tag_wr = {tag: (float(np.mean(vals)) if vals else 0.0) for tag, vals in per_tag_2p.items()}
-    avg_2p = float(np.mean(list(per_tag_wr.values()))) if per_tag_wr else 0.0
+    anchor_only = [v for k, v in per_tag_wr.items() if k != "hober"]
+    avg_anchors = float(np.mean(anchor_only)) if anchor_only else 0.0
+    if want_hober and "hober" in per_tag_wr:
+        hober_wr = per_tag_wr["hober"]
+        avg_2p = 0.70 * hober_wr + 0.30 * avg_anchors if anchor_only else hober_wr
+    else:
+        avg_2p = float(np.mean(list(per_tag_wr.values()))) if per_tag_wr else 0.0
     wr4 = float(np.mean(wr4_list)) if wr4_list else 0.0
     rk4 = float(np.mean(rk4_list)) if rk4_list else 0.0
     score = avg_2p if two_player_only else (0.55 * avg_2p + 0.45 * wr4)
@@ -1221,8 +1487,15 @@ def ppo_update(
     device: Optional[torch.device] = None,
     use_dml: bool = False,
     augment_d4: bool = True,
+    value_only: bool = False,
+    max_kl: float = 0.0,
+    detach_value: bool = False,
+    exact_factorized_ppo: bool = False,
+    temperature: float = 0.75,
+    target_temperature: float = 0.30,
+    launch_threshold: float = 0.50,
 ) -> Dict[str, float]:
-    """Perform clipped per-planet PPO + Dual-KL + Aux world-model updates."""
+    """Perform clipped per-planet PPO + Dual-KL + Aux world-model updates (or value-head warmup)."""
     n = len(rollout["returns"])
     if n == 0:
         return {
@@ -1236,7 +1509,33 @@ def ppo_update(
         }
 
     adv = rollout["advantages"].copy()
-    adv = (adv - adv.mean()) / (adv.std() + 1e-6)
+    valid_cnts = (rollout["owned_mask"] & rollout["legal_edges"].any(axis=-1)).sum(axis=1).astype(np.float64)
+
+    def _norm_adv_planet_weighted(g_adv: np.ndarray, g_w: np.ndarray) -> np.ndarray:
+        w_sum = float(g_w.sum())
+        if w_sum > 0.0:
+            mean_w = float((g_adv * g_w).sum() / w_sum)
+            var_w = float((((g_adv - mean_w) ** 2) * g_w).sum() / w_sum)
+            std_w = float(np.sqrt(max(var_w, 1e-12)))
+            out = np.clip((g_adv - mean_w) / (std_w + 1e-6), -2.5, 2.5)
+            # Re-center after clipping so planet-weighted mean stays identically 0
+            out = out - float((out * g_w).sum() / w_sum)
+            return out.astype(np.float32)
+        return np.clip((g_adv - g_adv.mean()) / (g_adv.std() + 1e-6), -2.5, 2.5).astype(np.float32)
+
+    is_hober_arr = rollout.get("is_hober")
+    if (
+        is_hober_arr is not None
+        and len(is_hober_arr) == n
+        and int(np.sum(is_hober_arr)) >= 16
+        and int(np.sum(~is_hober_arr)) >= 16
+    ):
+        # GRPO-style opponent-group planet-weighted advantage normalization: keeps live Boss wins
+        # strongly positive with zero planet-count bias toward majority-class HOLD.
+        for grp in (is_hober_arr, ~is_hober_arr):
+            adv[grp] = _norm_adv_planet_weighted(adv[grp], valid_cnts[grp])
+    else:
+        adv = _norm_adv_planet_weighted(adv, valid_cnts)
     step_ticks = rollout.get("step_ticks")
     if step_ticks is not None and midgame_adv_weight != 1.0:
         mid_mask = (step_ticks >= 25) & (step_ticks <= 75)
@@ -1247,12 +1546,18 @@ def ppo_update(
     train_dev = device if device is not None else next(policy.parameters()).device
     is_dml_dev = bool(use_dml or (train_dev.type == "privateuseone"))
     has_aux_data = ("aux_owner" in rollout) and ("aux_ships" in rollout) and ("aux_valid" in rollout)
-    want_aux = bool(aux_coef > 0.0 and getattr(policy, "aux_future_head", None) is not None and has_aux_data)
+    want_aux = bool((not value_only) and aux_coef > 0.0 and getattr(policy, "aux_future_head", None) is not None and has_aux_data)
 
     policy.train()
     anchor.eval()
     if fixed_anchor is not None:
         fixed_anchor.eval()
+
+    saved_req_grad: Optional[List[Tuple[nn.Parameter, bool]]] = None
+    if value_only:
+        saved_req_grad = [(p, p.requires_grad) for p in policy.parameters()]
+        for name, p in policy.named_parameters():
+            p.requires_grad_(name.startswith("val_attn.") or name.startswith("val_head."))
 
     loss_acc = torch.zeros((), device=train_dev)
     kl_acc = torch.zeros((), device=train_dev)
@@ -1269,180 +1574,226 @@ def ppo_update(
     # recomputing both 4.3M reference networks on every PPO epoch (3x -> 1x).
     tl_dim_pol = int(getattr(policy, "timeline_dim", 8))
     max_p_total = int(rollout["pad_mask"].shape[1])
-    want_fixed = bool(fixed_anchor is not None and anchor_kl_coef > 0.0)
-    use_ref_cache = bool((not augment_d4) and ppo_epochs > 1)
+    want_fixed = bool((not value_only) and fixed_anchor is not None and anchor_kl_coef > 0.0)
+    use_ref_cache = bool((not value_only) and (not augment_d4) and ppo_epochs > 1)
     ref_logp_cache: Optional[torch.Tensor] = None
     fixed_logp_cache: Optional[torch.Tensor] = None
+    p_counts = rollout["pad_mask"].sum(axis=1).astype(np.int32)
     if use_ref_cache:
         ref_logp_cache = torch.zeros((n, max_p_total, max_p_total + 1), dtype=torch.float16)
         if want_fixed:
             fixed_logp_cache = torch.zeros((n, max_p_total, max_p_total + 1), dtype=torch.float16)
         ref_bs = max(batch_size, 512)
+        ref_batches = snap_bucket_batches(p_counts, ref_bs, buckets=(24, 32, 44), max_cap=max_p_total, shuffle=False)
         with torch.no_grad():
-            for s in range(0, n, ref_bs):
-                e = min(n, s + ref_bs)
-                pm_c = rollout["pad_mask"][s:e]
-                cn = max(2, int(pm_c.sum(axis=1).max()))
-                pf_c = torch.from_numpy(np.ascontiguousarray(rollout["planet_feats"][s:e, :cn], dtype=np.float32)).to(train_dev)
+            for idx_c, cn in ref_batches:
+                pm_c = rollout["pad_mask"][idx_c]
+                pf_c = torch.from_numpy(np.ascontiguousarray(rollout["planet_feats"][idx_c, :cn])).to(train_dev).float()
                 tf_c = torch.from_numpy(
-                    np.ascontiguousarray(rollout["timeline_feats"][s:e, :cn, :, :tl_dim_pol], dtype=np.float32)
-                ).to(train_dev)
-                ef_c = torch.from_numpy(np.ascontiguousarray(rollout["edge_feats"][s:e, :cn, :cn], dtype=np.float32)).to(train_dev)
-                le_c = torch.from_numpy(np.ascontiguousarray(rollout["legal_edges"][s:e, :cn, :cn])).to(train_dev)
+                    np.ascontiguousarray(rollout["timeline_feats"][idx_c, :cn, :, :tl_dim_pol])
+                ).to(train_dev).float()
+                ef_c = torch.from_numpy(np.ascontiguousarray(rollout["edge_feats"][idx_c, :cn, :cn])).to(train_dev).float()
+                le_c = torch.from_numpy(np.ascontiguousarray(rollout["legal_edges"][idx_c, :cn, :cn])).to(train_dev)
                 pm_ct = torch.from_numpy(np.ascontiguousarray(pm_c[:, :cn])).to(train_dev)
-                hold_c = torch.ones((e - s, cn, 1), dtype=torch.bool, device=train_dev)
+                hold_c = torch.ones((len(idx_c), cn, 1), dtype=torch.bool, device=train_dev)
                 mask_c = torch.cat([hold_c, le_c], dim=-1)
 
                 r_log, _, _ = anchor(pf_c, tf_c, ef_c, pm_ct, legal_edges=le_c, compute_frac=False)
                 r_lp = F.log_softmax(r_log.masked_fill(~mask_c, -1e9), dim=-1)
-                ref_logp_cache[s:e, :cn, : cn + 1] = r_lp.clamp(-30.0, 0.0).cpu().to(torch.float16)
+                idx_t = torch.from_numpy(idx_c)
+                ref_logp_cache[idx_t, :cn, : cn + 1] = r_lp.clamp(-30.0, 0.0).to(torch.float16).cpu()
 
                 if fixed_logp_cache is not None and fixed_anchor is not None:
                     f_log, _, _ = fixed_anchor(pf_c, tf_c, ef_c, pm_ct, legal_edges=le_c, compute_frac=False)
                     f_lp = F.log_softmax(f_log.masked_fill(~mask_c, -1e9), dim=-1)
-                    fixed_logp_cache[s:e, :cn, : cn + 1] = f_lp.clamp(-30.0, 0.0).cpu().to(torch.float16)
+                    fixed_logp_cache[idx_t, :cn, : cn + 1] = f_lp.clamp(-30.0, 0.0).to(torch.float16).cpu()
 
-    for _ in range(ppo_epochs):
-        perm = np.random.permutation(n)
-        for start in range(0, n, batch_size):
-            idx = perm[start : start + batch_size]
-            pm_full = rollout["pad_mask"][idx]
-            max_n = max(2, int(pm_full.sum(axis=1).max()))
-
-            pf_np = np.asarray(rollout["planet_feats"][idx, :max_n], dtype=np.float32)
-            tf_np = np.asarray(rollout["timeline_feats"][idx, :max_n, :, :tl_dim_pol], dtype=np.float32)
-            if augment_d4:
-                k_rot = random.randrange(4)
-                flip_x = bool(random.randrange(2))
-                pf_np = apply_d4_planet_feats(pf_np, k_rot=k_rot, flip_x=flip_x)
-                tf_np = apply_d4_timeline_feats(tf_np, k_rot=k_rot, flip_x=flip_x)
-
-            le_np = np.ascontiguousarray(rollout["legal_edges"][idx, :max_n, :max_n])
-            om_np = np.ascontiguousarray(rollout["owned_mask"][idx, :max_n])
-            has_valid = bool(np.any(om_np & le_np.any(axis=-1)))
-
-            aux_v_np = np.ascontiguousarray(rollout["aux_valid"][idx, :max_n]) if want_aux else None
-            has_aux_valid = bool(aux_v_np is not None and np.any(aux_v_np))
-
-            pf = torch.from_numpy(np.ascontiguousarray(pf_np)).to(train_dev)
-            tf = torch.from_numpy(np.ascontiguousarray(tf_np)).to(train_dev)
-            ef = torch.from_numpy(np.ascontiguousarray(rollout["edge_feats"][idx, :max_n, :max_n], dtype=np.float32)).to(train_dev)
-            le = torch.from_numpy(le_np).to(train_dev)
-            om = torch.from_numpy(om_np).to(train_dev)
-            pm = torch.from_numpy(np.ascontiguousarray(pm_full[:, :max_n])).to(train_dev)
-            act = torch.from_numpy(np.ascontiguousarray(rollout["action_cls"][idx, :max_n])).to(train_dev)
-            old_lp = torch.from_numpy(np.ascontiguousarray(rollout["old_logp"][idx, :max_n])).to(train_dev)
-            adv_t = torch.from_numpy(adv[idx]).to(train_dev)
-            ret_t = torch.from_numpy(rollout["returns"][idx]).to(train_dev)
-            aux_o = (
-                torch.from_numpy(np.ascontiguousarray(rollout["aux_owner"][idx, :max_n])).to(train_dev)
-                if want_aux
-                else None
+    try:
+        stop_kl = False
+        for _ in range(ppo_epochs):
+            if stop_kl:
+                break
+            batch_idx_list = snap_bucket_batches(
+                p_counts, batch_size, buckets=(24, 32, 44), max_cap=max_p_total, shuffle=True
             )
-            aux_s = (
-                torch.from_numpy(np.ascontiguousarray(rollout["aux_ships"][idx, :max_n])).to(train_dev)
-                if want_aux
-                else None
-            )
-            aux_v = torch.from_numpy(aux_v_np).to(train_dev) if aux_v_np is not None else None
+            ep_approx_kl = torch.zeros((), device=train_dev)
+            ep_steps = 0
+            for idx, max_n in batch_idx_list:
+                pm_full = rollout["pad_mask"][idx]
 
-            if want_aux:
-                logits, _, val, aux_pred = policy(pf, tf, ef, pm, return_aux=True, legal_edges=le, compute_frac=False)
-            else:
-                logits, _, val = policy(pf, tf, ef, pm, legal_edges=le, compute_frac=False)
-                aux_pred = None
+                le_np = np.ascontiguousarray(rollout["legal_edges"][idx, :max_n, :max_n])
+                om_np = np.ascontiguousarray(rollout["owned_mask"][idx, :max_n])
+                has_valid = bool(np.any(om_np & le_np.any(axis=-1)))
 
-            B, N, _ = logits.shape
-            hold_ok = torch.ones((B, N, 1), dtype=torch.bool, device=train_dev)
-            act_mask = torch.cat([hold_ok, le], dim=-1)
-            logits = logits.masked_fill(~act_mask, -1e9)
+                aux_v_np = np.ascontiguousarray(rollout["aux_valid"][idx, :max_n]) if want_aux else None
+                has_aux_valid = bool(aux_v_np is not None and np.any(aux_v_np))
 
-            if ref_logp_cache is not None:
-                ref_logp_all = ref_logp_cache[idx, :N, : N + 1].to(device=train_dev, dtype=logits.dtype)
-                fixed_logp_all = (
-                    fixed_logp_cache[idx, :N, : N + 1].to(device=train_dev, dtype=logits.dtype)
-                    if fixed_logp_cache is not None
+                pf = torch.from_numpy(np.ascontiguousarray(rollout["planet_feats"][idx, :max_n])).to(train_dev).float()
+                tf = torch.from_numpy(
+                    np.ascontiguousarray(rollout["timeline_feats"][idx, :max_n, :, :tl_dim_pol])
+                ).to(train_dev).float()
+                if augment_d4:
+                    k_rot = random.randrange(4)
+                    flip_x = bool(random.randrange(2))
+                    pf, tf = apply_d4_batch_gpu(pf, tf, k_rot=k_rot, flip_x=flip_x)
+                ef = torch.from_numpy(np.ascontiguousarray(rollout["edge_feats"][idx, :max_n, :max_n])).to(train_dev).float()
+                le = torch.from_numpy(le_np).to(train_dev)
+                om = torch.from_numpy(om_np).to(train_dev)
+                pm = torch.from_numpy(np.ascontiguousarray(pm_full[:, :max_n])).to(train_dev)
+                ret_t = torch.from_numpy(rollout["returns"][idx]).to(train_dev)
+
+                if value_only:
+                    _, _, val = policy(pf, tf, ef, pm, legal_edges=le, compute_frac=False, value_only=True)
+                    v_loss = F.mse_loss(val, ret_t)
+                    optimizer.zero_grad(set_to_none=True)
+                    v_loss.backward()
+                    nn.utils.clip_grad_norm_(
+                        [p for p in policy.parameters() if p.requires_grad],
+                        1.0,
+                        foreach=not is_dml_dev,
+                    )
+                    optimizer.step()
+                    loss_acc = loss_acc + v_loss.detach()
+                    vl_acc = vl_acc + v_loss.detach()
+                    n_steps += 1
+                    continue
+
+                act = torch.from_numpy(np.ascontiguousarray(rollout["action_cls"][idx, :max_n])).to(train_dev)
+                old_lp = torch.from_numpy(np.ascontiguousarray(rollout["old_logp"][idx, :max_n])).to(train_dev)
+                adv_t = torch.from_numpy(adv[idx]).to(train_dev)
+                aux_o = (
+                    torch.from_numpy(np.ascontiguousarray(rollout["aux_owner"][idx, :max_n])).to(train_dev)
+                    if want_aux
                     else None
                 )
-            else:
-                with torch.no_grad():
-                    ref_logits, _, _ = anchor(pf, tf, ef, pm, legal_edges=le, compute_frac=False)
-                    ref_logp_all = F.log_softmax(ref_logits.masked_fill(~act_mask, -1e9), dim=-1)
-                    if want_fixed and fixed_anchor is not None:
-                        fixed_logits, _, _ = fixed_anchor(pf, tf, ef, pm, legal_edges=le, compute_frac=False)
-                        fixed_logp_all = F.log_softmax(fixed_logits.masked_fill(~act_mask, -1e9), dim=-1)
-                    else:
-                        fixed_logp_all = None
+                aux_s = (
+                    torch.from_numpy(np.ascontiguousarray(rollout["aux_ships"][idx, :max_n])).to(train_dev)
+                    if want_aux
+                    else None
+                )
+                aux_v = torch.from_numpy(aux_v_np).to(train_dev) if aux_v_np is not None else None
 
-            if has_valid:
-                valid_f = (om & le.any(dim=-1)).float()
-                denom = valid_f.sum().clamp_min(1.0)
-                logp_all = F.log_softmax(logits, dim=-1)
-                probs_all = logp_all.exp()
-                act_mask_f = act_mask.to(logp_all.dtype)
-
-                act_oh = one_hot_no_scatter(act.clamp(0, N), N + 1, dtype=logp_all.dtype)
-                new_lp = (logp_all * act_oh).sum(dim=-1)
-                ratio = torch.exp((new_lp - old_lp).clamp(-4.0, 4.0))
-                adv_bn = adv_t.unsqueeze(1).expand(B, N)
-                surr1 = ratio * adv_bn
-                surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv_bn
-                pol_loss = -(torch.min(surr1, surr2) * valid_f).sum() / denom
-
-                kl_per = (probs_all * (logp_all - ref_logp_all) * act_mask_f).sum(dim=-1).clamp_min(0.0)
-                kl_mean = (kl_per * valid_f).sum() / denom
-                ent_per = -(probs_all * logp_all * act_mask_f).sum(dim=-1)
-                ent_mean = (ent_per * valid_f).sum() / denom
-
-                if fixed_logp_all is not None:
-                    akl_per = (probs_all * (logp_all - fixed_logp_all) * act_mask_f).sum(dim=-1).clamp_min(0.0)
-                    anchor_kl_mean = (akl_per * valid_f).sum() / denom
+                if want_aux:
+                    logits, _, val, aux_pred = policy(
+                        pf, tf, ef, pm, return_aux=True, legal_edges=le, compute_frac=False, detach_value=detach_value
+                    )
                 else:
+                    logits, _, val = policy(
+                        pf, tf, ef, pm, legal_edges=le, compute_frac=False, detach_value=detach_value
+                    )
+                    aux_pred = None
+
+                B, N, _ = logits.shape
+                hold_ok = torch.ones((B, N, 1), dtype=torch.bool, device=train_dev)
+                act_mask = torch.cat([hold_ok, le], dim=-1)
+                logits = logits.masked_fill(~act_mask, -1e9)
+
+                if ref_logp_cache is not None:
+                    ref_logp_all = ref_logp_cache[idx, :N, : N + 1].to(device=train_dev, dtype=logits.dtype)
+                    fixed_logp_all = (
+                        fixed_logp_cache[idx, :N, : N + 1].to(device=train_dev, dtype=logits.dtype)
+                        if fixed_logp_cache is not None
+                        else None
+                    )
+                else:
+                    with torch.no_grad():
+                        ref_logits, _, _ = anchor(pf, tf, ef, pm, legal_edges=le, compute_frac=False)
+                        ref_logp_all = F.log_softmax(ref_logits.masked_fill(~act_mask, -1e9), dim=-1)
+                        if want_fixed and fixed_anchor is not None:
+                            fixed_logits, _, _ = fixed_anchor(pf, tf, ef, pm, legal_edges=le, compute_frac=False)
+                            fixed_logp_all = F.log_softmax(fixed_logits.masked_fill(~act_mask, -1e9), dim=-1)
+                        else:
+                            fixed_logp_all = None
+
+                if has_valid:
+                    valid_f = (om & le.any(dim=-1)).float()
+                    denom = valid_f.sum().clamp_min(1.0)
+                    logp_all = F.log_softmax(logits, dim=-1)
+                    probs_all = logp_all.exp()
+                    act_mask_f = act_mask.to(logp_all.dtype)
+
+                    act_oh = one_hot_no_scatter(act.clamp(0, N), N + 1, dtype=logp_all.dtype)
+                    if exact_factorized_ppo:
+                        thr_logit_ppo = float(np.log(max(1e-5, launch_threshold) / max(1e-5, 1.0 - launch_threshold)))
+                        logq_all = factorized_log_probs(logits, act_mask, temperature, target_temperature, thr_logit_ppo)
+                        new_lp = (logq_all * act_oh).sum(dim=-1)
+                    else:
+                        new_lp = (logp_all * act_oh).sum(dim=-1)
+                    ratio = torch.exp((new_lp - old_lp).clamp(-4.0, 4.0))
+                    adv_bn = adv_t.unsqueeze(1).expand(B, N)
+                    surr1 = ratio * adv_bn
+                    surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv_bn
+                    pol_loss = -(torch.min(surr1, surr2) * valid_f).sum() / denom
+
+                    kl_per = (probs_all * (logp_all - ref_logp_all) * act_mask_f).sum(dim=-1).clamp_min(0.0)
+                    kl_mean = (kl_per * valid_f).sum() / denom
+                    ent_per = -(probs_all * logp_all * act_mask_f).sum(dim=-1)
+                    ent_mean = (ent_per * valid_f).sum() / denom
+
+                    if fixed_logp_all is not None:
+                        akl_per = (probs_all * (logp_all - fixed_logp_all) * act_mask_f).sum(dim=-1).clamp_min(0.0)
+                        anchor_kl_mean = (akl_per * valid_f).sum() / denom
+                    else:
+                        anchor_kl_mean = logits.sum() * 0.0
+                else:
+                    pol_loss = logits.sum() * 0.0
+                    kl_mean = logits.sum() * 0.0
                     anchor_kl_mean = logits.sum() * 0.0
-            else:
-                pol_loss = logits.sum() * 0.0
-                kl_mean = logits.sum() * 0.0
-                anchor_kl_mean = logits.sum() * 0.0
-                ent_mean = logits.sum() * 0.0
+                    ent_mean = logits.sum() * 0.0
 
-            v_loss = F.mse_loss(val, ret_t)
+                v_loss = F.mse_loss(val, ret_t)
 
-            if aux_pred is not None and aux_v is not None and has_aux_valid and aux_o is not None and aux_s is not None:
-                av_f = aux_v.float()
-                av_denom = av_f.sum().clamp_min(1.0)
-                ao_logp = F.log_softmax(aux_pred[..., :3], dim=-1)
-                ao_oh = one_hot_no_scatter(aux_o.clamp(0, 2), 3, dtype=ao_logp.dtype)
-                ao_ce = -(ao_logp * ao_oh).sum(dim=-1)
-                ao_loss = (ao_ce * av_f).sum() / av_denom
-                as_loss = (F.smooth_l1_loss(aux_pred[..., 3], aux_s, reduction="none") * av_f).sum() / av_denom
-                aux_loss = ao_loss + as_loss
-                with torch.no_grad():
-                    aux_hits_acc = aux_hits_acc + ((aux_pred[..., :3].argmax(dim=-1) == aux_o).float() * av_f).sum()
-                    aux_tot_acc = aux_tot_acc + av_f.sum()
-            else:
-                aux_loss = logits.sum() * 0.0
+                if aux_pred is not None and aux_v is not None and has_aux_valid and aux_o is not None and aux_s is not None:
+                    av_f = aux_v.float()
+                    av_denom = av_f.sum().clamp_min(1.0)
+                    ao_logp = F.log_softmax(aux_pred[..., :3], dim=-1)
+                    ao_oh = one_hot_no_scatter(aux_o.clamp(0, 2), 3, dtype=ao_logp.dtype)
+                    ao_ce = -(ao_logp * ao_oh).sum(dim=-1)
+                    ao_loss = (ao_ce * av_f).sum() / av_denom
+                    as_loss = (F.smooth_l1_loss(aux_pred[..., 3], aux_s, reduction="none") * av_f).sum() / av_denom
+                    aux_loss = ao_loss + as_loss
+                    with torch.no_grad():
+                        aux_hits_acc = aux_hits_acc + ((aux_pred[..., :3].argmax(dim=-1) == aux_o).float() * av_f).sum()
+                        aux_tot_acc = aux_tot_acc + av_f.sum()
+                else:
+                    aux_loss = logits.sum() * 0.0
 
-            total_loss = (
-                pol_loss
-                + value_coef * v_loss
-                + kl_coef * kl_mean
-                + anchor_kl_coef * anchor_kl_mean
-                - ent_coef * ent_mean
-                + aux_coef * aux_loss
-            )
+                total_loss = (
+                    pol_loss
+                    + value_coef * v_loss
+                    + kl_coef * kl_mean
+                    + anchor_kl_coef * anchor_kl_mean
+                    - ent_coef * ent_mean
+                    + aux_coef * aux_loss
+                )
 
-            optimizer.zero_grad(set_to_none=True)
-            total_loss.backward()
-            nn.utils.clip_grad_norm_(policy.parameters(), 0.7, foreach=not is_dml_dev)
-            optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                total_loss.backward()
+                nn.utils.clip_grad_norm_(policy.parameters(), 0.7, foreach=not is_dml_dev)
+                optimizer.step()
 
-            loss_acc = loss_acc + total_loss.detach()
-            kl_acc = kl_acc + kl_mean.detach()
-            akl_acc = akl_acc + anchor_kl_mean.detach()
-            ent_acc = ent_acc + ent_mean.detach()
-            vl_acc = vl_acc + v_loss.detach()
-            aux_loss_acc = aux_loss_acc + aux_loss.detach()
-            n_steps += 1
+                loss_acc = loss_acc + total_loss.detach()
+                kl_acc = kl_acc + kl_mean.detach()
+                akl_acc = akl_acc + anchor_kl_mean.detach()
+                ent_acc = ent_acc + ent_mean.detach()
+                vl_acc = vl_acc + v_loss.detach()
+                aux_loss_acc = aux_loss_acc + aux_loss.detach()
+                if max_kl > 0.0 and has_valid:
+                    ep_approx_kl = ep_approx_kl + (0.5 * (new_lp - old_lp).detach().pow(2) * valid_f).sum() / denom
+                ep_steps += 1
+                n_steps += 1
+                if max_kl > 0.0 and (not value_only) and (ep_steps % 4 == 0):
+                    if float(ep_approx_kl.item()) / ep_steps > float(max_kl):
+                        stop_kl = True
+                        break
+            if max_kl > 0.0 and ep_steps > 0 and (not value_only) and (not stop_kl):
+                if float(ep_approx_kl.item()) / ep_steps > float(max_kl):
+                    stop_kl = True
+                    break
+    finally:
+        if saved_req_grad is not None:
+            for p, req in saved_req_grad:
+                p.requires_grad_(req)
 
     denom_steps = max(1, n_steps)
     aux_tot_val = float(aux_tot_acc.item())
@@ -1489,13 +1840,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--clip-eps", type=float, default=0.15)
     parser.add_argument("--kl-coef", type=float, default=0.05)
     parser.add_argument("--anchor-kl-coef", type=float, default=0.025)
+    parser.add_argument("--max-kl", type=float, default=0.0, help="Optional per-epoch approx-KL early-stop ceiling (0=off).")
+    parser.add_argument("--detach-value", action="store_true", help="Detach trunk hidden state before value head during PPO updates.")
     parser.add_argument("--aux-coef", type=float, default=0.15)
     parser.add_argument("--ent-coef", type=float, default=0.003, help="Entropy bonus coefficient (keep low during RL sharpening).")
     parser.add_argument("--teacher-ema", type=float, default=0.12, help="EMA rate to update KL teacher on positive iters.")
     parser.add_argument("--shaping-coef", type=float, default=0.02, help="Near-sparse shaping weight (0=pure terminal).")
     parser.add_argument("--temperature", type=float, default=0.75)
+    parser.add_argument("--target-temperature", type=float, default=0.30, help="Target softmax temperature when --factorized-sample is enabled.")
+    parser.add_argument("--factorized-sample", action="store_true", help="Sample Launch vs Hold (centered on --launch-threshold) independently of Target | Launch (fixes PT-v2 HOLD collapse).")
+    parser.add_argument("--exact-factorized-ppo", action="store_true", help="Compute exact on-policy log q_theta(a|s) ratios/old_logp matching factorized low-T sampling.")
+    parser.add_argument("--decoupled-logit-tta", action="store_true", help="Use decoupled launch/target logit-space TTA during in-loop Hober evaluation.")
     parser.add_argument("--opp-temperature", type=float, default=0.0, help="Pool opponent sampling temperature (0=greedy).")
     parser.add_argument("--max-steps", type=int, default=220)
+    parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor for GAE returns.")
+    parser.add_argument("--gae-lambda", type=float, default=0.95, help="GAE lambda trace decay.")
+    parser.add_argument("--hober-share", type=float, default=0.0, help="Fraction of 2P mirror pairs played live against #2 Hober Malloc.")
+    parser.add_argument("--hober-tta", action="store_true", help="Use 4x rotation TTA for live #2 Hober sparring (100% parity; off=fast 96.7%).")
+    parser.add_argument("--hober-temperature", type=float, default=0.0, help="Sampling temperature for live #2 Hober sparring (0=deterministic t=0.53).")
+    parser.add_argument("--hober-eval-pairs", type=int, default=0, help="Paired-seed games vs exact TTA=1 #2 Hober Malloc in each eval gate.")
+    parser.add_argument("--value-warmup-iters", type=int, default=0, help="Warm up only val_attn/val_head for first N iters (eliminates value-head trunk shock).")
     parser.add_argument("--eval-every", type=int, default=2, help="Run deterministic anchor eval every N iters.")
     parser.add_argument("--eval-pairs", type=int, default=8, help="Paired-seed games per eval anchor.")
     parser.add_argument("--eval-opponents", nargs="*", default=[], help="Extra checkpoints for multi-anchor eval gate.")
@@ -1538,8 +1902,10 @@ def main(argv: list[str] | None = None) -> int:
             p.requires_grad_(False)
 
     opt = build_optimizer(policy.parameters(), lr=args.lr, weight_decay=1e-4, use_dml=use_dml)
+    val_head_params = [p for name, p in policy.named_parameters() if name.startswith("val_attn.") or name.startswith("val_head.")]
+    val_opt = build_optimizer(val_head_params, lr=max(3e-4, args.lr * 10.0), weight_decay=1e-4, use_dml=use_dml)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-        opt, T_max=max(1, args.iterations), eta_min=args.lr * float(args.lr_min_ratio)
+        opt, T_max=max(1, args.iterations - args.value_warmup_iters), eta_min=args.lr * float(args.lr_min_ratio)
     )
     out_path = Path(args.out)
     latest_path = out_path.with_name(out_path.stem + "_latest" + out_path.suffix)
@@ -1593,13 +1959,18 @@ def main(argv: list[str] | None = None) -> int:
         ]
 
     dev_tag = "dml" if use_dml else str(train_dev)
+    hober_tag = (
+        f" hober={args.hober_share:.2f}(tta={int(args.hober_tta)},T={args.hober_temperature:.2f},ev={args.hober_eval_pairs}p)"
+        if (args.hober_share > 0.0 or args.hober_eval_pairs > 0)
+        else ""
+    )
     print(
         f"[RL-League-PPO] Loaded {args.init} | dev={dev_tag} | pool={[n for n, _, _ in pinned_pool]} | "
         f"iters={args.iterations} "
         + (f"pairs={n_pairs} (2P={2*n_pairs}ep)" if use_paired else f"eps/iter={args.episodes_per_iter}")
         + f" workers={args.workers} rbatch={args.rollout_batch} async={args.async_rollout} | lr={args.lr} clip={args.clip_eps} kl={args.kl_coef} akl={args.anchor_kl_coef} "
-        f"ema={args.teacher_ema} aux={args.aux_coef} shaping={args.shaping_coef} T={args.temperature} "
-        f"oppT={args.opp_temperature} all_in={args.force_all_in} 2p_only={args.two_player_only} mid_adv={args.midgame_adv_weight}",
+        f"ema={args.teacher_ema} aux={args.aux_coef} shaping={args.shaping_coef} gamma={args.gamma} lam={args.gae_lambda} T={args.temperature} "
+        f"oppT={args.opp_temperature} max_t={args.max_steps} all_in={args.force_all_in} 2p_only={args.two_player_only} mid_adv={args.midgame_adv_weight}{hober_tag}",
         flush=True,
     )
 
@@ -1629,6 +2000,7 @@ def main(argv: list[str] | None = None) -> int:
         ):
             """Build and submit rollout jobs (batched 2P lockstep when eligible)."""
             if use_paired:
+                n_hober_pairs = max(0, min(n_pairs, int(round(n_pairs * float(args.hober_share))))) if args.two_player_only else 0
                 pair_specs: List[Tuple[int, str, int, Optional[str], Optional[PlanetTimelineTransformer]]] = []
                 for k in range(n_pairs):
                     n_pl, opp_kind = league_cycle[(it_idx * n_pairs + k) % len(league_cycle)]
@@ -1637,7 +2009,10 @@ def main(argv: list[str] | None = None) -> int:
                     map_seed = args.seed + it_idx * 1000 + k
                     opp_path: Optional[str] = None
                     opp_model: Optional[PlanetTimelineTransformer] = None
-                    if opp_kind == "pool":
+                    if k < n_hober_pairs:
+                        opp_kind = "hober"
+                        opp_path = _HOBER_SENTINEL
+                    elif opp_kind == "pool":
                         u = random.random()
                         if rolling_snaps and u < 0.30:
                             _, opp_path, opp_model = rolling_snaps[-1]
@@ -1651,15 +2026,20 @@ def main(argv: list[str] | None = None) -> int:
                     pool_exec is not None
                     and pol_path_arg is not None
                     and args.rollout_batch > 1
-                    and all(n_pl == 2 and ok == "pool" for n_pl, ok, _, _, _ in pair_specs)
+                    and all(n_pl == 2 and ok in ("pool", "hober") for n_pl, ok, _, _, _ in pair_specs)
                 )
                 if can_batch:
                     by_opp: Dict[Optional[str], List[Tuple[int, int]]] = {}
                     for _, _, map_seed, opp_path, _ in pair_specs:
                         by_opp.setdefault(opp_path, []).extend([(map_seed, 0), (map_seed, 1)])
                     chunk_sz = max(2, (int(args.rollout_batch) // 2) * 2)
+                    # Schedule heaviest chunks (live #2 Hober sparring) first to avoid stragglers
+                    ordered_items = sorted(
+                        by_opp.items(),
+                        key=lambda kv: (0 if kv[0] == _HOBER_SENTINEL else 1, -len(kv[1])),
+                    )
                     futs = []
-                    for opp_path, sp_list in by_opp.items():
+                    for opp_path, sp_list in ordered_items:
                         for s_i in range(0, len(sp_list), chunk_sz):
                             chunk = sp_list[s_i : s_i + chunk_sz]
                             futs.append(
@@ -1677,6 +2057,14 @@ def main(argv: list[str] | None = None) -> int:
                                         args.force_all_in,
                                         True,
                                         args.opp_temperature,
+                                        args.gamma,
+                                        args.gae_lambda,
+                                        args.hober_tta,
+                                        args.hober_temperature,
+                                        args.launch_threshold,
+                                        args.factorized_sample,
+                                        args.target_temperature,
+                                        args.exact_factorized_ppo,
                                     ),
                                 )
                             )
@@ -1813,6 +2201,8 @@ def main(argv: list[str] | None = None) -> int:
             max_steps=max(240, args.max_steps),
             force_all_in=args.force_all_in,
             launch_threshold=args.launch_threshold,
+            hober_eval_pairs=args.hober_eval_pairs,
+            decoupled_logit_tta=args.decoupled_logit_tta,
         )
         best_eval_score = ev0["eval_score"]
         tag_str0 = " ".join(f"{t}={100*v:.1f}%" for t, v in ev0["per_tag_2p"].items())
@@ -1840,6 +2230,7 @@ def main(argv: list[str] | None = None) -> int:
 
             batches: List[Dict[str, np.ndarray]] = []
             ep_wins_2p: List[float] = []
+            ep_wins_hober: List[float] = []
             ep_wins_4p: List[float] = []
             ep_ranks_4p: List[float] = []
             ep_rews: List[float] = []
@@ -1850,6 +2241,8 @@ def main(argv: list[str] | None = None) -> int:
                 ep_rews.append(st["term_rew"])
                 if int(st.get("num_players", 2)) == 2:
                     ep_wins_2p.append(st["win"])
+                    if st.get("is_hober", 0.0) > 0.5:
+                        ep_wins_hober.append(st["win"])
                 else:
                     ep_wins_4p.append(st["win"])
                     ep_ranks_4p.append(st["rank"])
@@ -1875,14 +2268,15 @@ def main(argv: list[str] | None = None) -> int:
                 pol_p_next = _save_cur_policy(it + 1)
                 pending_rollout = _submit_rollout(it + 1, pol_p_next, it + 1, active_pool)
 
+            is_val_warmup = it <= args.value_warmup_iters
             t_upd = time.time()
             torch.set_num_threads(2 if (pending_rollout is not None) else max(1, int(args.train_threads)))
             upd = ppo_update(
                 policy,
                 teacher,
-                opt,
+                val_opt if is_val_warmup else opt,
                 rollout,
-                ppo_epochs=args.ppo_epochs,
+                ppo_epochs=max(3, args.ppo_epochs) if is_val_warmup else args.ppo_epochs,
                 batch_size=args.batch_size,
                 clip_eps=args.clip_eps,
                 kl_coef=args.kl_coef,
@@ -1894,22 +2288,31 @@ def main(argv: list[str] | None = None) -> int:
                 device=train_dev,
                 use_dml=use_dml,
                 augment_d4=False,
+                value_only=is_val_warmup,
+                max_kl=args.max_kl,
+                detach_value=args.detach_value,
+                exact_factorized_ppo=bool(args.exact_factorized_ppo and args.factorized_sample),
+                temperature=args.temperature,
+                target_temperature=args.target_temperature,
+                launch_threshold=args.launch_threshold,
             )
-            sched.step()
+            if not is_val_warmup:
+                sched.step()
             upd_sec = time.time() - t_upd
 
             cpu_sd = cpu_state_dict(policy)
             cpu_policy.load_state_dict(cpu_sd)
 
             wr2 = 100.0 * float(np.mean(ep_wins_2p)) if ep_wins_2p else 0.0
+            wr_hober = 100.0 * float(np.mean(ep_wins_hober)) if ep_wins_hober else None
             wr4 = 100.0 * float(np.mean(ep_wins_4p)) if ep_wins_4p else 0.0
             rk4 = float(np.mean(ep_ranks_4p)) if ep_ranks_4p else 0.0
             mean_rew = float(np.mean(ep_rews)) if ep_rews else 0.0
 
-            if mean_rew > 0.05:
+            if (not is_val_warmup) and (mean_rew > 0.05 or (wr_hober is not None and wr_hober >= 40.0)):
                 _ema_update_teacher(teacher, policy, args.teacher_ema)
 
-            if it % 3 == 0:
+            if (not is_val_warmup) and (it % 3 == 0):
                 snap_copy = copy.deepcopy(cpu_policy).eval()
                 for p in snap_copy.parameters():
                     p.requires_grad_(False)
@@ -1938,6 +2341,7 @@ def main(argv: list[str] | None = None) -> int:
                     max_steps=max(240, args.max_steps),
                     force_all_in=args.force_all_in,
                     launch_threshold=args.launch_threshold,
+                    hober_eval_pairs=args.hober_eval_pairs,
                 )
                 tag_str = " ".join(f"{t}={100*v:.1f}%" for t, v in ev["per_tag_2p"].items())
                 if args.two_player_only:
@@ -1953,13 +2357,17 @@ def main(argv: list[str] | None = None) -> int:
                     eval_str += " *BEST*"
 
             pair_str = f" (sw={sweeps}, sp={splits})" if use_paired else ""
+            boss_str = f" boss={wr_hober:4.1f}%" if wr_hober is not None else ""
+            vdec_mask = rollout["owned_mask"] & rollout["legal_edges"].any(axis=-1)
+            lrate_pct = 100.0 * float((rollout["action_cls"][vdec_mask] > 0).mean()) if np.any(vdec_mask) else 0.0
+            warm_str = " [VAL-WARMUP]" if is_val_warmup else ""
             stats_4p = "" if args.two_player_only else f" 4P={wr4:5.1f}%(rk={rk4:.2f})"
             aux_str = f" aux={100*upd['aux_acc']:.1f}%" if args.aux_coef > 0.0 and upd["aux_acc"] > 0.0 else ""
             print(
                 f"  iter {it:2d}/{args.iterations} ({time.time()-t0:5.1f}s [roll={roll_sec:.1f}s upd={upd_sec:.1f}s]) | "
-                f"states={len(rollout['returns']):4d} | 2P={wr2:5.1f}%{pair_str}{stats_4p} | "
-                f"rew={mean_rew:+.2f} kl={upd['kl']:.4f} akl={upd['anchor_kl']:.4f} ent={upd['entropy']:.3f} "
-                f"vl={upd['val_loss']:.3f}{aux_str}{eval_str}",
+                f"states={len(rollout['returns']):4d} | 2P={wr2:5.1f}%{boss_str}{pair_str}{stats_4p} | "
+                f"rew={mean_rew:+.2f} lr%={lrate_pct:4.1f}% kl={upd['kl']:.4f} akl={upd['anchor_kl']:.4f} ent={upd['entropy']:.3f} "
+                f"vl={upd['val_loss']:.3f}{aux_str}{warm_str}{eval_str}",
                 flush=True,
             )
 
