@@ -39,7 +39,10 @@ ITEMS_RESERVED = 16
 BASE_ITEM_USERS = 3  # neutral + P1 + P2
 DEFAULT_PHYSICS_SUBSTEPS = 5  # 20 Hz physics at tick_dt=0.25s (sub_dt=0.05s, sub_step_dist=2.0u)
 SHIP_SEP_STIFFNESS = 1.0
-SHIP_SEP_MAX_DISP = 2.5  # per-ship substep cap (= 1.25 * sub_step_dist at 20 Hz)
+SHIP_SEP_MAX_DISP = 6.0  # per-ship displacement cap (launch-tick settle + 20 Hz substep separation)
+SPAWN_AREA_RADIUS = 12.0  # random disc radius around (sx, sy) for multi-ship fleet spawns
+SPAWN_SETTLE_ITERS = 16  # rapid launch-tick separation + planet pushout iterations
+SPAWN_SETTLE_TOL = 0.05  # early-exit tolerance on max overlap & planet pushout during launch settle
 ANTIPODE_DOT_THRESHOLD = -0.995
 ANTIPODE_ESCAPE_TANGENT = 0.05
 SHIP_TURN_RATE = 4.0 * math.pi  # ~12.56637 rad/s (360 deg in 0.50s, 180 deg U-turn in 0.25s = 5 substeps at 20 Hz)
@@ -77,6 +80,17 @@ class Fleet:
     @property
     def ships_per_unit(self) -> float:
         return self.ships / max(1, self.num_units)
+
+
+def _spawn_hash_u01(seed: int) -> float:
+    """Deterministic uint32 hash -> ``[0, 1)`` matching C++ ``spawn_hash_u01`` bit-for-bit."""
+    x = seed & 0xFFFFFFFF
+    x ^= x >> 16
+    x = (x * 0x7FEB352D) & 0xFFFFFFFF
+    x ^= x >> 15
+    x = (x * 0x846CA68B) & 0xFFFFFFFF
+    x ^= x >> 16
+    return float(x) / 4294967296.0
 
 
 def _materialize_fleet_units(cx: float, cy: float, count: int) -> List[List[float]]:
@@ -1178,6 +1192,162 @@ class GalconSim:
             fl.y = cy
             fl.radius = _sqrt(max_d2) + ship_radius
 
+    def _spawn_and_settle_flock(
+        self,
+        fid: int,
+        parts: int,
+        sx: float,
+        sy: float,
+        dst: Planet,
+        hx0: float,
+        hy0: float,
+    ) -> Tuple[List[List[float]], List[List[float]], float, float, float]:
+        """Spawn ``parts > 1`` units in a deterministic 12u disc and rapidly settle overlaps & planet clearance."""
+        _sqrt = math.sqrt
+        _cos = math.cos
+        _sin = math.sin
+        two_pi = 2.0 * math.pi
+        seed_base = (fid * 1000003) & 0xFFFFFFFF
+        ux = [0.0] * parts
+        uy = [0.0] * parts
+        for j in range(parts):
+            u1 = _spawn_hash_u01((seed_base + j * 2 + 1) & 0xFFFFFFFF)
+            u2 = _spawn_hash_u01((seed_base + j * 2 + 2) & 0xFFFFFFFF)
+            r = SPAWN_AREA_RADIUS * _sqrt(u1)
+            ang = two_pi * u2
+            ux[j] = sx + r * _cos(ang)
+            uy[j] = sy + r * _sin(ang)
+
+        tx = dst.x
+        ty = dst.y
+        ship_radius = SHIP_RADIUS
+        min_sep = 2.0 * ship_radius
+        min_sep2 = min_sep * min_sep
+        sep_k = SHIP_SEP_STIFFNESS
+        half_k = 0.5 * sep_k
+        max_sep_push = SHIP_SEP_MAX_DISP
+        cap2 = max_sep_push * max_sep_push
+        eps_dist2 = _EPS_DIST2
+        golden_angle = _GOLDEN_ANGLE
+
+        non_target_planets: List[Tuple[float, float, float, float]] = []
+        for pid_p in sorted(self.planets.keys()):
+            if pid_p == dst.id:
+                continue
+            pl = self.planets[pid_p]
+            mr = pl.radius + ship_radius
+            non_target_planets.append((pl.x, pl.y, mr, mr * mr))
+
+        for _it in range(SPAWN_SETTLE_ITERS):
+            max_ov = 0.0
+            if sep_k > 0.0:
+                if max_sep_push > 0.0:
+                    ox = ux[:]
+                    oy = uy[:]
+                for a in range(parts):
+                    ax = ux[a]
+                    ay = uy[a]
+                    for b in range(a + 1, parts):
+                        ddx = ux[b] - ax
+                        ddy = uy[b] - ay
+                        d2 = ddx * ddx + ddy * ddy
+                        if d2 < min_sep2:
+                            if d2 > eps_dist2:
+                                dist = _sqrt(d2)
+                                nx = ddx / dist
+                                ny = ddy / dist
+                            else:
+                                dist = 0.0
+                                ang = golden_angle * float(a * 31 + b + 1)
+                                nx = _cos(ang)
+                                ny = _sin(ang)
+                            ov = min_sep - dist
+                            if ov > max_ov:
+                                max_ov = ov
+                            push = half_k * ov
+                            px_d = nx * push
+                            py_d = ny * push
+                            ax -= px_d
+                            ay -= py_d
+                            ux[b] += px_d
+                            uy[b] += py_d
+                    ux[a] = ax
+                    uy[a] = ay
+                if max_sep_push > 0.0:
+                    for u in range(parts):
+                        ddx = ux[u] - ox[u]
+                        ddy = uy[u] - oy[u]
+                        d2 = ddx * ddx + ddy * ddy
+                        if d2 > cap2:
+                            sc = max_sep_push / _sqrt(d2)
+                            ux[u] = ox[u] + ddx * sc
+                            uy[u] = oy[u] + ddy * sc
+
+            max_pp = 0.0
+            for u in range(parts):
+                x = ux[u]
+                y = uy[u]
+                for px_i, py_i, mr, mr2 in non_target_planets:
+                    ddx = x - px_i
+                    ddy = y - py_i
+                    d2 = ddx * ddx + ddy * ddy
+                    if d2 < mr2:
+                        if d2 > eps_dist2:
+                            dist = _sqrt(d2)
+                            pp = mr - dist
+                            if pp > max_pp:
+                                max_pp = pp
+                            x = px_i + (ddx / dist) * mr
+                            y = py_i + (ddy / dist) * mr
+                        else:
+                            if mr > max_pp:
+                                max_pp = mr
+                            tdx = tx - px_i
+                            tdy = ty - py_i
+                            td2 = tdx * tdx + tdy * tdy
+                            if td2 > eps_dist2:
+                                td = _sqrt(td2)
+                                x = px_i + (tdx / td) * mr
+                                y = py_i + (tdy / td) * mr
+                            else:
+                                x = px_i + mr
+                                y = py_i
+                ux[u] = x
+                uy[u] = y
+
+            if max_ov <= SPAWN_SETTLE_TOL and max_pp <= SPAWN_SETTLE_TOL:
+                break
+
+        sum_x = 0.0
+        sum_y = 0.0
+        units: List[List[float]] = []
+        unit_headings: List[List[float]] = []
+        for j in range(parts):
+            xj = ux[j]
+            yj = uy[j]
+            units.append([xj, yj])
+            sum_x += xj
+            sum_y += yj
+            hdx = tx - xj
+            hdy = ty - yj
+            hd2 = hdx * hdx + hdy * hdy
+            if hd2 > eps_dist2:
+                hd = _sqrt(hd2)
+                unit_headings.append([hdx / hd, hdy / hd])
+            else:
+                unit_headings.append([hx0, hy0])
+        cx = sum_x / float(parts)
+        cy = sum_y / float(parts)
+        max_d2 = 0.0
+        for j in range(parts):
+            ddx = ux[j] - cx
+            ddy = uy[j] - cy
+            dd2 = ddx * ddx + ddy * ddy
+            if dd2 > max_d2:
+                max_d2 = dd2
+        fl_radius = _sqrt(max_d2) + ship_radius
+        return units, unit_headings, cx, cy, fl_radius
+
     def step(self, orders_by_player: Dict[int, Sequence[Order]]) -> None:
         """Advance the Galcon world by one tick (orders -> 20 Hz substeps of production, movement, collisions, combat)."""
         if self.done:
@@ -1209,34 +1379,16 @@ class GalconSim:
                     sy = src.y + (dy / d) * spawn_r
                     hx0 = (dx / d) if raw_d > 1e-6 else 1.0
                     hy0 = (dy / d) if raw_d > 1e-6 else 0.0
-                    unit_headings = [[hx0, hy0] for _ in range(parts)]
-                    if parts == 1:
-                        units = [[sx, sy]]
-                        cx, cy, fl_radius = sx, sy, SHIP_RADIUS
-                    else:
-                        units = []
-                        sum_x = 0.0
-                        sum_y = 0.0
-                        for j in range(parts):
-                            rj = _SPAWN_SPIRAL_STEP * math.sqrt(float(j))
-                            ang = _GOLDEN_ANGLE * float(j)
-                            ux_j = sx + rj * math.cos(ang)
-                            uy_j = sy + rj * math.sin(ang)
-                            units.append([ux_j, uy_j])
-                            sum_x += ux_j
-                            sum_y += uy_j
-                        cx = sum_x / float(parts)
-                        cy = sum_y / float(parts)
-                        max_d2 = 0.0
-                        for u in units:
-                            ddx = u[0] - cx
-                            ddy = u[1] - cy
-                            dd2 = ddx * ddx + ddy * ddy
-                            if dd2 > max_d2:
-                                max_d2 = dd2
-                        fl_radius = math.sqrt(max_d2) + SHIP_RADIUS
                     fid = self.next_fleet_id
                     self.next_fleet_id += 1
+                    if parts == 1:
+                        units = [[sx, sy]]
+                        unit_headings = [[hx0, hy0]]
+                        cx, cy, fl_radius = sx, sy, SHIP_RADIUS
+                    else:
+                        units, unit_headings, cx, cy, fl_radius = self._spawn_and_settle_flock(
+                            fid, parts, sx, sy, dst, hx0, hy0
+                        )
                     self.fleets[fid] = Fleet(
                         id=fid,
                         owner=pid,

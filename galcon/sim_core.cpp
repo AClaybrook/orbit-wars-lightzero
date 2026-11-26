@@ -21,7 +21,9 @@ constexpr double DEFAULT_SHIP_RADIUS = 6.0;
 constexpr double TIE_EPS = 1e-9;
 constexpr double ARRIVAL_EPS = 1e-9;
 constexpr double GOLDEN_ANGLE = 2.399963229728653; // pi * (3 - sqrt(5))
-constexpr double SPAWN_SPIRAL_STEP = 0.05;
+constexpr double SPAWN_AREA_RADIUS = 12.0;
+constexpr int32_t SPAWN_SETTLE_ITERS = 16;
+constexpr double SPAWN_SETTLE_TOL = 0.05;
 constexpr double EPS_DIST2 = 1e-12;
 constexpr double ANTIPODE_DOT_THRESHOLD = -0.995;
 constexpr double PI = 3.14159265358979323846;
@@ -48,6 +50,16 @@ struct ArrivalBucket {
 
 static inline double dist2d(double dx, double dy) {
     return std::sqrt(dx * dx + dy * dy);
+}
+
+static inline double spawn_hash_u01(uint32_t seed) {
+    uint32_t x = seed;
+    x ^= (x >> 16);
+    x *= 0x7FEB352Du;
+    x ^= (x >> 15);
+    x *= 0x846CA68Bu;
+    x ^= (x >> 16);
+    return static_cast<double>(x) / 4294967296.0;
 }
 
 // Exact Galcon 2 / Galcon 3 physical_ship_count formula matching galcon/sim.py.
@@ -868,26 +880,160 @@ struct SimState {
             fl_cy[f] = sy;
             fl_radius[f] = ship_radius;
         } else {
+            double* const fux = ux + u_start;
+            double* const fuy = uy + u_start;
+            const double two_pi = 2.0 * PI;
+            const uint32_t seed_base = static_cast<uint32_t>(fid) * 1000003u;
+            for (int32_t j = 0; j < parts; ++j) {
+                const uint32_t uj = static_cast<uint32_t>(j);
+                const double u1 = spawn_hash_u01(seed_base + uj * 2u + 1u);
+                const double u2 = spawn_hash_u01(seed_base + uj * 2u + 2u);
+                const double r = SPAWN_AREA_RADIUS * std::sqrt(u1);
+                const double ang = two_pi * u2;
+                fux[j] = sx + r * std::cos(ang);
+                fuy[j] = sy + r * std::sin(ang);
+            }
+
+            const double tx = p_x[di];
+            const double ty = p_y[di];
+            const double min_sep = 2.0 * ship_radius;
+            const double min_sep2 = min_sep * min_sep;
+            const double half_k = 0.5 * sep_stiffness;
+            const double cap2 = max_sep_push * max_sep_push;
+
+            static thread_local double s_ox[SIM_MAX_UNITS];
+            static thread_local double s_oy[SIM_MAX_UNITS];
+            static thread_local double s_p_mr[SIM_MAX_PLANETS];
+            static thread_local double s_p_mr2[SIM_MAX_PLANETS];
+            for (int32_t pi = 0; pi < n_planets; ++pi) {
+                const double mr = p_radius[pi] + ship_radius;
+                s_p_mr[pi] = mr;
+                s_p_mr2[pi] = mr * mr;
+            }
+
+            for (int32_t it = 0; it < SPAWN_SETTLE_ITERS; ++it) {
+                double max_ov = 0.0;
+                if (sep_stiffness > 0.0) {
+                    if (max_sep_push > 0.0) {
+                        std::memcpy(s_ox, fux, (size_t)parts * sizeof(double));
+                        std::memcpy(s_oy, fuy, (size_t)parts * sizeof(double));
+                    }
+                    for (int32_t a = 0; a < parts; ++a) {
+                        double ax = fux[a];
+                        double ay = fuy[a];
+                        for (int32_t b = a + 1; b < parts; ++b) {
+                            const double ddx = fux[b] - ax;
+                            const double ddy = fuy[b] - ay;
+                            const double d2 = ddx * ddx + ddy * ddy;
+                            if (d2 < min_sep2) {
+                                double nx, ny, dist;
+                                if (d2 > EPS_DIST2) {
+                                    dist = std::sqrt(d2);
+                                    nx = ddx / dist;
+                                    ny = ddy / dist;
+                                } else {
+                                    dist = 0.0;
+                                    const double ang = GOLDEN_ANGLE * (double)(a * 31 + b + 1);
+                                    nx = std::cos(ang);
+                                    ny = std::sin(ang);
+                                }
+                                const double ov = min_sep - dist;
+                                if (ov > max_ov) max_ov = ov;
+                                const double push = half_k * ov;
+                                const double px_d = nx * push;
+                                const double py_d = ny * push;
+                                ax -= px_d;
+                                ay -= py_d;
+                                fux[b] += px_d;
+                                fuy[b] += py_d;
+                            }
+                        }
+                        fux[a] = ax;
+                        fuy[a] = ay;
+                    }
+                    if (max_sep_push > 0.0) {
+                        for (int32_t u = 0; u < parts; ++u) {
+                            const double ddx = fux[u] - s_ox[u];
+                            const double ddy = fuy[u] - s_oy[u];
+                            const double d2 = ddx * ddx + ddy * ddy;
+                            if (d2 > cap2) {
+                                const double sc = max_sep_push / std::sqrt(d2);
+                                fux[u] = s_ox[u] + ddx * sc;
+                                fuy[u] = s_oy[u] + ddy * sc;
+                            }
+                        }
+                    }
+                }
+
+                double max_pp = 0.0;
+                for (int32_t u = 0; u < parts; ++u) {
+                    double x = fux[u];
+                    double y = fuy[u];
+                    for (int32_t pi = 0; pi < n_planets; ++pi) {
+                        if (pi == di) continue;
+                        const double px_i = p_x[pi];
+                        const double py_i = p_y[pi];
+                        const double ddx = x - px_i;
+                        const double ddy = y - py_i;
+                        const double d2 = ddx * ddx + ddy * ddy;
+                        if (d2 < s_p_mr2[pi]) {
+                            const double mr = s_p_mr[pi];
+                            if (d2 > EPS_DIST2) {
+                                const double dist = std::sqrt(d2);
+                                const double pp = mr - dist;
+                                if (pp > max_pp) max_pp = pp;
+                                x = px_i + (ddx / dist) * mr;
+                                y = py_i + (ddy / dist) * mr;
+                            } else {
+                                if (mr > max_pp) max_pp = mr;
+                                const double tdx = tx - px_i;
+                                const double tdy = ty - py_i;
+                                const double td2 = tdx * tdx + tdy * tdy;
+                                if (td2 > EPS_DIST2) {
+                                    const double td = std::sqrt(td2);
+                                    x = px_i + (tdx / td) * mr;
+                                    y = py_i + (tdy / td) * mr;
+                                } else {
+                                    x = px_i + mr;
+                                    y = py_i;
+                                }
+                            }
+                        }
+                    }
+                    fux[u] = x;
+                    fuy[u] = y;
+                }
+
+                if (max_ov <= SPAWN_SETTLE_TOL && max_pp <= SPAWN_SETTLE_TOL) {
+                    break;
+                }
+            }
+
             double sum_x = 0.0;
             double sum_y = 0.0;
             for (int32_t j = 0; j < parts; ++j) {
-                const double rj = SPAWN_SPIRAL_STEP * std::sqrt((double)j);
-                const double ang = GOLDEN_ANGLE * (double)j;
-                const double x = sx + rj * std::cos(ang);
-                const double y = sy + rj * std::sin(ang);
-                ux[u_start + j] = x;
-                uy[u_start + j] = y;
-                uhx[u_start + j] = hx0;
-                uhy[u_start + j] = hy0;
-                sum_x += x;
-                sum_y += y;
+                const double xj = fux[j];
+                const double yj = fuy[j];
+                sum_x += xj;
+                sum_y += yj;
+                const double hdx = tx - xj;
+                const double hdy = ty - yj;
+                const double hd2 = hdx * hdx + hdy * hdy;
+                if (hd2 > EPS_DIST2) {
+                    const double hd = std::sqrt(hd2);
+                    uhx[u_start + j] = hdx / hd;
+                    uhy[u_start + j] = hdy / hd;
+                } else {
+                    uhx[u_start + j] = hx0;
+                    uhy[u_start + j] = hy0;
+                }
             }
             const double cx = sum_x / (double)parts;
             const double cy = sum_y / (double)parts;
             double max_d2 = 0.0;
             for (int32_t j = 0; j < parts; ++j) {
-                const double ddx = ux[u_start + j] - cx;
-                const double ddy = uy[u_start + j] - cy;
+                const double ddx = fux[j] - cx;
+                const double ddy = fuy[j] - cy;
                 const double dd2 = ddx * ddx + ddy * ddy;
                 if (dd2 > max_d2) max_d2 = dd2;
             }

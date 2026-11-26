@@ -61,7 +61,7 @@ def test_galcon_tactical_bot_beats_classic_baseline():
     tactical = GalconTacticalBot()
     classic = GalconClassicBot()
     wins = 0
-    num_games = 48
+    num_games = 200
     for s in range(num_games):
         sim = GalconSim.create(seed=100 + s, max_ticks=200)
         t_pid = 1 if (s % 2 == 0) else 2
@@ -73,7 +73,7 @@ def test_galcon_tactical_bot_beats_classic_baseline():
                 sim.step({})
         if sim.winner() == t_pid:
             wins += 1
-    assert wins >= 30, f"Expected GalconTacticalBot to dominate GalconClassicBot, got {wins}/{num_games}"
+    assert wins >= 120, f"Expected GalconTacticalBot to dominate GalconClassicBot, got {wins}/{num_games}"
 
 
 def test_galcon_sparring_suite_rusher_and_macro():
@@ -1732,8 +1732,9 @@ def test_galcon_sim_fractional_send_and_physical_ship_count():
 
 
 def test_galcon_sim_physical_ships_separation_pushout_gradual_landing_and_redir():
-    """Verify physical ship circle colliders: spawn, same-fleet separation, planet pushout, gradual landing, redir, timing, and clone isolation."""
+    """Verify physical ship circle colliders: 12u disc spawn + rapid launch-tick settling, planet pushout, gradual landing, redir, timing, and clone isolation."""
     import math
+    import galcon
     from galcon.sim import (
         ANTIPODE_DOT_THRESHOLD,
         ANTIPODE_ESCAPE_TANGENT,
@@ -1741,6 +1742,9 @@ def test_galcon_sim_physical_ships_separation_pushout_gradual_landing_and_redir(
         SHIP_RADIUS,
         SHIP_SEP_MAX_DISP,
         SHIP_SEP_STIFFNESS,
+        SPAWN_AREA_RADIUS,
+        SPAWN_SETTLE_ITERS,
+        SPAWN_SETTLE_TOL,
         Fleet,
         GalconSim,
         Planet,
@@ -1748,53 +1752,131 @@ def test_galcon_sim_physical_ships_separation_pushout_gradual_landing_and_redir(
         SendOrder,
     )
 
-    # Module constants match tuned 20 Hz C++ kernel spec
+    # Module constants & package re-exports match tuned 20 Hz C++ kernel spec
     assert DEFAULT_PHYSICS_SUBSTEPS == 5
     assert SHIP_SEP_STIFFNESS == 1.0
-    assert SHIP_SEP_MAX_DISP == 2.5
+    assert SHIP_SEP_MAX_DISP == 6.0
+    assert SPAWN_AREA_RADIUS == 12.0
+    assert SPAWN_SETTLE_ITERS == 16
+    assert SPAWN_SETTLE_TOL == 0.05
     assert ANTIPODE_DOT_THRESHOLD == -0.995
     assert ANTIPODE_ESCAPE_TANGENT == 0.05
+    assert galcon.SHIP_SEP_MAX_DISP == SHIP_SEP_MAX_DISP
+    assert galcon.SPAWN_AREA_RADIUS == SPAWN_AREA_RADIUS
+    assert galcon.SPAWN_SETTLE_ITERS == SPAWN_SETTLE_ITERS
+    assert galcon.SPAWN_SETTLE_TOL == SPAWN_SETTLE_TOL
 
-    # 1. Multi-ship send spawns `parts` physical units in a tight mass at src.r + SHIP_RADIUS
-    #    and same-fleet collision smoothly separates them without launch explosion
+    def _max_pair_overlap(units: list[list[float]]) -> float:
+        min_sep = 2.0 * SHIP_RADIUS
+        mov = 0.0
+        for a in range(len(units)):
+            ax, ay = units[a]
+            for b in range(a + 1, len(units)):
+                d = math.hypot(units[b][0] - ax, units[b][1] - ay)
+                if d < min_sep:
+                    mov = max(mov, min_sep - d)
+        return mov
+
+    # 1a. Deterministic 12u disc + launch-tick settling across small/medium flocks in open space
     p1 = Planet(id=1, owner=1, ships=100.0, x=50.0, y=120.0, production=0.0, radius=24.0)
     p2 = Planet(id=2, owner=2, ships=500.0, x=430.0, y=120.0, production=0.0, radius=24.0)
-    # Run 1 substep per step (20 Hz) to inspect exact substep evolution
+
+    sx = p1.x + p1.radius + SHIP_RADIUS
+    sy = p1.y
+    for ships_n, exp_parts in ((1.0, 1), (5.0, 5), (10.0, 10), (17.0, 17)):
+        sim_sz = GalconSim(
+            [
+                Planet(id=1, owner=1, ships=ships_n, x=p1.x, y=p1.y, production=0.0, radius=p1.radius),
+                p2,
+            ],
+            width=480.0,
+            height=240.0,
+            use_cpp=False,
+        )
+        if exp_parts == 1:
+            sim_sz.step({1: [SendOrder(1, 2, 100)]})
+            fl_s = next(iter(sim_sz.fleets.values()))
+            assert fl_s.num_units == 1
+            assert np.isclose(fl_s.x, sx + 10.0, atol=1e-9)
+            assert np.isclose(fl_s.y, sy, atol=1e-9)
+            assert fl_s.unit_headings == [[1.0, 0.0]]
+        else:
+            spawn_u, spawn_h, _, _, _ = sim_sz._spawn_and_settle_flock(1000, exp_parts, sx, sy, p2, 1.0, 0.0)
+            assert len(spawn_u) == len(spawn_h) == exp_parts
+            # Immediately on spawn: <= 0.5u overlap for parts=5, 10, 17 and zero penetration into src
+            assert _max_pair_overlap(spawn_u) <= 0.5
+            for u, h in zip(spawn_u, spawn_h):
+                assert math.hypot(u[0] - p1.x, u[1] - p1.y) >= p1.radius + SHIP_RADIUS - 1e-9
+                ddx, ddy = p2.x - u[0], p2.y - u[1]
+                dd = math.hypot(ddx, ddy)
+                assert np.isclose(h[0] * (ddx / dd) + h[1] * (ddy / dd), 1.0, atol=1e-12)
+            # After tick 1 (5 substeps): still <= 0.6u overlap and zero planet penetration
+            sim_sz.step({1: [SendOrder(1, 2, 100)]})
+            fl_t1 = next(iter(sim_sz.fleets.values()))
+            assert fl_t1.units is not None and fl_t1.num_units == exp_parts
+            assert _max_pair_overlap(fl_t1.units) <= 0.6
+            for u in fl_t1.units:
+                assert math.hypot(u[0] - p1.x, u[1] - p1.y) >= p1.radius + SHIP_RADIUS - 1e-9
+
+    # Also verify multi-planet non-target pushout at launch when a nearby obstacle planet borders the spawn zone
+    p_near = Planet(id=3, owner=0, ships=30.0, x=95.0, y=170.0, production=0.0, radius=18.0)
+    sim_near = GalconSim([p1, p2, p_near], width=480.0, height=240.0, use_cpp=False)
+    near_u, _, _, _, _ = sim_near._spawn_and_settle_flock(1000, 41, sx, sy, p2, 1.0, 0.0)
+    for u in near_u:
+        assert math.hypot(u[0] - p1.x, u[1] - p1.y) >= p1.radius + SHIP_RADIUS - 1e-9
+        assert math.hypot(u[0] - p_near.x, u[1] - p_near.y) >= p_near.radius + SHIP_RADIUS - 1e-9
+    sim_near.step({1: [SendOrder(1, 2, 100)]})
+    fl_near = next(iter(sim_near.fleets.values()))
+    assert fl_near.units is not None and fl_near.num_units == 41
+    for u in fl_near.units:
+        assert math.hypot(u[0] - p1.x, u[1] - p1.y) >= p1.radius + SHIP_RADIUS - 1e-9
+        assert math.hypot(u[0] - p_near.x, u[1] - p_near.y) >= p_near.radius + SHIP_RADIUS - 1e-9
+
+    # 1b. Large 41-ship launch settles almost completely right on spawn tick with zero overshoot/rebound
     sim_sep = GalconSim([p1, p2], width=480.0, height=240.0, tick_dt=0.05, physics_substeps=1)
-    sim_sep.step({1: [SendOrder(1, 2, 100)]})
+    spawn41_u, spawn41_h, spawn41_cx, _, spawn41_r = sim_sep._spawn_and_settle_flock(1000, 41, sx, sy, p2, 1.0, 0.0)
+    assert len(spawn41_u) == len(spawn41_h) == 41
+    assert 40.0 < spawn41_r < 70.0
+    for u, h in zip(spawn41_u, spawn41_h):
+        assert math.hypot(u[0] - p1.x, u[1] - p1.y) >= p1.radius + SHIP_RADIUS - 1e-9
+        ddx, ddy = p2.x - u[0], p2.y - u[1]
+        dd = math.hypot(ddx, ddy)
+        assert np.isclose(h[0] * (ddx / dd) + h[1] * (ddy / dd), 1.0, atol=1e-12)
+
+    sim_sep.step({1: [SendOrder(1, 2, 100)]})  # substep 1 (0.05s)
     assert len(sim_sep.fleets) == 1
     fl = next(iter(sim_sep.fleets.values()))
     assert fl.units is not None
     assert len(fl.units) == fl.num_units == 41
     assert np.isclose(fl.ships, 100.0, atol=1e-12)
     assert sim_sep.item_count() == 3 + 2 + 1 + 41
-    # Tight mass at launch: after 1 substep, radius is still compact (no explosion)
-    assert SHIP_RADIUS < fl.radius < 12.0
-    # Centroid launched from p1.x + p1.r + SHIP_RADIUS (80.0) and moved ~2.0u toward p2
-    assert 79.0 <= fl.x <= 86.0
+    assert fl.x > spawn41_cx + 1.0
     for u in fl.units:
-        assert math.sqrt((u[0] - p1.x) ** 2 + (u[1] - p1.y) ** 2) >= p1.radius + SHIP_RADIUS - 1e-9
+        assert math.hypot(u[0] - p1.x, u[1] - p1.y) >= p1.radius + SHIP_RADIUS - 1e-9
 
-    radii = [fl.radius]
+    radii = [spawn41_r, fl.radius]
+    overlaps = [_max_pair_overlap(spawn41_u), _max_pair_overlap(fl.units)]
     prev_units = [u[:] for u in fl.units]
-    for _ in range(25):
+    for _ in range(24):
         sim_sep.step({})
         fl = next(iter(sim_sep.fleets.values()))
         assert fl.units is not None and len(fl.units) == 41
-        # Per-substep displacement bounded by forward move (2.0u) + SHIP_SEP_MAX_DISP (2.5u) + pushout margin
+        # Per-substep displacement bounded by forward move (2.0u) + SHIP_SEP_MAX_DISP (6.0u) + pushout margin
         max_disp = max(
-            math.sqrt((u[0] - pu[0]) ** 2 + (u[1] - pu[1]) ** 2) for u, pu in zip(fl.units, prev_units)
+            math.hypot(u[0] - pu[0], u[1] - pu[1]) for u, pu in zip(fl.units, prev_units)
         )
         assert max_disp <= 2.0 + SHIP_SEP_MAX_DISP + 1e-6
         for u in fl.units:
-            assert math.sqrt((u[0] - p1.x) ** 2 + (u[1] - p1.y) ** 2) >= p1.radius + SHIP_RADIUS - 1e-9
+            assert math.hypot(u[0] - p1.x, u[1] - p1.y) >= p1.radius + SHIP_RADIUS - 1e-9
         radii.append(fl.radius)
+        overlaps.append(_max_pair_overlap(fl.units))
         prev_units = [u[:] for u in fl.units]
-    # Monotonic smooth expansion from tight launch cluster into physical circle packing
-    for i in range(1, 16):
-        assert radii[i] >= radii[i - 1] - 1e-9
-    assert radii[0] < radii[5] < radii[15] < radii[25]
-    assert 25.0 < radii[25] < 60.0
+    # By tick 1 (substep 5 = 0.25s): almost completely settled (< 2.5u max overlap); by tick 2 (substep 10): < 1.0u
+    assert overlaps[5] < 2.5, f"Expected 41-ship tick-1 max_overlap < 2.5u, got {overlaps[5]:.4f}"
+    assert overlaps[10] < 1.0, f"Expected 41-ship tick-2 max_overlap < 1.0u, got {overlaps[10]:.4f}"
+    # Zero overshoot / launch rebound: radius stays tightly near its settled launch radius
+    assert max(radii) - spawn41_r < 3.0, f"Unexpected launch overshoot: spawn_r={spawn41_r:.2f}, max_r={max(radii):.2f}"
+    assert spawn41_r - min(radii) < 5.0, f"Unexpected launch rebound: spawn_r={spawn41_r:.2f}, min_r={min(radii):.2f}"
 
     # 2. Cross-fleet ships do NOT push each other apart (same owner AND opposing owner)
     pa = Planet(id=1, owner=1, ships=50.0, x=20.0, y=100.0, production=0.0, radius=12.0)
@@ -2030,6 +2112,23 @@ def test_galcon_sim_cpp_bit_exact_parity_and_fast_rollout():
 
     if not HAS_FAST_SIM_CPP:
         return
+
+    # 1b. Bit-exact 0.000e+00 parity on SendOrder 12u disc spawn + launch-tick settling (parts = 1, 5, 10, 17, 41)
+    for ships_n, exp_parts in ((1.0, 1), (5.0, 5), (10.0, 10), (17.0, 17), (100.0, 41)):
+        sp_planets = [
+            Planet(id=1, owner=1, ships=ships_n, x=50.0, y=120.0, production=0.0, radius=24.0),
+            Planet(id=2, owner=2, ships=500.0, x=430.0, y=120.0, production=0.0, radius=24.0),
+            Planet(id=3, owner=0, ships=30.0, x=95.0, y=170.0, production=0.0, radius=18.0),
+        ]
+        sp_py = GalconSim(sp_planets, width=480.0, height=240.0, use_cpp=False)
+        sp_cpp = GalconSim(sp_planets, width=480.0, height=240.0, use_cpp=True)
+        sp_fast = FastGalconCppSim.from_sim(sp_py)
+        sp_py.step({1: [SendOrder(1, 2, 100)]})
+        sp_cpp.step({1: [SendOrder(1, 2, 100)]})
+        sp_fast.step({1: [SendOrder(1, 2, 100)]})
+        assert next(iter(sp_py.fleets.values())).num_units == exp_parts
+        assert _compare_sims(sp_py, sp_cpp) == 0.0
+        assert _compare_sims(sp_py, sp_fast.to_sim()) == 0.0
 
     # 2. 150-tick 23-planet randomized multi-fleet battle across pure Python, drop-in C++, and FastGalconCppSim
     planets = generate_galcon_map(seed=1337, num_planets=23, width=480.0, height=320.0, symmetric=True)
