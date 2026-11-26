@@ -648,11 +648,14 @@ def test_wave8_vectorized_futures_and_adaptive_large_horizon(tmp_path: Path):
                 assert np.allclose(po_a[idx], r_po, atol=1e-6)
                 assert np.allclose(ps_a[idx], r_ps, atol=1e-6)
 
-    # 2. _sample_gen3_map_config respects large_prob
+    # 2. _sample_gen3_map_config respects large_prob, samples even planet counts, and prefers symmetric maps
     rng = random.Random(777)
     samples = [_sample_gen3_map_config(rng, large_prob=0.50) for _ in range(200)]
     large_frac = sum(1 for n_pl, _, _, _ in samples if n_pl >= 22) / len(samples)
+    sym_frac = sum(1 for _, _, _, sym in samples if sym) / len(samples)
     assert 0.35 <= large_frac <= 0.65
+    assert sym_frac >= 0.75
+    assert all(n_pl % 2 == 0 for n_pl, _, _, _ in samples)
 
     # 3. Map-adaptive Large horizon runs cleanly on 24pl asymmetric arena
     m = build_galcon_gen4_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
@@ -1289,10 +1292,13 @@ def test_wave16_def_stream_opening_guard_and_1t_ei(tmp_path):
 
 def test_galcon_sim_radius_defaults_and_settle_clearance():
     import math
+    import random
+    import galcon
     from galcon.sim import (
         DEFAULT_MAP_HEIGHT,
         DEFAULT_MAP_WIDTH,
         DEFAULT_NUM_PLANETS,
+        DEFAULT_NUM_PLAYERS,
         MIN_PLANET_GAP,
         NEUTRAL_PROD_MAX,
         NEUTRAL_PROD_MIN,
@@ -1303,28 +1309,49 @@ def test_galcon_sim_radius_defaults_and_settle_clearance():
         generate_galcon_map,
         planet_radius_from_production,
         settle_planets,
+        symmetric_planet_count,
     )
+    from galcon.train import _sample_gen3_map_config, _sample_map_config
 
-    # 1. Exact Galcon 2 planet radius formula + lower clamping at prod <= 15
+    # 1. Exact Galcon 2 planet radius formula + lower clamping at prod <= 15 + even 1v1 defaults
     assert SHIP_RADIUS == 6.0
     assert PLANET_SETTLE_DELTA == 0.5
     assert MIN_PLANET_GAP == 12.5
     assert DEFAULT_MAP_WIDTH == 480.0
     assert DEFAULT_MAP_HEIGHT == 320.0
-    assert DEFAULT_NUM_PLANETS == 23
+    assert DEFAULT_NUM_PLAYERS == 2
+    assert DEFAULT_NUM_PLANETS == 22
+    assert galcon.DEFAULT_NUM_PLAYERS == DEFAULT_NUM_PLAYERS
+    assert galcon.DEFAULT_NUM_PLANETS == DEFAULT_NUM_PLANETS
+    assert galcon.symmetric_planet_count is symmetric_planet_count
     assert np.isclose(planet_radius_from_production(15), 12.0, atol=1e-12)
     assert np.isclose(planet_radius_from_production(100), 24.0, atol=1e-12)
     assert np.isclose(planet_radius_from_production(50), (50.0 * 12.0 / 5.0 + 168.0) / 17.0, atol=1e-12)
     for low_p in (-10.0, 0.0, 5.0, 14.99, 15.0):
         assert planet_radius_from_production(low_p) == 12.0
 
-    # 2. Default GalconSim.create() uses 480x320, 23 planets, 12.5u clearance, exact symmetry,
-    #    and exact neutral ship (0..45) / production (15..100) / radius invariants
+    def _assert_even_symmetric_no_center(plist, width: float, height: float) -> None:
+        assert len(plist) % 2 == 0
+        cx, cy = width * 0.5, height * 0.5
+        for k in range(len(plist) // 2):
+            pa, pb = plist[2 * k], plist[2 * k + 1]
+            assert np.isclose(pa.x + pb.x, width, atol=1e-6)
+            assert np.isclose(pa.y + pb.y, height, atol=1e-6)
+            assert pa.production == pb.production and pa.ships == pb.ships and pa.radius == pb.radius
+        for p in plist:
+            assert math.hypot(p.x - cx, p.y - cy) >= p.radius + 0.5 * MIN_PLANET_GAP - 1e-6
+        for i in range(len(plist)):
+            for j in range(i + 1, len(plist)):
+                dist = math.hypot(plist[i].x - plist[j].x, plist[i].y - plist[j].y)
+                assert dist >= plist[i].radius + plist[j].radius + MIN_PLANET_GAP - 1e-6
+
+    # 2. Default GalconSim.create() uses 480x320, 22 even planets, 12.5u clearance, exact symmetry,
+    #    NO center planet at (width/2, height/2), and neutral ship (0..45) / prod (15..100) / radius invariants
     for seed in range(20):
         sim = GalconSim.create(seed=seed)
         assert sim.width == 480.0 and sim.height == 320.0
         plist = [sim.planets[pid] for pid in sorted(sim.planets.keys())]
-        assert len(plist) == 23
+        assert len(plist) == 22
         for p in plist:
             assert p.radius == planet_radius_from_production(p.production)
             assert p.radius + SHIP_RADIUS - 1e-6 <= p.x <= sim.width - p.radius - SHIP_RADIUS + 1e-6
@@ -1332,23 +1359,52 @@ def test_galcon_sim_radius_defaults_and_settle_clearance():
             if p.owner == 0:
                 assert NEUTRAL_SHIPS_MIN <= p.ships <= NEUTRAL_SHIPS_MAX
                 assert NEUTRAL_PROD_MIN <= p.production <= NEUTRAL_PROD_MAX
-        for i in range(len(plist)):
-            for j in range(i + 1, len(plist)):
-                dist = math.hypot(plist[i].x - plist[j].x, plist[i].y - plist[j].y)
-                assert dist >= plist[i].radius + plist[j].radius + MIN_PLANET_GAP - 1e-6
+        _assert_even_symmetric_no_center(plist, sim.width, sim.height)
 
-        # Exact 180-degree rotational symmetry (homes + neutral pairs) & pinned center planet
-        for k in range(len(plist) // 2):
-            pa, pb = plist[2 * k], plist[2 * k + 1]
-            assert np.isclose(pa.x + pb.x, sim.width, atol=1e-6)
-            assert np.isclose(pa.y + pb.y, sim.height, atol=1e-6)
-            assert pa.production == pb.production and pa.ships == pb.ships and pa.radius == pb.radius
-        pc = plist[-1]
-        assert np.isclose(pc.x, sim.width * 0.5, atol=1e-6)
-        assert np.isclose(pc.y, sim.height * 0.5, atol=1e-6)
-        assert pc.owner == 0
+    # 2b. Odd num_planets in symmetric 1v1 mode drops remainder mod num_players (no center planet)
+    for req_n, exp_n in ((23, 22), (19, 18), (15, 14)):
+        for seed in (0, 7, 42):
+            plist = generate_galcon_map(seed=seed, num_planets=req_n, width=480.0, height=320.0, symmetric=True)
+            assert len(plist) == exp_n
+            _assert_even_symmetric_no_center(plist, 480.0, 320.0)
+            sim_odd = GalconSim.create(seed=seed, num_planets=req_n, width=480.0, height=320.0, symmetric=True)
+            assert len(sim_odd.planets) == exp_n
 
-    # Asymmetric maps also obey neutral ship (0..45), prod (15..100), radius, and 12.5u clearance
+    # 2c. General mod num_players helper & num_players=3/4 behavior
+    assert symmetric_planet_count(23, 2) == 22
+    assert symmetric_planet_count(22, 2) == 22
+    assert symmetric_planet_count(19, 2) == 18
+    assert symmetric_planet_count(15, 2) == 14
+    assert symmetric_planet_count(23, 3) == 21
+    assert symmetric_planet_count(20, 3) == 18
+    assert symmetric_planet_count(23, 4) == 20
+    assert symmetric_planet_count(24, 4) == 24
+    assert symmetric_planet_count(1, 2) == 2
+
+    pl_4p = generate_galcon_map(seed=11, num_planets=23, num_players=4, width=480.0, height=320.0, symmetric=True)
+    assert len(pl_4p) == 20 and len(pl_4p) % 4 == 0
+    _assert_even_symmetric_no_center(pl_4p, 480.0, 320.0)
+    sim_4p = GalconSim.create(seed=11, num_planets=23, num_players=4, width=480.0, height=320.0, symmetric=True)
+    assert len(sim_4p.planets) == 20
+
+    pl_2p = generate_galcon_map(seed=11, num_planets=22, num_players=2, width=480.0, height=320.0, symmetric=True)
+    assert len(pl_2p) == 22
+    _assert_even_symmetric_no_center(pl_2p, 480.0, 320.0)
+
+    for req_3p, exp_3p in ((20, 18), (23, 18)):
+        pl_3p = generate_galcon_map(seed=11, num_planets=req_3p, num_players=3, width=480.0, height=320.0, symmetric=True)
+        assert len(pl_3p) == exp_3p and len(pl_3p) % 3 == 0
+        _assert_even_symmetric_no_center(pl_3p, 480.0, 320.0)
+
+    # 2d. Training map samplers prefer symmetric maps and sample strictly even planet counts
+    srng = random.Random(2026)
+    base_samples = [_sample_map_config(srng) for _ in range(100)]
+    assert all(n_pl % 2 == 0 for n_pl, _, _ in base_samples)
+    gen3_samples = [_sample_gen3_map_config(srng, large_prob=0.35) for _ in range(300)]
+    assert all(n_pl % 2 == 0 for n_pl, _, _, _ in gen3_samples)
+    assert sum(1 for _, _, _, sym in gen3_samples if sym) / len(gen3_samples) >= 0.80
+
+    # Asymmetric maps still honor explicit odd counts (e.g. 23), neutral bounds, radius, and 12.5u clearance
     for seed in range(5):
         asym = generate_galcon_map(seed=seed, num_planets=23, width=480.0, height=320.0, symmetric=False)
         assert len(asym) == 23
@@ -2130,8 +2186,9 @@ def test_galcon_sim_cpp_bit_exact_parity_and_fast_rollout():
         assert _compare_sims(sp_py, sp_cpp) == 0.0
         assert _compare_sims(sp_py, sp_fast.to_sim()) == 0.0
 
-    # 2. 150-tick 23-planet randomized multi-fleet battle across pure Python, drop-in C++, and FastGalconCppSim
-    planets = generate_galcon_map(seed=1337, num_planets=23, width=480.0, height=320.0, symmetric=True)
+    # 2. 150-tick 22-planet randomized multi-fleet battle across pure Python, drop-in C++, and FastGalconCppSim
+    planets = generate_galcon_map(seed=1337, num_planets=22, width=480.0, height=320.0, symmetric=True)
+    assert len(planets) == 22
     # Reinforce homes & forward outposts so the multi-fleet battle runs all 150 ticks with heavy collisions & landings
     planets[0].ships = 350.0
     planets[1].ships = 350.0

@@ -269,10 +269,10 @@ def _bernoulli_log_prob_and_entropy(logits: torch.Tensor, actions: torch.Tensor)
 
 
 def _sample_map_config(rng: random.Random) -> Tuple[int, float, float]:
-    """Mix compact tactical maps (8-12 planets) and classic 14-22 planet Galcon maps."""
+    """Mix compact tactical maps (8-12 even planets) and classic 14-22 even-planet Galcon maps."""
     if rng.random() < 0.40:
-        return rng.randint(8, 12), 240.0, 150.0
-    return rng.randint(14, 22), 400.0, 240.0
+        return rng.randrange(8, 13, 2), 240.0, 150.0
+    return rng.randrange(14, 23, 2), 400.0, 240.0
 
 
 def _orders_to_targets(enc, orders: Sequence[Order]) -> Tuple[np.ndarray, np.ndarray]:
@@ -1929,19 +1929,19 @@ def rl_league_ppo_gen2(
 
 
 def _sample_gen3_map_config(rng: random.Random, large_prob: float = 0.30) -> Tuple[int, float, float, bool]:
-    """Gen 3/8 multi-scale map distribution: compact + classic + large asymmetric gbots arenas."""
+    """Gen 3/8 multi-scale map distribution preferring symmetric even-planet 1v1 maps."""
     lp = max(0.0, min(0.80, float(large_prob)))
     u = rng.random()
     if u >= 1.0 - lp:
-        # Large gbots arena (22-28 planets, 520x320 to 600x360, 45% asymmetric!)
+        # Large gbots arena (22-28 even planets, 520x320 to 600x360, 85% symmetric)
         w = rng.choice([520.0, 560.0, 600.0])
         h = round(w * 0.60, 1)
-        return rng.randint(22, 28), w, h, (rng.random() < 0.55)
-    # Split remaining (1 - lp) roughly 35% compact / 65% classic 14-22pl
+        return rng.randrange(22, 29, 2), w, h, (rng.random() < 0.85)
+    # Split remaining (1 - lp) roughly 35% compact / 65% classic 14-22 even planets
     rem_u = u / max(1e-6, 1.0 - lp)
     if rem_u < 0.35:
-        return rng.randint(8, 12), 240.0, 150.0, True
-    return rng.randint(14, 22), 400.0, 240.0, (rng.random() < 0.80)
+        return rng.randrange(8, 13, 2), 240.0, 150.0, True
+    return rng.randrange(14, 23, 2), 400.0, 240.0, (rng.random() < 0.90)
 
 
 def evaluate_large_arena_matchup(

@@ -27,7 +27,8 @@ PLANET_SETTLE_DELTA = 0.5
 MIN_PLANET_GAP = 2.0 * SHIP_RADIUS + PLANET_SETTLE_DELTA  # 12.5
 DEFAULT_MAP_WIDTH = 480.0
 DEFAULT_MAP_HEIGHT = 320.0
-DEFAULT_NUM_PLANETS = 23
+DEFAULT_NUM_PLAYERS = 2
+DEFAULT_NUM_PLANETS = 22
 NEUTRAL_SHIPS_MIN = 0
 NEUTRAL_SHIPS_MAX = 45
 NEUTRAL_PROD_MIN = 15
@@ -397,17 +398,30 @@ def settle_planets(
     return _planets_clearance_ok(planets, min_gap=min_gap)
 
 
+def symmetric_planet_count(num_planets: int, num_players: int = DEFAULT_NUM_PLAYERS) -> int:
+    """Round ``num_planets`` down modulo ``num_players`` (at least ``num_players``) for fair symmetric maps."""
+    n_players = max(1, int(num_players))
+    req = int(num_planets)
+    return max(n_players, req - (req % n_players))
+
+
 def generate_galcon_map(
     *,
     seed: int = 42,
     num_planets: int = DEFAULT_NUM_PLANETS,
+    num_players: int = DEFAULT_NUM_PLAYERS,
     width: float = DEFAULT_MAP_WIDTH,
     height: float = DEFAULT_MAP_HEIGHT,
     home_ships: float = 100.0,
     home_prod: float = 100.0,
     symmetric: bool = True,
 ) -> List[Planet]:
-    """Generate a balanced 2P Galcon map (180-degree rotationally symmetric by default)."""
+    """Generate a balanced 2P Galcon map (180-degree rotationally symmetric by default).
+
+    When ``symmetric=True``, extra remainder planets modulo ``num_players`` are dropped so
+    symmetric 1v1 maps always have strictly even planet counts with no central odd planet at
+    ``(width / 2, height / 2)``.
+    """
     rng = random.Random(seed)
     width = float(width)
     height = float(height)
@@ -460,34 +474,15 @@ def generate_galcon_map(
         radius=home_r,
     )
 
-    def fits(x: float, y: float, r: float, existing: Sequence[Planet]) -> bool:
-        lo_x, hi_x = _axis_bounds(r, width)
-        lo_y, hi_y = _axis_bounds(r, height)
-        if x < lo_x - 1e-9 or x > hi_x + 1e-9 or y < lo_y - 1e-9 or y > hi_y + 1e-9:
-            return False
-        for p in existing:
-            if math.hypot(x - p.x, y - p.y) < r + p.radius + min_gap:
-                return False
-        return True
-
-    target_neutrals = max(2, int(num_planets) - 2)
     if symmetric:
+        n_players = max(1, int(num_players))
+        effective_planets = symmetric_planet_count(num_planets, n_players)
+        # 2-player 180-degree rotational symmetry places planets strictly in mirror pairs with no center planet.
+        if effective_planets % 2 == 1 and effective_planets - n_players >= 2:
+            effective_planets -= n_players
+        target_neutrals = max(0, effective_planets - 2)
         pairs = target_neutrals // 2
         pair_planets: List[Planet] = [home1, home2]
-        center_planet: Optional[Planet] = None
-
-        if target_neutrals % 2 == 1:
-            c_prod = float(rng.randint(NEUTRAL_PROD_MIN, NEUTRAL_PROD_MAX))
-            c_r = planet_radius_from_production(c_prod)
-            c_ships = float(rng.randint(NEUTRAL_SHIPS_MIN, NEUTRAL_SHIPS_MAX))
-            cand_center = Planet(id=0, owner=0, ships=c_ships, x=cx, y=cy, production=c_prod, radius=c_r)
-            if fits(cx, cy, c_r, pair_planets):
-                center_planet = cand_center
-            else:
-                trial = _clone_planets(pair_planets) + [cand_center]
-                if settle_planets(trial, width, height, min_gap=min_gap, symmetric=True, max_iters=30):
-                    pair_planets = trial[:-1]
-                    center_planet = trial[-1]
 
         for _ in range(pairs):
             prod = float(rng.randint(NEUTRAL_PROD_MIN, NEUTRAL_PROD_MAX))
@@ -495,7 +490,6 @@ def generate_galcon_map(
             ships = float(rng.randint(NEUTRAL_SHIPS_MIN, NEUTRAL_SHIPS_MAX))
             lo_x, hi_x = _axis_bounds(r, width)
             lo_y, hi_y = _axis_bounds(r, height)
-            existing = pair_planets + ([center_planet] if center_planet is not None else [])
             placed = False
             best_margin = -1e18
             best_xy: Optional[Tuple[float, float]] = None
@@ -506,7 +500,7 @@ def generate_galcon_map(
                 mx, my = width - x, height - y
                 min_clear = math.hypot(x - mx, y - my) - (2.0 * r + min_gap)
                 if min_clear > best_margin or min_clear >= 0.0:
-                    for p in existing:
+                    for p in pair_planets:
                         c1 = math.hypot(x - p.x, y - p.y) - (r + p.radius + min_gap)
                         if c1 < min_clear:
                             min_clear = c1
@@ -528,26 +522,20 @@ def generate_galcon_map(
 
             if not placed and best_xy is not None:
                 bx, by = best_xy
-                trial_pairs = _clone_planets(pair_planets)
-                trial_pairs.append(Planet(id=0, owner=0, ships=ships, x=bx, y=by, production=prod, radius=r))
-                trial_pairs.append(
+                trial = _clone_planets(pair_planets)
+                trial.append(Planet(id=0, owner=0, ships=ships, x=bx, y=by, production=prod, radius=r))
+                trial.append(
                     Planet(id=0, owner=0, ships=ships, x=width - bx, y=height - by, production=prod, radius=r)
                 )
-                trial = trial_pairs + (_clone_planets([center_planet]) if center_planet is not None else [])
                 if settle_planets(trial, width, height, min_gap=min_gap, symmetric=True, max_iters=30):
-                    if center_planet is not None:
-                        pair_planets = trial[:-1]
-                        center_planet = trial[-1]
-                    else:
-                        pair_planets = trial
+                    pair_planets = trial
                     placed = True
             if not placed:
                 continue
 
         planets: List[Planet] = list(pair_planets)
-        if center_planet is not None:
-            planets.append(center_planet)
     else:
+        target_neutrals = max(2, int(num_planets) - 2)
         planets = [home1, home2]
         for _ in range(target_neutrals):
             prod = float(rng.randint(NEUTRAL_PROD_MIN, NEUTRAL_PROD_MAX))
@@ -590,9 +578,7 @@ def generate_galcon_map(
     settle_planets(planets, width, height, min_gap=min_gap, symmetric=symmetric, max_iters=30)
     while len(planets) > 2 and not _planets_clearance_ok(planets, min_gap=min_gap):
         if symmetric:
-            if len(planets) % 2 == 1:
-                planets.pop()
-            elif len(planets) >= 4:
+            if len(planets) >= 4:
                 planets.pop()
                 planets.pop()
             else:
@@ -676,6 +662,7 @@ class GalconSim:
         *,
         seed: int = 42,
         num_planets: int = DEFAULT_NUM_PLANETS,
+        num_players: int = DEFAULT_NUM_PLAYERS,
         width: float = DEFAULT_MAP_WIDTH,
         height: float = DEFAULT_MAP_HEIGHT,
         fleet_speed: float = DEFAULT_FLEET_SPEED,
@@ -687,7 +674,12 @@ class GalconSim:
         use_cpp: Optional[bool] = None,
     ) -> "GalconSim":
         planets = generate_galcon_map(
-            seed=seed, num_planets=num_planets, width=width, height=height, symmetric=symmetric
+            seed=seed,
+            num_planets=num_planets,
+            num_players=num_players,
+            width=width,
+            height=height,
+            symmetric=symmetric,
         )
         return cls(
             planets,
