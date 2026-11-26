@@ -24,6 +24,9 @@ constexpr double GOLDEN_ANGLE = 2.399963229728653; // pi * (3 - sqrt(5))
 constexpr double SPAWN_SPIRAL_STEP = 0.05;
 constexpr double EPS_DIST2 = 1e-12;
 constexpr double ANTIPODE_DOT_THRESHOLD = -0.995;
+constexpr double PI = 3.14159265358979323846;
+constexpr double DEFAULT_SHIP_TURN_RATE = 4.0 * PI;
+constexpr double DEFAULT_SHIP_TURN_MIN_SPEED_FACTOR = 0.5;
 
 constexpr int32_t ITEMS_MAX = 4096;
 constexpr int32_t ITEMS_RESERVED = 16;
@@ -32,7 +35,7 @@ constexpr int32_t BASE_ITEM_USERS = 3;
 // Max distinct owners fighting on a single planet in one substep.
 constexpr int32_t MAX_ARR_OWNERS = 16;
 
-// Limits for fast POD SimState & thread-local scratch (~101 KB < 128 KB glibc mmap threshold).
+// Limits for fast POD SimState & thread-local scratch (~167 KB).
 constexpr int32_t SIM_MAX_PLANETS = 64;
 constexpr int32_t SIM_MAX_FLEETS = 512;
 constexpr int32_t SIM_MAX_UNITS = 4096;
@@ -173,6 +176,8 @@ int32_t run_physics_substeps(
     int32_t total_units,
     double* __restrict__ ux,
     double* __restrict__ uy,
+    double* __restrict__ uhx,
+    double* __restrict__ uhy,
     double tick_dt,
     double fleet_speed,
     int32_t substeps,
@@ -182,6 +187,8 @@ int32_t run_physics_substeps(
     int32_t sep_mode,
     double prod_divisor,
     double obstacle_escape_eps,
+    double turn_rate,
+    double turn_min_speed_factor,
     // Scratch buffers
     uint8_t* __restrict__ u_alive,
     int32_t* __restrict__ fl_alive_cnt,
@@ -220,6 +227,10 @@ int32_t run_physics_substeps(
     const double min_sep = 2.0 * ship_radius;
     const double min_sep2 = min_sep * min_sep;
     const double half_k = 0.5 * sep_stiffness;
+    const double max_turn = turn_rate * sub_dt;
+    const bool instant_turn = (turn_rate <= 0.0) || (max_turn >= PI);
+    const double cos_max = instant_turn ? -2.0 : std::cos(max_turn);
+    const double sin_max = instant_turn ? 0.0 : std::sin(max_turn);
 
     double max_mr = 0.0;
     for (int32_t p = 0; p < n_planets; ++p) {
@@ -368,7 +379,7 @@ int32_t run_physics_substeps(
             const int32_t end = start + cnt;
             const bool all_alive = (alive_c == cnt);
 
-            // Step 3: Move toward target + track exact fleet AABB
+            // Step 3: Move toward target with heading turn limit + track exact fleet AABB
             double min_x = 1e300, max_x = -1e300, min_y = 1e300, max_y = -1e300;
             for (int32_t u = start; u < end; ++u) {
                 if (!all_alive && !u_alive[u]) continue;
@@ -377,15 +388,48 @@ int32_t run_physics_substeps(
                 const double dx = tx - x;
                 const double dy = ty - y;
                 const double dist = dist2d(dx, dy);
-                if (dist <= sub_step_dist) {
-                    x = tx;
-                    y = ty;
-                } else if (dist > 0.0) {
-                    x += (dx / dist) * sub_step_dist;
-                    y += (dy / dist) * sub_step_dist;
+                if (dist > 0.0) {
+                    const double des_x = dx / dist;
+                    const double des_y = dy / dist;
+                    double hx = uhx[u];
+                    double hy = uhy[u];
+                    const double dot = hx * des_x + hy * des_y;
+                    if (instant_turn || dot >= cos_max) {
+                        hx = des_x;
+                        hy = des_y;
+                        if (dist <= sub_step_dist) {
+                            x = tx;
+                            y = ty;
+                        } else {
+                            x += hx * sub_step_dist;
+                            y += hy * sub_step_dist;
+                        }
+                    } else {
+                        const double cross = hx * des_y - hy * des_x;
+                        const double turn_sign = (cross >= 0.0) ? 1.0 : -1.0;
+                        const double s_rot = turn_sign * sin_max;
+                        const double nhx = hx * cos_max - hy * s_rot;
+                        const double nhy = hx * s_rot + hy * cos_max;
+                        const double hn = dist2d(nhx, nhy);
+                        if (hn > 0.0) {
+                            hx = nhx / hn;
+                            hy = nhy / hn;
+                        } else {
+                            hx = des_x;
+                            hy = des_y;
+                        }
+                        const double align = hx * des_x + hy * des_y;
+                        const double speed_scale =
+                            turn_min_speed_factor + (1.0 - turn_min_speed_factor) * (align > 0.0 ? align : 0.0);
+                        const double step = sub_step_dist * speed_scale;
+                        x += hx * step;
+                        y += hy * step;
+                    }
+                    uhx[u] = hx;
+                    uhy[u] = hy;
+                    ux[u] = x;
+                    uy[u] = y;
                 }
-                ux[u] = x;
-                uy[u] = y;
                 if (x < min_x) min_x = x;
                 if (x > max_x) max_x = x;
                 if (y < min_y) min_y = y;
@@ -568,6 +612,8 @@ int32_t run_physics_substeps(
             if (write_pos != old_start) {
                 std::memmove(ux + write_pos, ux + old_start, (size_t)old_count * sizeof(double));
                 std::memmove(uy + write_pos, uy + old_start, (size_t)old_count * sizeof(double));
+                std::memmove(uhx + write_pos, uhx + old_start, (size_t)old_count * sizeof(double));
+                std::memmove(uhy + write_pos, uhy + old_start, (size_t)old_count * sizeof(double));
             }
             for (int32_t u = new_start; u < new_start + old_count; ++u) {
                 sum_x += ux[u];
@@ -582,6 +628,8 @@ int32_t run_physics_substeps(
                     const double y = uy[u];
                     ux[write_pos] = x;
                     uy[write_pos] = y;
+                    uhx[write_pos] = uhx[u];
+                    uhy[write_pos] = uhy[u];
                     sum_x += x;
                     sum_y += y;
                     ++write_pos;
@@ -642,6 +690,8 @@ struct SimState {
     double max_sep_push;
     double prod_divisor;
     double obstacle_escape_eps;
+    double turn_rate;
+    double turn_min_speed_factor;
     int32_t max_ticks;
     int32_t substeps;
     int32_t sep_mode;
@@ -684,6 +734,8 @@ struct SimState {
     int32_t n_units;
     double ux[SIM_MAX_UNITS];
     double uy[SIM_MAX_UNITS];
+    double uhx[SIM_MAX_UNITS];
+    double uhy[SIM_MAX_UNITS];
 
     int32_t find_planet_idx(int32_t planet_id) const {
         for (int32_t i = 0; i < n_planets; ++i) {
@@ -792,6 +844,8 @@ struct SimState {
         const double spawn_r = p_radius[si] + ship_radius;
         const double sx = p_x[si] + (dx / d) * spawn_r;
         const double sy = p_y[si] + (dy / d) * spawn_r;
+        const double hx0 = (raw_d > 1e-6) ? (dx / d) : 1.0;
+        const double hy0 = (raw_d > 1e-6) ? (dy / d) : 0.0;
 
         const int32_t f = n_fleets++;
         const int32_t fid = next_fleet_id++;
@@ -808,6 +862,8 @@ struct SimState {
         if (parts == 1) {
             ux[u_start] = sx;
             uy[u_start] = sy;
+            uhx[u_start] = hx0;
+            uhy[u_start] = hy0;
             fl_cx[f] = sx;
             fl_cy[f] = sy;
             fl_radius[f] = ship_radius;
@@ -821,6 +877,8 @@ struct SimState {
                 const double y = sy + rj * std::sin(ang);
                 ux[u_start + j] = x;
                 uy[u_start + j] = y;
+                uhx[u_start + j] = hx0;
+                uhy[u_start + j] = hy0;
                 sum_x += x;
                 sum_y += y;
             }
@@ -882,9 +940,10 @@ struct SimState {
             n_fleets,
             fl_owner, fl_target_idx, fl_spu, fl_unit_start, fl_unit_count,
             fl_ships, fl_cx, fl_cy, fl_radius,
-            n_units, ux, uy,
+            n_units, ux, uy, uhx, uhy,
             tick_dt, fleet_speed, substeps, ship_radius,
             sep_stiffness, max_sep_push, sep_mode, prod_divisor, obstacle_escape_eps,
+            turn_rate, turn_min_speed_factor,
             s_u_alive, s_fl_alive_cnt, s_tmp_x, s_tmp_y,
             s_arr_buckets, s_dirty_planets, s_near_planets,
             s_p_min_r, s_p_min_r2, s_p_land_r, s_p_land_r2_guard, s_p_prod_sub
@@ -926,6 +985,8 @@ static inline void copy_sim_state_fast(const SimState* src, SimState* dst) {
     dst->max_sep_push = src->max_sep_push;
     dst->prod_divisor = src->prod_divisor;
     dst->obstacle_escape_eps = src->obstacle_escape_eps;
+    dst->turn_rate = src->turn_rate;
+    dst->turn_min_speed_factor = src->turn_min_speed_factor;
     dst->max_ticks = src->max_ticks;
     dst->substeps = src->substeps;
     dst->sep_mode = src->sep_mode;
@@ -971,6 +1032,8 @@ static inline void copy_sim_state_fast(const SimState* src, SimState* dst) {
     if (nu > 0) {
         std::memcpy(dst->ux, src->ux, (size_t)nu * sizeof(double));
         std::memcpy(dst->uy, src->uy, (size_t)nu * sizeof(double));
+        std::memcpy(dst->uhx, src->uhx, (size_t)nu * sizeof(double));
+        std::memcpy(dst->uhy, src->uhy, (size_t)nu * sizeof(double));
     }
 }
 
@@ -1001,6 +1064,8 @@ int32_t step_physics_cpp(
     int32_t total_units,
     double* ux,
     double* uy,
+    double* uhx,
+    double* uhy,
     double tick_dt,
     double fleet_speed,
     int32_t substeps,
@@ -1009,7 +1074,9 @@ int32_t step_physics_cpp(
     double max_sep_push,
     int32_t sep_mode,
     double prod_divisor,
-    double obstacle_escape_eps
+    double obstacle_escape_eps,
+    double turn_rate,
+    double turn_min_speed_factor
 ) {
     if (n_planets <= 0) return 0;
 
@@ -1031,9 +1098,10 @@ int32_t step_physics_cpp(
             n_planets, p_owner, p_ships, p_x, p_y, p_prod, p_radius,
             n_fleets, fl_owner, fl_target_idx, fl_spu, fl_unit_start, fl_unit_count,
             fl_out_ships, fl_out_cx, fl_out_cy, fl_out_radius,
-            total_units, ux, uy,
+            total_units, ux, uy, uhx, uhy,
             tick_dt, fleet_speed, substeps, ship_radius,
             sep_stiffness, max_sep_push, sep_mode, prod_divisor, obstacle_escape_eps,
+            turn_rate, turn_min_speed_factor,
             s_u_alive, s_fl_alive_cnt, s_tmp_x, s_tmp_y,
             s_arr_buckets, s_dirty_planets, s_near_planets,
             s_p_min_r, s_p_min_r2, s_p_land_r, s_p_land_r2_guard, s_p_prod_sub
@@ -1061,9 +1129,10 @@ int32_t step_physics_cpp(
         n_planets, p_owner, p_ships, p_x, p_y, p_prod, p_radius,
         n_fleets, fl_owner, fl_target_idx, fl_spu, fl_unit_start, fl_unit_count,
         fl_out_ships, fl_out_cx, fl_out_cy, fl_out_radius,
-        total_units, ux, uy,
+        total_units, ux, uy, uhx, uhy,
         tick_dt, fleet_speed, substeps, ship_radius,
         sep_stiffness, max_sep_push, sep_mode, prod_divisor, obstacle_escape_eps,
+        turn_rate, turn_min_speed_factor,
         u_alive.data(), fl_alive_cnt.data(), tmp_x.data(), tmp_y.data(),
         arr_buckets.data(), dirty_planets.data(), near_planets.data(),
         p_min_r.data(), p_min_r2.data(), p_land_r.data(), p_land_r2_guard.data(), p_prod_sub.data()
@@ -1090,7 +1159,9 @@ SimState* sim_create(
     double max_sep_push,
     int32_t sep_mode,
     int32_t allow_redirect,
-    double obstacle_escape_eps
+    double obstacle_escape_eps,
+    double turn_rate,
+    double turn_min_speed_factor
 ) {
     if (n_planets < 0 || n_planets > SIM_MAX_PLANETS) return nullptr;
     SimState* st = new SimState();
@@ -1103,6 +1174,8 @@ SimState* sim_create(
     st->max_sep_push = max_sep_push;
     st->prod_divisor = PRODUCTION_DIVISOR;
     st->obstacle_escape_eps = obstacle_escape_eps;
+    st->turn_rate = turn_rate;
+    st->turn_min_speed_factor = turn_min_speed_factor;
     st->max_ticks = max_ticks;
     st->substeps = substeps < 1 ? 1 : substeps;
     st->sep_mode = sep_mode;
@@ -1153,7 +1226,9 @@ int32_t sim_load_fleets(
     const int32_t* fl_unit_count,
     int32_t n_units,
     const double* ux,
-    const double* uy
+    const double* uy,
+    const double* uhx,
+    const double* uhy
 ) {
     if (!st) return -1;
     if (n_fleets < 0 || n_fleets > SIM_MAX_FLEETS) return -1;
@@ -1177,6 +1252,38 @@ int32_t sim_load_fleets(
     if (n_units > 0) {
         std::memcpy(st->ux, ux, (size_t)n_units * sizeof(double));
         std::memcpy(st->uy, uy, (size_t)n_units * sizeof(double));
+        if (uhx && uhy) {
+            std::memcpy(st->uhx, uhx, (size_t)n_units * sizeof(double));
+            std::memcpy(st->uhy, uhy, (size_t)n_units * sizeof(double));
+        } else {
+            for (int32_t f = 0; f < n_fleets; ++f) {
+                const int32_t tgt = st->fl_target_idx[f];
+                const int32_t start = st->fl_unit_start[f];
+                const int32_t end = start + st->fl_unit_count[f];
+                if (tgt >= 0 && tgt < st->n_planets) {
+                    const double tx = st->p_x[tgt];
+                    const double ty = st->p_y[tgt];
+                    for (int32_t u = start; u < end; ++u) {
+                        const double dx = tx - st->ux[u];
+                        const double dy = ty - st->uy[u];
+                        const double d2 = dx * dx + dy * dy;
+                        if (d2 > EPS_DIST2) {
+                            const double d = std::sqrt(d2);
+                            st->uhx[u] = dx / d;
+                            st->uhy[u] = dy / d;
+                        } else {
+                            st->uhx[u] = 1.0;
+                            st->uhy[u] = 0.0;
+                        }
+                    }
+                } else {
+                    for (int32_t u = start; u < end; ++u) {
+                        st->uhx[u] = 1.0;
+                        st->uhy[u] = 0.0;
+                    }
+                }
+            }
+        }
     }
     return 0;
 }
@@ -1252,6 +1359,8 @@ void sim_get_config(const SimState* st, double* out_f64, int32_t* out_i32) {
         out_f64[5] = st->sep_stiffness;
         out_f64[6] = st->max_sep_push;
         out_f64[7] = st->obstacle_escape_eps;
+        out_f64[8] = st->turn_rate;
+        out_f64[9] = st->turn_min_speed_factor;
     }
     if (out_i32) {
         out_i32[0] = st->max_ticks;
@@ -1323,6 +1432,13 @@ void sim_read_units(const SimState* st, double* out_ux, double* out_uy) {
     const int32_t nu = st->n_units;
     std::memcpy(out_ux, st->ux, (size_t)nu * sizeof(double));
     std::memcpy(out_uy, st->uy, (size_t)nu * sizeof(double));
+}
+
+void sim_read_unit_headings(const SimState* st, double* out_uhx, double* out_uhy) {
+    if (!st || st->n_units <= 0) return;
+    const int32_t nu = st->n_units;
+    std::memcpy(out_uhx, st->uhx, (size_t)nu * sizeof(double));
+    std::memcpy(out_uhy, st->uhy, (size_t)nu * sizeof(double));
 }
 
 } // extern "C"

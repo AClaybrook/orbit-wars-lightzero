@@ -42,6 +42,8 @@ SHIP_SEP_STIFFNESS = 1.0
 SHIP_SEP_MAX_DISP = 2.5  # per-ship substep cap (= 1.25 * sub_step_dist at 20 Hz)
 ANTIPODE_DOT_THRESHOLD = -0.995
 ANTIPODE_ESCAPE_TANGENT = 0.05
+SHIP_TURN_RATE = 4.0 * math.pi  # ~12.56637 rad/s (360 deg in 0.50s, 180 deg U-turn in 0.25s = 5 substeps at 20 Hz)
+SHIP_TURN_MIN_SPEED_FACTOR = 0.5  # 50% speed during sharp >=90 deg turns -> ~1.59u turning radius at 40 u/s
 _GOLDEN_ANGLE = 2.399963229728653  # pi * (3 - sqrt(5))
 _SPAWN_SPIRAL_STEP = 0.05
 _EPS_DIST2 = 1e-12
@@ -70,6 +72,7 @@ class Fleet:
     radius: float = SHIP_RADIUS
     num_units: int = 1
     units: Optional[List[List[float]]] = None
+    unit_headings: Optional[List[List[float]]] = None
 
     @property
     def ships_per_unit(self) -> float:
@@ -89,6 +92,28 @@ def _materialize_fleet_units(cx: float, cy: float, count: int) -> List[List[floa
         ang = _GOLDEN_ANGLE * float(j)
         units.append([cx_f + rj * math.cos(ang), cy_f + rj * math.sin(ang)])
     return units
+
+
+def _materialize_unit_headings(
+    units: Sequence[Sequence[float]],
+    target_planet: Optional[Planet],
+) -> List[List[float]]:
+    """Build per-unit heading vectors pointing from each unit toward ``target_planet`` (fallback ``[1.0, 0.0]``)."""
+    if target_planet is None:
+        return [[1.0, 0.0] for _ in units]
+    tx = float(target_planet.x)
+    ty = float(target_planet.y)
+    headings: List[List[float]] = []
+    for u in units:
+        dx = tx - float(u[0])
+        dy = ty - float(u[1])
+        d2 = dx * dx + dy * dy
+        if d2 > _EPS_DIST2:
+            d = math.sqrt(d2)
+            headings.append([dx / d, dy / d])
+        else:
+            headings.append([1.0, 0.0])
+    return headings
 
 
 def physical_ship_count(
@@ -601,6 +626,10 @@ class GalconSim:
             else:
                 num_units = max(1, int(f.num_units))
                 units = _materialize_fleet_units(fx, fy, num_units)
+            if f.unit_headings is not None and len(f.unit_headings) == num_units:
+                unit_headings = [[float(h[0]), float(h[1])] for h in f.unit_headings]
+            else:
+                unit_headings = _materialize_unit_headings(units, self.planets.get(f.target))
             self.fleets[f.id] = Fleet(
                 f.id,
                 f.owner,
@@ -612,6 +641,7 @@ class GalconSim:
                 float(f.radius),
                 num_units,
                 units,
+                unit_headings,
             )
         self.width = float(width)
         self.height = float(height)
@@ -729,6 +759,17 @@ class GalconSim:
         _cos = math.cos
         _sin = math.sin
 
+        turn_rate = SHIP_TURN_RATE
+        min_speed_factor = SHIP_TURN_MIN_SPEED_FACTOR
+        max_turn = turn_rate * sub_dt
+        instant_turn = turn_rate <= 0.0 or max_turn >= math.pi
+        if instant_turn:
+            cos_max = -2.0
+            sin_max = 0.0
+        else:
+            cos_max = _cos(max_turn)
+            sin_max = _sin(max_turn)
+
         p_x = [p.x for p in planets]
         p_y = [p.y for p in planets]
         p_min_r = [p.radius + ship_radius for p in planets]
@@ -752,6 +793,8 @@ class GalconSim:
         id_to_idx = {p.id: i for i, p in enumerate(planets)}
         fl_ux: List[List[float]] = []
         fl_uy: List[List[float]] = []
+        fl_uhx: List[List[float]] = []
+        fl_uhy: List[List[float]] = []
         fl_alive: List[List[bool]] = []
         fl_alive_cnt: List[int] = []
         fl_tgt_idx: List[int] = []
@@ -763,8 +806,12 @@ class GalconSim:
                 fl.units = _materialize_fleet_units(fl.x, fl.y, fl.num_units)
             m = len(fl.units)
             fl.num_units = m
+            if fl.unit_headings is None or len(fl.unit_headings) != m:
+                fl.unit_headings = _materialize_unit_headings(fl.units, self.planets.get(fl.target))
             fl_ux.append([u[0] for u in fl.units])
             fl_uy.append([u[1] for u in fl.units])
+            fl_uhx.append([h[0] for h in fl.unit_headings])
+            fl_uhy.append([h[1] for h in fl.unit_headings])
             fl_alive.append([True] * m)
             fl_alive_cnt.append(m)
             fl_tgt_idx.append(id_to_idx.get(fl.target, -1))
@@ -886,11 +933,13 @@ class GalconSim:
                 ty = p_y[tgt]
                 ux = fl_ux[fi]
                 uy = fl_uy[fi]
+                uhx = fl_uhx[fi]
+                uhy = fl_uhy[fi]
                 alive = fl_alive[fi]
                 m = len(ux)
                 all_alive = alive_c == m
 
-                # 3. Move toward target + track exact fleet AABB
+                # 3. Move toward target with heading turn limit + track exact fleet AABB
                 min_x = 1e300
                 max_x = -1e300
                 min_y = 1e300
@@ -903,14 +952,45 @@ class GalconSim:
                     dx = tx - x
                     dy = ty - y
                     dist = _sqrt(dx * dx + dy * dy)
-                    if dist <= sub_step_dist:
-                        x = tx
-                        y = ty
-                    elif dist > 0.0:
-                        x += (dx / dist) * sub_step_dist
-                        y += (dy / dist) * sub_step_dist
-                    ux[u] = x
-                    uy[u] = y
+                    if dist > 0.0:
+                        des_x = dx / dist
+                        des_y = dy / dist
+                        hx = uhx[u]
+                        hy = uhy[u]
+                        dot = hx * des_x + hy * des_y
+                        if instant_turn or dot >= cos_max:
+                            hx = des_x
+                            hy = des_y
+                            if dist <= sub_step_dist:
+                                x = tx
+                                y = ty
+                            else:
+                                x += hx * sub_step_dist
+                                y += hy * sub_step_dist
+                        else:
+                            cross = hx * des_y - hy * des_x
+                            turn_sign = 1.0 if cross >= 0.0 else -1.0
+                            s_rot = turn_sign * sin_max
+                            nhx = hx * cos_max - hy * s_rot
+                            nhy = hx * s_rot + hy * cos_max
+                            hn = _sqrt(nhx * nhx + nhy * nhy)
+                            if hn > 0.0:
+                                hx = nhx / hn
+                                hy = nhy / hn
+                            else:
+                                hx = des_x
+                                hy = des_y
+                            align = hx * des_x + hy * des_y
+                            speed_scale = min_speed_factor + (1.0 - min_speed_factor) * (
+                                align if align > 0.0 else 0.0
+                            )
+                            step = sub_step_dist * speed_scale
+                            x += hx * step
+                            y += hy * step
+                        uhx[u] = hx
+                        uhy[u] = hy
+                        ux[u] = x
+                        uy[u] = y
                     if x < min_x:
                         min_x = x
                     if x > max_x:
@@ -1061,14 +1141,20 @@ class GalconSim:
                 continue
             ux = fl_ux[fi]
             uy = fl_uy[fi]
+            uhx = fl_uhx[fi]
+            uhy = fl_uhy[fi]
             m = len(ux)
             if alive_c == m:
                 new_ux = ux
                 new_uy = uy
+                new_uhx = uhx
+                new_uhy = uhy
             else:
                 alive = fl_alive[fi]
                 new_ux = [ux[u] for u in range(m) if alive[u]]
                 new_uy = [uy[u] for u in range(m) if alive[u]]
+                new_uhx = [uhx[u] for u in range(m) if alive[u]]
+                new_uhy = [uhy[u] for u in range(m) if alive[u]]
             kept = len(new_ux)
             sum_x = 0.0
             sum_y = 0.0
@@ -1085,6 +1171,7 @@ class GalconSim:
                 if dd2 > max_d2:
                     max_d2 = dd2
             fl.units = [[new_ux[u], new_uy[u]] for u in range(kept)]
+            fl.unit_headings = [[new_uhx[u], new_uhy[u]] for u in range(kept)]
             fl.num_units = kept
             fl.ships = float(kept) * fl_spu[fi]
             fl.x = cx
@@ -1115,10 +1202,14 @@ class GalconSim:
                     src.ships = max(0.0, src.ships - send_ships)
                     dx = dst.x - src.x
                     dy = dst.y - src.y
-                    d = max(1e-6, math.sqrt(dx * dx + dy * dy))
+                    raw_d = math.sqrt(dx * dx + dy * dy)
+                    d = raw_d if raw_d > 1e-6 else 1e-6
                     spawn_r = src.radius + SHIP_RADIUS
                     sx = src.x + (dx / d) * spawn_r
                     sy = src.y + (dy / d) * spawn_r
+                    hx0 = (dx / d) if raw_d > 1e-6 else 1.0
+                    hy0 = (dy / d) if raw_d > 1e-6 else 0.0
+                    unit_headings = [[hx0, hy0] for _ in range(parts)]
                     if parts == 1:
                         units = [[sx, sy]]
                         cx, cy, fl_radius = sx, sy, SHIP_RADIUS
@@ -1157,6 +1248,7 @@ class GalconSim:
                         radius=fl_radius,
                         num_units=parts,
                         units=units,
+                        unit_headings=unit_headings,
                     )
                 elif isinstance(order, RedirOrder) and self.allow_redirect:
                     fl = self.fleets.get(order.fleet_id)

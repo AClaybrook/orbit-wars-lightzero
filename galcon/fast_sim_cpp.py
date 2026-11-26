@@ -34,9 +34,12 @@ _SHIP_RADIUS = 6.0
 _SHIP_SEP_STIFFNESS = 1.0
 _SHIP_SEP_MAX_DISP = 2.5
 _ANTIPODE_ESCAPE_TANGENT = 0.05
+_SHIP_TURN_RATE = 4.0 * math.pi
+_SHIP_TURN_MIN_SPEED_FACTOR = 0.5
 _SEP_MODE_PER_SHIP_CAP = 1
 _GOLDEN_ANGLE = 2.399963229728653
 _SPAWN_SPIRAL_STEP = 0.05
+_EPS_DIST2 = 1e-12
 
 _SIM_MAX_PLANETS = 64
 _SIM_MAX_FLEETS = 512
@@ -72,6 +75,27 @@ def _materialize_fleet_units_local(cx: float, cy: float, count: int) -> List[Lis
         ang = _GOLDEN_ANGLE * float(j)
         units.append([cx_f + rj * math.cos(ang), cy_f + rj * math.sin(ang)])
     return units
+
+
+def _materialize_unit_headings_local(
+    units: Sequence[Sequence[float]],
+    target_planet: Optional["Planet"],
+) -> List[List[float]]:
+    if target_planet is None:
+        return [[1.0, 0.0] for _ in units]
+    tx = float(target_planet.x)
+    ty = float(target_planet.y)
+    headings: List[List[float]] = []
+    for u in units:
+        dx = tx - float(u[0])
+        dy = ty - float(u[1])
+        d2 = dx * dx + dy * dy
+        if d2 > _EPS_DIST2:
+            d = math.sqrt(d2)
+            headings.append([dx / d, dy / d])
+        else:
+            headings.append([1.0, 0.0])
+    return headings
 
 
 def _load_or_build_lib() -> Optional[ctypes.CDLL]:
@@ -122,15 +146,15 @@ def _load_or_build_lib() -> Optional[ctypes.CDLL]:
         lib.step_physics_cpp.argtypes = [
             _C_I32, _C_VP, _C_VP, _C_VP, _C_VP, _C_VP, _C_VP,
             _C_I32, _C_VP, _C_VP, _C_VP, _C_VP, _C_VP, _C_VP, _C_VP, _C_VP, _C_VP,
-            _C_I32, _C_VP, _C_VP,
-            _C_F64, _C_F64, _C_I32, _C_F64, _C_F64, _C_F64, _C_I32, _C_F64, _C_F64,
+            _C_I32, _C_VP, _C_VP, _C_VP, _C_VP,
+            _C_F64, _C_F64, _C_I32, _C_F64, _C_F64, _C_F64, _C_I32, _C_F64, _C_F64, _C_F64, _C_F64,
         ]
         lib.step_physics_cpp.restype = _C_I32
 
         lib.sim_create.argtypes = [
             _C_I32, _C_VP, _C_VP, _C_VP, _C_VP, _C_VP, _C_VP, _C_VP,
             _C_F64, _C_F64, _C_F64, _C_F64, _C_I32, _C_I32, _C_F64,
-            _C_F64, _C_F64, _C_I32, _C_I32, _C_F64,
+            _C_F64, _C_F64, _C_I32, _C_I32, _C_F64, _C_F64, _C_F64,
         ]
         lib.sim_create.restype = _C_VP
 
@@ -140,7 +164,7 @@ def _load_or_build_lib() -> Optional[ctypes.CDLL]:
         lib.sim_load_fleets.argtypes = [
             _C_VP, _C_I32, _C_VP, _C_VP, _C_VP, _C_VP,
             _C_VP, _C_VP, _C_VP, _C_VP, _C_VP, _C_VP,
-            _C_I32, _C_VP, _C_VP,
+            _C_I32, _C_VP, _C_VP, _C_VP, _C_VP,
         ]
         lib.sim_load_fleets.restype = _C_I32
 
@@ -186,6 +210,9 @@ def _load_or_build_lib() -> Optional[ctypes.CDLL]:
 
         lib.sim_read_units.argtypes = [_C_VP, _C_VP, _C_VP]
         lib.sim_read_units.restype = None
+
+        lib.sim_read_unit_headings.argtypes = [_C_VP, _C_VP, _C_VP]
+        lib.sim_read_unit_headings.restype = None
 
         return lib
     except Exception:
@@ -256,8 +283,12 @@ class _PhysicsScratch:
         self.u_cap = cap
         self.ux = (ctypes.c_double * cap)()
         self.uy = (ctypes.c_double * cap)()
+        self.uhx = (ctypes.c_double * cap)()
+        self.uhy = (ctypes.c_double * cap)()
         self.ptr_ux = ctypes.addressof(self.ux)
         self.ptr_uy = ctypes.addressof(self.uy)
+        self.ptr_uhx = ctypes.addressof(self.uhx)
+        self.ptr_uhy = ctypes.addressof(self.uhy)
 
     def _alloc_orders(self, cap: int) -> None:
         self.ord_cap = cap
@@ -355,6 +386,8 @@ def step_physics_cpp(sim: "GalconSim") -> None:
             0,
             sc.ptr_ux,
             sc.ptr_uy,
+            sc.ptr_uhx,
+            sc.ptr_uhy,
             sim.tick_dt,
             sim.fleet_speed,
             substeps,
@@ -364,6 +397,8 @@ def step_physics_cpp(sim: "GalconSim") -> None:
             _SEP_MODE_PER_SHIP_CAP,
             _PRODUCTION_DIVISOR,
             _ANTIPODE_ESCAPE_TANGENT,
+            _SHIP_TURN_RATE,
+            _SHIP_TURN_MIN_SPEED_FACTOR,
         )
         for i, p in enumerate(planets):
             p.owner = p_owner[i]
@@ -379,6 +414,8 @@ def step_physics_cpp(sim: "GalconSim") -> None:
             fl.units = units
         m = len(units)
         fl.num_units = m
+        if fl.unit_headings is None or len(fl.unit_headings) != m:
+            fl.unit_headings = _materialize_unit_headings_local(units, sim_planets.get(fl.target))
         total_units += m
 
     sc.ensure_fleets(n_fleets)
@@ -392,19 +429,24 @@ def step_physics_cpp(sim: "GalconSim") -> None:
     fl_cnt = sc.fl_cnt
     ux = sc.ux
     uy = sc.uy
+    uhx = sc.uhx
+    uhy = sc.uhy
 
     pos = 0
     for fi, fl in enumerate(fleets):
         units = fl.units
+        headings = fl.unit_headings
         m = len(units)
         fl_owner[fi] = fl.owner
         fl_tgt[fi] = id_to_idx.get(fl.target, -1)
         fl_spu[fi] = fl.ships / (m if m > 1 else 1)
         fl_start[fi] = pos
         fl_cnt[fi] = m
-        for u in units:
+        for u, h in zip(units, headings):
             ux[pos] = u[0]
             uy[pos] = u[1]
+            uhx[pos] = h[0]
+            uhy[pos] = h[1]
             pos += 1
 
     fn(
@@ -428,6 +470,8 @@ def step_physics_cpp(sim: "GalconSim") -> None:
         total_units,
         sc.ptr_ux,
         sc.ptr_uy,
+        sc.ptr_uhx,
+        sc.ptr_uhy,
         sim.tick_dt,
         sim.fleet_speed,
         substeps,
@@ -437,6 +481,8 @@ def step_physics_cpp(sim: "GalconSim") -> None:
         _SEP_MODE_PER_SHIP_CAP,
         _PRODUCTION_DIVISOR,
         _ANTIPODE_ESCAPE_TANGENT,
+        _SHIP_TURN_RATE,
+        _SHIP_TURN_MIN_SPEED_FACTOR,
     )
 
     for i, p in enumerate(planets):
@@ -455,6 +501,7 @@ def step_physics_cpp(sim: "GalconSim") -> None:
             st = fl_start[fi]
             end = st + kept
             fl.units = list(map(list, zip(ux[st:end], uy[st:end])))
+            fl.unit_headings = list(map(list, zip(uhx[st:end], uhy[st:end])))
             fl.num_units = kept
             fl.ships = fl_ships[fi]
             fl.x = fl_cx[fi]
@@ -535,10 +582,16 @@ class FastGalconCppSim:
             raise ValueError(f"FastGalconCppSim supports at most {_SIM_MAX_FLEETS} fleets (got {n_fleets})")
 
         unit_lists: List[List[List[float]]] = []
+        heading_lists: List[List[List[float]]] = []
         total_units = 0
         for fl in fleets:
             units = fl.units if fl.units else _materialize_fleet_units_local(fl.x, fl.y, fl.num_units)
+            if fl.unit_headings is not None and len(fl.unit_headings) == len(units):
+                headings = fl.unit_headings
+            else:
+                headings = _materialize_unit_headings_local(units, sim.planets.get(fl.target))
             unit_lists.append(units)
+            heading_lists.append(headings)
             total_units += len(units)
         if total_units > _SIM_MAX_UNITS:
             raise ValueError(f"FastGalconCppSim supports at most {_SIM_MAX_UNITS} physical units (got {total_units})")
@@ -583,6 +636,8 @@ class FastGalconCppSim:
             _SEP_MODE_PER_SHIP_CAP,
             1 if sim.allow_redirect else 0,
             _ANTIPODE_ESCAPE_TANGENT,
+            _SHIP_TURN_RATE,
+            _SHIP_TURN_MIN_SPEED_FACTOR,
         )
         if not handle:
             raise RuntimeError("sim_create returned null handle")
@@ -611,9 +666,11 @@ class FastGalconCppSim:
                 fl_cnt = sc.fl_cnt
                 ux = sc.ux
                 uy = sc.uy
+                uhx = sc.uhx
+                uhy = sc.uhy
 
                 pos = 0
-                for fi, (fl, units) in enumerate(zip(fleets, unit_lists)):
+                for fi, (fl, units, headings) in enumerate(zip(fleets, unit_lists, heading_lists)):
                     m = len(units)
                     fl_id[fi] = fl.id
                     fl_owner[fi] = fl.owner
@@ -625,9 +682,11 @@ class FastGalconCppSim:
                     fl_rad[fi] = fl.radius
                     fl_start[fi] = pos
                     fl_cnt[fi] = m
-                    for u in units:
+                    for u, h in zip(units, headings):
                         ux[pos] = u[0]
                         uy[pos] = u[1]
+                        uhx[pos] = h[0]
+                        uhy[pos] = h[1]
                         pos += 1
 
                 rc = _LIB.sim_load_fleets(
@@ -646,6 +705,8 @@ class FastGalconCppSim:
                     total_units,
                     sc.ptr_ux,
                     sc.ptr_uy,
+                    sc.ptr_uhx,
+                    sc.ptr_uhy,
                 )
                 if rc != 0:
                     raise RuntimeError("sim_load_fleets failed")
@@ -722,7 +783,7 @@ class FastGalconCppSim:
         nu = int(meta[5])
         next_fid = int(meta[6])
 
-        cfg_f64 = (ctypes.c_double * 8)()
+        cfg_f64 = (ctypes.c_double * 10)()
         cfg_i32 = (ctypes.c_int32 * 4)()
         self._lib.sim_get_config(handle, ctypes.addressof(cfg_f64), ctypes.addressof(cfg_i32))
 
@@ -775,14 +836,18 @@ class FastGalconCppSim:
             if nu > 0:
                 sc.ensure_units(nu)
                 self._lib.sim_read_units(handle, sc.ptr_ux, sc.ptr_uy)
+                self._lib.sim_read_unit_headings(handle, sc.ptr_uhx, sc.ptr_uhy)
             ux = sc.ux
             uy = sc.uy
+            uhx = sc.uhx
+            uhy = sc.uhy
             for fi in range(nf):
                 tgt_idx = sc.fl_tgt[fi]
                 tgt_pid = idx_to_pid[tgt_idx] if 0 <= tgt_idx < np_ else -1
                 st = sc.fl_start[fi]
                 cnt = sc.fl_cnt[fi]
                 units = list(map(list, zip(ux[st : st + cnt], uy[st : st + cnt]))) if cnt > 0 else []
+                unit_headings = list(map(list, zip(uhx[st : st + cnt], uhy[st : st + cnt]))) if cnt > 0 else []
                 fleets.append(
                     Fleet(
                         id=sc.fl_id[fi],
@@ -795,6 +860,7 @@ class FastGalconCppSim:
                         radius=sc.fl_rad[fi],
                         num_units=cnt,
                         units=units,
+                        unit_headings=unit_headings,
                     )
                 )
 

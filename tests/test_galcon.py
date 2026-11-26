@@ -1996,6 +1996,8 @@ def test_galcon_sim_cpp_bit_exact_parity_and_fast_rollout():
             assert f1.num_units == f2.num_units
             assert f1.units is not None and f2.units is not None
             assert len(f1.units) == len(f2.units) == f1.num_units
+            assert f1.unit_headings is not None and f2.unit_headings is not None
+            assert len(f1.unit_headings) == len(f2.unit_headings) == f1.num_units
             max_diff = max(
                 max_diff,
                 abs(f1.ships - f2.ships),
@@ -2005,6 +2007,8 @@ def test_galcon_sim_cpp_bit_exact_parity_and_fast_rollout():
             )
             for u1, u2 in zip(f1.units, f2.units):
                 max_diff = max(max_diff, abs(u1[0] - u2[0]), abs(u1[1] - u2[1]))
+            for h1, h2 in zip(f1.unit_headings, f2.unit_headings):
+                max_diff = max(max_diff, abs(h1[0] - h2[0]), abs(h1[1] - h2[1]))
         return max_diff
 
     # 1. Both use_cpp=False and use_cpp=True (and default None) work cleanly on all platforms
@@ -2103,8 +2107,8 @@ def test_galcon_sim_cpp_bit_exact_parity_and_fast_rollout():
             midgame_snapshot_py = sim_py.clone(use_cpp=False)
 
     assert peak_units >= 50
-    assert max_diff_dropin <= 1e-11, f"drop-in C++ parity exceeded tolerance: {max_diff_dropin:.3e}"
-    assert max_diff_native <= 1e-11, f"FastGalconCppSim parity exceeded tolerance: {max_diff_native:.3e}"
+    assert max_diff_dropin == 0.0, f"drop-in C++ parity drifted from bit-exact 0.0: {max_diff_dropin:.3e}"
+    assert max_diff_native == 0.0, f"FastGalconCppSim parity drifted from bit-exact 0.0: {max_diff_native:.3e}"
 
     # 3. Near-tie gradual combat parity in FastGalconCppSim vs pure Python
     step_dist = 40.0 * 0.25
@@ -2200,7 +2204,239 @@ def test_galcon_sim_cpp_bit_exact_parity_and_fast_rollout():
     for _ in range(3):
         big_py.step({})
         big_cpp.step({})
-    assert _compare_sims(big_py, big_cpp) <= 1e-11
+    assert _compare_sims(big_py, big_cpp) == 0.0
+
+
+def test_galcon_sim_redirect_turning_radius_and_turn_rate():
+    """Verify tight redirect turning radius (~1.6-1.9u), 360 deg / 0.50s angular turn rate, straight flight, and bit-exact C++ parity."""
+    import math
+    import galcon
+    from galcon.fast_sim_cpp import HAS_FAST_SIM_CPP, FastGalconCppSim
+    from galcon.sim import (
+        SHIP_RADIUS,
+        SHIP_TURN_MIN_SPEED_FACTOR,
+        SHIP_TURN_RATE,
+        GalconSim,
+        Planet,
+        RedirOrder,
+        SendOrder,
+    )
+
+    assert np.isclose(SHIP_TURN_RATE, 4.0 * math.pi, atol=1e-12)
+    assert np.isclose(SHIP_TURN_MIN_SPEED_FACTOR, 0.5, atol=1e-12)
+    assert galcon.SHIP_TURN_RATE == SHIP_TURN_RATE
+    assert galcon.SHIP_TURN_MIN_SPEED_FACTOR == SHIP_TURN_MIN_SPEED_FACTOR
+
+    # Theoretical sharp-turn radius at 40 u/s with 0.5 min speed factor: R = 20 / (4*pi) ~= 1.5915u
+    theo_sharp_r = (40.0 * SHIP_TURN_MIN_SPEED_FACTOR) / SHIP_TURN_RATE
+    assert 1.0 <= theo_sharp_r <= 2.0
+
+    def _fleet_max_diff(f1: Fleet, f2: Fleet) -> float:
+        assert f1.target == f2.target
+        assert f1.num_units == f2.num_units
+        assert f1.units is not None and f2.units is not None
+        assert f1.unit_headings is not None and f2.unit_headings is not None
+        assert len(f1.units) == len(f2.units) == f1.num_units
+        assert len(f1.unit_headings) == len(f2.unit_headings) == f1.num_units
+        d = max(abs(f1.ships - f2.ships), abs(f1.x - f2.x), abs(f1.y - f2.y), abs(f1.radius - f2.radius))
+        for u1, u2 in zip(f1.units, f2.units):
+            d = max(d, abs(u1[0] - u2[0]), abs(u1[1] - u2[1]))
+        for h1, h2 in zip(f1.unit_headings, f2.unit_headings):
+            d = max(d, abs(h1[0] - h2[0]), abs(h1[1] - h2[1]))
+        return d
+
+    # 1. 1-ship 180 deg boomerang redirect: 36 deg/substep -> 5 substeps (0.25s) for 180 deg (0.50s for 360 deg)
+    p1 = Planet(id=1, owner=1, ships=1.0, x=50.0, y=120.0, production=0.0, radius=20.0)
+    p2 = Planet(id=2, owner=2, ships=100.0, x=350.0, y=120.0, production=0.0, radius=20.0)
+
+    sim_py = GalconSim([p1, p2], width=400.0, height=240.0, tick_dt=0.05, physics_substeps=1, use_cpp=False)
+    sim_cpp = GalconSim([p1, p2], width=400.0, height=240.0, tick_dt=0.05, physics_substeps=1, use_cpp=True)
+    fast_cpp = FastGalconCppSim.from_sim(sim_py) if HAS_FAST_SIM_CPP else None
+
+    # Fly +x for 20 substeps (40u) from P1 toward P2
+    sim_py.step({1: [SendOrder(1, 2, 100)]})
+    sim_cpp.step({1: [SendOrder(1, 2, 100)]})
+    if fast_cpp is not None:
+        fast_cpp.step({1: [SendOrder(1, 2, 100)]})
+    for _ in range(19):
+        sim_py.step({})
+        sim_cpp.step({})
+        if fast_cpp is not None:
+            fast_cpp.step({})
+
+    fid = next(iter(sim_py.fleets.keys()))
+    fl0 = sim_py.fleets[fid]
+    assert fl0.units is not None and fl0.unit_headings is not None
+    x0, y0 = fl0.units[0]
+    assert np.isclose(fl0.unit_headings[0][0], 1.0, atol=1e-12)
+    assert np.isclose(fl0.unit_headings[0][1], 0.0, atol=1e-12)
+
+    # Verify clone() deep-copies unit_headings independently
+    sim_cloned = sim_py.clone()
+    assert sim_cloned.fleets[fid].unit_headings == fl0.unit_headings
+    assert sim_cloned.fleets[fid].unit_headings is not fl0.unit_headings
+    assert sim_cloned.fleets[fid].unit_headings[0] is not fl0.unit_headings[0]
+    sim_cloned.fleets[fid].unit_headings[0][0] = -0.5
+    assert np.isclose(sim_py.fleets[fid].unit_headings[0][0], 1.0, atol=1e-12)
+
+    # Issue 180 deg boomerang redirect back toward P1
+    sim_py.step({1: [RedirOrder(fid, 1)]})
+    sim_cpp.step({1: [RedirOrder(fid, 1)]})
+    if fast_cpp is not None:
+        fast_cpp.step({1: [RedirOrder(fid, 1)]})
+
+    max_x = x0
+    max_y = y0
+    prev_x, prev_y = x0, y0
+    max_cpp_diff = 0.0
+    max_fast_diff = 0.0
+
+    for substep in range(1, 10):
+        fl_p = sim_py.fleets[fid]
+        assert fl_p.units is not None and fl_p.unit_headings is not None
+        x, y = fl_p.units[0]
+        hx, hy = fl_p.unit_headings[0]
+        step_dist = math.hypot(x - prev_x, y - prev_y)
+        prev_x, prev_y = x, y
+        max_x = max(max_x, x)
+        max_y = max(max_y, y)
+
+        if substep <= 5:
+            expected_ang = substep * (SHIP_TURN_RATE * 0.05)  # 36, 72, 108, 144, 180 deg
+            assert np.isclose(hx, math.cos(expected_ang), atol=1e-12)
+            assert np.isclose(hy, math.sin(expected_ang), atol=1e-12)
+        if substep == 1:
+            # Does NOT instantaneously reverse: still advancing +x with cos(36 deg) ~= 0.809
+            assert hx > 0.80 and np.isclose(hx, math.cos(0.2 * math.pi), atol=1e-12)
+            assert x > x0
+            assert np.isclose(step_dist, 1.0, atol=1e-12)  # 0.5 * 2.0u/substep during sharp turn
+        elif substep == 5:
+            # Full 180 deg U-turn completed in exact 5 substeps (0.25s -> 360 deg in 0.50s)
+            assert np.isclose(hx, -1.0, atol=1e-12)
+            assert np.isclose(hy, 0.0, atol=1e-12)
+        elif substep >= 6:
+            # Resumes full 40.0 u/s (2.0u/substep) aligned speed back toward P1
+            assert np.isclose(step_dist, 2.0, atol=1e-9)
+
+        if HAS_FAST_SIM_CPP:
+            max_cpp_diff = max(max_cpp_diff, _fleet_max_diff(fl_p, sim_cpp.fleets[fid]))
+            assert fast_cpp is not None
+            max_fast_diff = max(max_fast_diff, _fleet_max_diff(fl_p, fast_cpp.to_sim().fleets[fid]))
+
+        sim_py.step({})
+        sim_cpp.step({})
+        if fast_cpp is not None:
+            fast_cpp.step({})
+
+    # Tight turning radius in [1.0, 2.5]:
+    # - 180 deg semicircle lateral radius R = 0.5 * (max_y - y0) ~= 1.91u
+    # - forward overshoot radius (max_x - x0) ~= 1.12u
+    lateral_turn_radius = 0.5 * (max_y - y0)
+    forward_overshoot = max_x - x0
+    assert 1.0 <= lateral_turn_radius <= 2.5, f"Unexpected U-turn lateral radius: {lateral_turn_radius:.4f}"
+    assert 1.0 <= forward_overshoot <= 2.5, f"Unexpected U-turn forward overshoot: {forward_overshoot:.4f}"
+
+    # Continue until the boomerang ship lands cleanly back on P1
+    for _ in range(100):
+        if not sim_py.fleets:
+            break
+        sim_py.step({})
+        sim_cpp.step({})
+        if fast_cpp is not None:
+            fast_cpp.step({})
+    assert len(sim_py.fleets) == 0
+    assert np.isclose(sim_py.planets[1].ships, 1.0, atol=1e-12)
+    if HAS_FAST_SIM_CPP:
+        assert max_cpp_diff == 0.0, f"Boomerang drop-in C++ parity diff: {max_cpp_diff:.3e}"
+        assert max_fast_diff == 0.0, f"Boomerang FastGalconCppSim parity diff: {max_fast_diff:.3e}"
+        assert len(sim_cpp.fleets) == 0
+        assert fast_cpp is not None and fast_cpp.num_fleets == 0
+        assert sim_cpp.planets[1].ships == sim_py.planets[1].ships
+        assert fast_cpp.to_sim().planets[1].ships == sim_py.planets[1].ships
+
+    # 2. 90 deg redirect on a multi-ship fleet preserves headings, curves smoothly without stalling, and lands cleanly
+    mp1 = Planet(id=1, owner=1, ships=40.0, x=40.0, y=180.0, production=0.0, radius=20.0)
+    mp2 = Planet(id=2, owner=2, ships=200.0, x=360.0, y=180.0, production=0.0, radius=20.0)
+    mp3 = Planet(id=3, owner=2, ships=200.0, x=150.0, y=40.0, production=0.0, radius=20.0)
+
+    ms_py = GalconSim([mp1, mp2, mp3], width=400.0, height=240.0, tick_dt=0.05, physics_substeps=1, use_cpp=False)
+    ms_cpp = GalconSim([mp1, mp2, mp3], width=400.0, height=240.0, tick_dt=0.05, physics_substeps=1, use_cpp=True)
+    ms_fast = FastGalconCppSim.from_sim(ms_py) if HAS_FAST_SIM_CPP else None
+
+    ms_py.step({1: [SendOrder(1, 2, 100)]})
+    ms_cpp.step({1: [SendOrder(1, 2, 100)]})
+    if ms_fast is not None:
+        ms_fast.step({1: [SendOrder(1, 2, 100)]})
+    for _ in range(41):
+        ms_py.step({})
+        ms_cpp.step({})
+        if ms_fast is not None:
+            ms_fast.step({})
+
+    mfid = next(iter(ms_py.fleets.keys()))
+    mfl_pre = ms_py.fleets[mfid]
+    assert mfl_pre.num_units == 26
+    assert mfl_pre.unit_headings is not None and len(mfl_pre.unit_headings) == 26
+    # Fleet is roughly below mp3 (x ~= 150, y ~= 180), heading +x
+    assert all(h[0] > 0.95 for h in mfl_pre.unit_headings)
+
+    # Issue 90 deg redirect straight upward toward mp3
+    ms_py.step({1: [RedirOrder(mfid, 3)]})
+    ms_cpp.step({1: [RedirOrder(mfid, 3)]})
+    if ms_fast is not None:
+        ms_fast.step({1: [RedirOrder(mfid, 3)]})
+
+    # On substep 1 after 90 deg redirect, units have rotated ~36 deg toward -y (still have positive hx, negative hy)
+    mfl_s1 = ms_py.fleets[mfid]
+    assert mfl_s1.target == 3
+    assert mfl_s1.unit_headings is not None
+    assert all(h[0] > 0.5 and h[1] < -0.4 for h in mfl_s1.unit_headings)
+
+    # Track smooth convergence and exact C++ parity through arrival on mp3
+    max_m_cpp = 0.0
+    max_m_fast = 0.0
+    for _ in range(150):
+        if HAS_FAST_SIM_CPP and mfid in ms_py.fleets:
+            max_m_cpp = max(max_m_cpp, _fleet_max_diff(ms_py.fleets[mfid], ms_cpp.fleets[mfid]))
+            assert ms_fast is not None
+            max_m_fast = max(max_m_fast, _fleet_max_diff(ms_py.fleets[mfid], ms_fast.to_sim().fleets[mfid]))
+        if not ms_py.fleets:
+            break
+        ms_py.step({})
+        ms_cpp.step({})
+        if ms_fast is not None:
+            ms_fast.step({})
+
+    assert len(ms_py.fleets) == 0
+    assert np.isclose(ms_py.planets[2].ships, 200.0, atol=1e-9)
+    assert np.isclose(ms_py.planets[3].ships, 160.0, atol=1e-9)
+    if HAS_FAST_SIM_CPP:
+        assert max_m_cpp == 0.0, f"90 deg multi-ship drop-in C++ parity diff: {max_m_cpp:.3e}"
+        assert max_m_fast == 0.0, f"90 deg multi-ship FastGalconCppSim parity diff: {max_m_fast:.3e}"
+
+    # 3. Straight-line flight (no redirect) has zero turning slowdown (dot == 1.0, exact planet_eta_ticks arrival)
+    s_src = Planet(id=1, owner=1, ships=1.0, x=20.0, y=100.0, production=0.0, radius=12.0)
+    s_dst = Planet(
+        id=2,
+        owner=2,
+        ships=10.0,
+        x=20.0 + 12.0 + 12.0 + 2.0 * SHIP_RADIUS + 50.0,  # exact 5-tick travel distance
+        y=100.0,
+        production=0.0,
+        radius=12.0,
+    )
+    sim_str = GalconSim([s_src, s_dst], width=200.0, height=200.0, fleet_speed=40.0, tick_dt=0.25)
+    assert sim_str.planet_eta_ticks(s_src, s_dst) == 5
+    sim_str.step({1: [SendOrder(1, 2, 100)]})
+    for t_step in range(1, 5):
+        assert len(sim_str.fleets) == 1
+        fl_s = next(iter(sim_str.fleets.values()))
+        assert fl_s.unit_headings == [[1.0, 0.0]]
+        assert np.isclose(fl_s.x, 20.0 + 12.0 + SHIP_RADIUS + 10.0 * t_step, atol=1e-12)
+        sim_str.step({})
+    assert len(sim_str.fleets) == 0
+    assert np.isclose(sim_str.planets[2].ships, 9.0, atol=1e-12)
+
 
 
 
