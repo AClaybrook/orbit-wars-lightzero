@@ -240,6 +240,67 @@ def build_shared_planet_physics(
     }
 
 
+def compute_ships_for_capture(
+    shared_physics: Dict[str, Any],
+    player: int,
+    max_timesteps: int = TIMELINE_HORIZON + 1,
+) -> np.ndarray:
+    """Compute exact `ships_for_capture(planet, dt, player)` matching Hober's Rust ledger."""
+    n = int(shared_physics["n"])
+    if n == 0:
+        return np.zeros((0, max_timesteps), dtype=np.int32)
+
+    fo_all = shared_physics["fut_owner"]
+    fs_all = shared_physics["fut_ships"]
+    tv_all = shared_physics["tr_valid"]
+    t_lim = min(int(max_timesteps), int(fo_all.shape[1]), int(tv_all.shape[1]))
+    fo = fo_all[:, :t_lim]  # (n, T)
+    fs = fs_all[:, :t_lim]  # (n, T)
+    tv = tv_all[:, :t_lim]  # (n, T)
+    pprod = shared_physics["pprod"]  # (n,)
+    planet_ids = shared_physics["planet_ids"]
+    arrivals = shared_physics["arrivals"]
+
+    # Default formula (exact whenever no simultaneous arrivals occur on that tick)
+    cap = np.where((fo == player) | (~tv), 0, np.maximum(fs, 0) + 1).astype(np.int32)
+
+    # Refine ticks that have incoming fleet arrivals (mirrors Hober movegen ledger)
+    for i, pid in enumerate(planet_ids):
+        arr_list = arrivals.get(pid)
+        if not arr_list:
+            continue
+        by_dt: Dict[int, List[Any]] = {}
+        for a in arr_list:
+            if 1 <= a.eta < t_lim:
+                by_dt.setdefault(int(a.eta), []).append(a)
+        for dt, turn_arrs in by_dt.items():
+            if not tv[i, dt] or fo[i, dt] == player:
+                cap[i, dt] = 0
+                continue
+            prev_own = int(fo[i, dt - 1]) if tv[i, dt - 1] else int(fo[i, dt])
+            prev_sh = int(fs[i, dt - 1]) if tv[i, dt - 1] else int(fs[i, dt])
+            pre_sh = prev_sh + (int(pprod[i]) if prev_own != -1 else 0)
+            p_arr = 0
+            other_arr: Dict[int, int] = {}
+            for a in turn_arrs:
+                ao = int(a.owner)
+                if ao == player:
+                    p_arr += int(a.ships)
+                else:
+                    other_arr[ao] = other_arr.get(ao, 0) + int(a.ships)
+            strongest_other = max(other_arr.values(), default=0)
+            if prev_own == player:
+                needed = strongest_other - max(0, pre_sh) - p_arr
+            else:
+                needed = strongest_other + max(0, pre_sh) + 1 - p_arr
+            cap[i, dt] = max(0, int(needed))
+    if t_lim < max_timesteps:
+        out = np.zeros((n, max_timesteps), dtype=np.int32)
+        out[:, :t_lim] = cap
+        return out
+    return cap
+
+
 def extract_planet_features(
     obs: Any,
     player: Optional[int] = None,
@@ -287,6 +348,7 @@ def extract_planet_features(
     timeline_feats = np.zeros((n, TIMELINE_HORIZON, tl_dim), dtype=np.float32)
     owned_mask = (pown == player) & (pships > 0)
     expiring_comet_indices: List[int] = []
+    exact_cap: Optional[np.ndarray] = None
 
     if n > 0:
         orb_r_raw = np.hypot(px - CENTER, py - CENTER)
@@ -366,7 +428,11 @@ def extract_planet_features(
             timeline_feats[:, :, 9] = np.where(pos_valid, (safe_y - CENTER) / 50.0, 0.0)
             timeline_feats[:, :, 10] = np.where(pos_valid, np.hypot(safe_x - CENTER, safe_y - CENTER) / 70.0, 0.0)
             timeline_feats[:, :, 11] = pos_valid.astype(np.float32)
-            cap_need = np.where(fo_cur == player, 0, np.maximum(0, fs_cur) + 1)
+            if feature_version >= 3:
+                exact_cap = compute_ships_for_capture(shared, player, max_timesteps=TIMELINE_HORIZON + 1)
+                cap_need = np.maximum(0, exact_cap[:, 1 : TIMELINE_HORIZON + 1])
+            else:
+                cap_need = np.where(fo_cur == player, 0, np.maximum(0, fs_cur) + 1)
             timeline_feats[:, :, 12] = np.where(pos_valid, np.log1p(cap_need) / 6.0, 0.0)
             timeline_feats[:, :, 13] = np.minimum(1.0, step_plus / 500.0)[None, :]
 
@@ -391,10 +457,22 @@ def extract_planet_features(
         ps_f = ps.astype(np.float32)
         ps_pos = np.maximum(0.0, ps_f)
 
-        margin = np.where(is_t_me > 0.5, src_s, src_s - ps_f)
-        cap_feasible = np.where((is_t_me > 0.5) | (src_s > ps_f), 1.0, 0.0).astype(np.float32)
-        cost = 1.0 + np.where(is_t_me > 0.5, 0.0, ps_pos) + 0.5 * etas.astype(np.float32)
-        roi = np.minimum(2.0, t_prod / cost)
+        if feature_version >= 3:
+            assert exact_cap is not None
+            ec = exact_cap[jj, etas].astype(np.float32)
+            need_pos = np.maximum(0.0, ec)
+            is_already_mine = (ec <= 0.0).astype(np.float32)
+            margin = np.where(is_already_mine > 0.5, src_s, src_s - need_pos + 1.0)
+            cap_feasible = np.where((is_already_mine > 0.5) | (src_s >= need_pos), 1.0, 0.0).astype(np.float32)
+            cost = 1.0 + np.where(is_already_mine > 0.5, 0.0, np.maximum(0.0, need_pos - 1.0)) + 0.5 * etas.astype(np.float32)
+            roi = np.minimum(2.0, t_prod / cost)
+            edge_ships_norm = np.log1p(np.where(is_already_mine > 0.5, ps_pos, np.maximum(0.0, need_pos - 1.0))) / 6.0
+        else:
+            margin = np.where(is_t_me > 0.5, src_s, src_s - ps_f)
+            cap_feasible = np.where((is_t_me > 0.5) | (src_s > ps_f), 1.0, 0.0).astype(np.float32)
+            cost = 1.0 + np.where(is_t_me > 0.5, 0.0, ps_pos) + 0.5 * etas.astype(np.float32)
+            roi = np.minimum(2.0, t_prod / cost)
+            edge_ships_norm = np.log1p(ps_pos) / 6.0
 
         edge_feats[ii, jj, 0] = 1.0
         edge_feats[ii, jj, 1] = etas / float(MAX_ROUTE_ETA)
@@ -404,7 +482,7 @@ def extract_planet_features(
         edge_feats[ii, jj, 5] = is_t_me
         edge_feats[ii, jj, 6] = is_t_enemy
         edge_feats[ii, jj, 7] = is_comet_arr[jj].astype(np.float32)
-        edge_feats[ii, jj, 8] = np.log1p(ps_pos) / 6.0
+        edge_feats[ii, jj, 8] = edge_ships_norm
         edge_feats[ii, jj, 9] = np.tanh(margin / 25.0)
         edge_feats[ii, jj, 10] = cap_feasible
         edge_feats[ii, jj, 11] = roi
@@ -2078,6 +2156,7 @@ class EnsemblePlanetTransformerAgent:
         use_rot_tta: bool = True,
         use_d4_tta: bool = False,
         force_all_in: bool = False,
+        decoupled_logit: bool = False,
         device: str = "cpu",
     ) -> None:
         paths = [Path(p) for p in checkpoint_paths]
@@ -2106,6 +2185,7 @@ class EnsemblePlanetTransformerAgent:
         self.weights = [w / total_w for w in raw_w]
         self.launch_threshold = float(launch_threshold)
         self.force_all_in = bool(force_all_in)
+        self.decoupled_logit = bool(decoupled_logit)
         self.feature_version = max(a.feature_version for a in self.agents)
 
     @torch.no_grad()
@@ -2119,9 +2199,36 @@ class EnsemblePlanetTransformerAgent:
         n = len(enc.planet_ids)
         if n == 0:
             return np.zeros((0, 1), dtype=np.float32), np.zeros((0, 0), dtype=np.float32), 0.0
-        probs_acc = np.zeros((n, n + 1), dtype=np.float64)
         fracs_acc = np.zeros((n, n), dtype=np.float64)
         val_acc = 0.0
+        if self.decoupled_logit:
+            legal = enc.legal_edges
+            has_legal = np.any(legal, axis=-1, keepdims=True)
+            launch_logit_acc = np.zeros((n, 1), dtype=np.float64)
+            log_tgt_acc = np.zeros((n, n), dtype=np.float64)
+            for agent, w in zip(self.agents, self.weights):
+                p, f, v = agent.predict_probs_and_value(enc, use_rot_tta=use_rot_tta, use_d4_tta=use_d4_tta)
+                p_hold_k = np.clip(p[:, :1].astype(np.float64), 1e-6, 1.0 - 1e-6)
+                p_launch_k = 1.0 - p_hold_k
+                launch_logit_acc += w * (np.log(p_launch_k) - np.log(p_hold_k))
+                cond_k = np.where(
+                    legal,
+                    np.clip(p[:, 1:].astype(np.float64) / np.maximum(p_launch_k, 1e-7), 1e-8, 1.0),
+                    1.0,
+                )
+                log_tgt_acc += w * np.log(cond_k)
+                fracs_acc += w * f
+                val_acc += w * v
+            p_launch = 1.0 / (1.0 + np.exp(-np.clip(launch_logit_acc, -20.0, 20.0)))
+            p_hold = 1.0 - p_launch
+            masked_tgt = np.where(legal, log_tgt_acc, -1e9)
+            max_t = np.max(masked_tgt, axis=-1, keepdims=True)
+            exp_t = np.where(legal, np.exp(masked_tgt - max_t), 0.0)
+            sum_t = np.sum(exp_t, axis=-1, keepdims=True)
+            p_tgt = np.where(has_legal & (sum_t > 0.0), exp_t / np.maximum(sum_t, 1e-12), 0.0)
+            probs = np.concatenate([p_hold, p_launch * p_tgt], axis=-1).astype(np.float32)
+            return probs, fracs_acc.astype(np.float32), float(val_acc)
+        probs_acc = np.zeros((n, n + 1), dtype=np.float64)
         for agent, w in zip(self.agents, self.weights):
             p, f, v = agent.predict_probs_and_value(enc, use_rot_tta=use_rot_tta, use_d4_tta=use_d4_tta)
             probs_acc += w * p

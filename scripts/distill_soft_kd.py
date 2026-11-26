@@ -542,6 +542,8 @@ def compute_soft_kd_loss(
     hold_boost: float = 1.0,
     launch_bce_weight: float = 0.0,
     cliff_boost: float = 1.0,
+    blind_miss_boost: float = 1.0,
+    target_kl_weight: float = 0.0,
     launch_sharpen: float = 1.0,
     launch_center: float = 0.53,
     skip_frac: bool = False,
@@ -615,11 +617,16 @@ def compute_soft_kd_loss(
         mid_hold = node_is_mid & (q_hold >= 0.65)
         w = torch.where(mid_hold, w * float(hold_boost), w)
     cliff_w = None
-    if cliff_boost != 1.0:
+    if cliff_boost != 1.0 or blind_miss_boost != 1.0:
         with torch.no_grad():
             p_l_det = 1.0 - log_p[..., 0].exp()
-            cliff_mask = ((q_raw_launch >= 0.25) & (q_raw_launch <= 0.75)) | ((p_l_det - q_raw_launch).abs() >= 0.15)
-        cliff_w = torch.where(cliff_mask, logits.new_full((), float(cliff_boost)), logits.new_ones(()))
+            cliff_w = logits.new_ones(q_raw_launch.shape)
+            if cliff_boost != 1.0:
+                cliff_mask = ((q_raw_launch >= 0.25) & (q_raw_launch <= 0.75)) | ((p_l_det - q_raw_launch).abs() >= 0.15)
+                cliff_w = torch.where(cliff_mask, cliff_w * float(cliff_boost), cliff_w)
+            if blind_miss_boost != 1.0:
+                blind_mask = (q_raw_launch >= float(launch_center)) & (p_l_det < 0.40)
+                cliff_w = torch.where(blind_mask, cliff_w * float(blind_miss_boost), cliff_w)
         w = w * cliff_w
     w_masked = w * valid_f
     kd_loss = (kl_per * w_masked).sum() / w_masked.sum().clamp_min(1.0)
@@ -685,6 +692,22 @@ def compute_soft_kd_loss(
             lw_masked = lw_masked * cliff_w
         launch_bce_loss = (launch_kl_per * lw_masked).sum() / lw_masked.sum().clamp_min(1.0)
         total = total + float(launch_bce_weight) * launch_bce_loss
+    if target_kl_weight > 0.0:
+        tgt_mask = le
+        has_t = tgt_mask.any(dim=-1, keepdim=True)
+        safe_t = tgt_mask | (~has_t)
+        tgt_mask_f = tgt_mask.to(logits.dtype)
+        log_pt = F.log_softmax(logits[..., 1:].masked_fill(~safe_t, -1e9), dim=-1)
+        q_t_raw = (q_all[..., 1:] * tgt_mask_f).clamp_min(0.0)
+        q_t_sum = q_t_raw.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        q_t = q_t_raw / q_t_sum
+        log_qt = torch.log(q_t.clamp_min(1e-7))
+        tgt_kl_per = (q_t * (log_qt - log_pt) * tgt_mask_f).sum(dim=-1).clamp_min(0.0)
+        t_w = valid_f * (q_raw_launch >= 0.15).to(logits.dtype) * q_raw_launch * node_board_w
+        if cliff_w is not None:
+            t_w = t_w * cliff_w
+        tgt_kl_loss = (tgt_kl_per * t_w).sum() / t_w.sum().clamp_min(1.0)
+        total = total + float(target_kl_weight) * tgt_kl_loss
 
     if return_tensor_metrics:
         return total, {
@@ -741,6 +764,8 @@ def train_soft_kd(
     hold_boost: float = 1.0,
     launch_bce_weight: float = 0.0,
     cliff_boost: float = 1.0,
+    blind_miss_boost: float = 1.0,
+    target_kl_weight: float = 0.0,
     launch_sharpen: float = 1.0,
     launch_center: float = 0.53,
     skip_frac: bool = False,
@@ -877,6 +902,9 @@ def train_soft_kd(
                 comet_weight=comet_weight,
                 hold_boost=hold_boost,
                 launch_bce_weight=launch_bce_weight,
+                cliff_boost=cliff_boost,
+                blind_miss_boost=blind_miss_boost,
+                target_kl_weight=target_kl_weight,
                 launch_sharpen=launch_sharpen,
                 launch_center=launch_center,
                 skip_frac=skip_frac,
@@ -994,6 +1022,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--comet-weight", type=float, default=2.0)
     parser.add_argument("--hold-boost", type=float, default=1.25)
     parser.add_argument("--launch-bce-weight", type=float, default=0.0)
+    parser.add_argument("--cliff-boost", type=float, default=1.0)
+    parser.add_argument("--blind-miss-boost", type=float, default=1.0)
+    parser.add_argument("--target-kl-weight", type=float, default=0.0)
     parser.add_argument("--launch-sharpen", type=float, default=1.0)
     parser.add_argument("--launch-center", type=float, default=0.53)
     parser.add_argument("--skip-frac", action="store_true", help="Skip dead (B,N,N,D/2) frac_head during all-in training (~1.3x faster).")
@@ -1063,6 +1094,9 @@ def main(argv: list[str] | None = None) -> int:
         comet_weight=args.comet_weight,
         hold_boost=args.hold_boost,
         launch_bce_weight=args.launch_bce_weight,
+        cliff_boost=args.cliff_boost,
+        blind_miss_boost=args.blind_miss_boost,
+        target_kl_weight=args.target_kl_weight,
         launch_sharpen=args.launch_sharpen,
         launch_center=args.launch_center,
         skip_frac=args.skip_frac,

@@ -897,4 +897,505 @@ def test_ptv35_target_cond_launch_logit_tta_and_factorized_ppo():
         _assert_no_dml_fallback(caught_dml)
 
 
+def test_soft_kd_blind_miss_boost_cpu_and_dml():
+    """Verify blind_miss_boost upweights high-teacher-launch / low-student-launch samples on CPU & DML."""
+    from distill_soft_kd import compute_soft_kd_loss
+    from orbit_wars_bot.planet_transformer import TIMELINE_FEAT_DIM_V2
+
+    sim = FastOrbitSim.from_seed(seed=994, num_agents=2, max_steps=60)
+    for _ in range(30):
+        if sim.done:
+            break
+        sim.step([[], []])
+    obs = sim.to_observation(player=0)
+    enc = extract_planet_features(obs, player=0, max_speed=sim.ship_speed, feature_version=2)
+    pad = pad_encoded_state(enc, MAX_PLANETS)
+
+    owned_rows = np.where(pad["owned_mask"])[0]
+    row_i = int(owned_rows[0])
+    legal_cols = np.where(pad["legal_edges"][row_i])[0]
+    assert len(legal_cols) > 0
+
+    torch.manual_seed(11)
+    model = PlanetTimelineTransformer(
+        timeline_dim=TIMELINE_FEAT_DIM_V2,
+        d_model=32,
+        n_heads=4,
+        n_layers=1,
+        dim_ff=64,
+        use_aux_future=True,
+        feature_version=2,
+        arch_version=3,
+        target_cond_launch=True,
+    )
+    # Force student logits strongly toward HOLD (p_l < 0.40) on owned planets while teacher wants launch (>= 0.53).
+    with torch.no_grad():
+        model.launch_head[-1].weight.zero_()
+        model.launch_head[-1].bias.fill_(-4.0)
+
+    pf = torch.from_numpy(pad["planet_feats"][None])
+    tf = torch.from_numpy(pad["timeline_feats"][None])
+    ef = torch.from_numpy(pad["edge_feats"][None])
+    le = torch.from_numpy(pad["legal_edges"][None])
+    om = torch.from_numpy(pad["owned_mask"][None])
+    pm = torch.from_numpy(pad["pad_mask"][None])
+
+    soft_q = np.zeros((1, MAX_PLANETS, MAX_PLANETS + 1), dtype=np.float32)
+    soft_q[:, :, 0] = 0.90
+    for r in owned_rows:
+        lc = np.where(pad["legal_edges"][r])[0]
+        if len(lc) > 0:
+            soft_q[:, r, 0] = 0.25
+            soft_q[:, r, 1 + lc[0]] = 0.75
+    sq = torch.from_numpy(soft_q)
+    vt = torch.tensor([1.0], dtype=torch.float32)
+    ao = torch.zeros((1, MAX_PLANETS), dtype=torch.long)
+    ash = torch.zeros((1, MAX_PLANETS), dtype=torch.float32)
+    av = pm.clone()
+
+    # Use single-owned mask on row_i plus another owned row (or non-owned? om covers owned rows):
+    # Wait: if ALL valid owned rows get blind_miss_boost=2.0, normalized w_masked/w_masked.sum() cancels uniform scale!
+    # Make one owned row strongly HOLD in teacher (not blind miss) vs row_i strong LAUNCH if >=2 owned rows,
+    # or check direct gradient magnitude via backprop on unnormalized / mixed rows.
+    # Actually at t=30 sim may have 1 owned planet -> test with a 2nd synthetic owned planet so weights are 1.0 vs 2.0!
+    om_2 = om.clone()
+    le_2 = le.clone()
+    pm_2 = pm.clone()
+    other_idx = int((row_i + 1) % len(enc.planet_ids))
+    om_2[0, other_idx] = True
+    if not bool(le_2[0, other_idx].any()):
+        le_2[0, other_idx, row_i] = True
+    sq_2 = sq.clone()
+    lc_other = np.where(le_2[0, other_idx].numpy())[0]
+    sq_2[0, other_idx, :] = 0.0
+    sq_2[0, other_idx, 0] = 0.99  # low KL & not blind miss -> weight 1.0
+    sq_2[0, row_i, :] = 0.0
+    sq_2[0, row_i, 0] = 0.20  # high KL & blind miss (q_l=0.80 >= 0.53, student p_l ~ 0.05 < 0.40) -> weight 2.0
+    sq_2[0, row_i, 1 + int(legal_cols[0])] = 0.80
+
+    model.eval()
+    with torch.no_grad():
+        _, m1 = compute_soft_kd_loss(
+            model, pf, tf, ef, le_2, om_2, pm_2, sq_2, vt, ao, ash, av,
+            blind_miss_boost=1.0, skip_frac=True, launch_center=0.53,
+        )
+        _, m2 = compute_soft_kd_loss(
+            model, pf, tf, ef, le_2, om_2, pm_2, sq_2, vt, ao, ash, av,
+            blind_miss_boost=2.5, skip_frac=True, launch_center=0.53,
+        )
+    assert m2["kl"] > m1["kl"], f"Expected blind_miss_boost to increase weighted KL: {m1['kl']} vs {m2['kl']}"
+
+    dev, is_dml = resolve_train_device("dml" if _HAS_DML_GPU else "cpu")
+    m_d = model.to(dev).train()
+    opt = build_optimizer(m_d.parameters(), lr=1e-3, use_dml=is_dml)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        opt.zero_grad(set_to_none=True)
+        loss_d, md = compute_soft_kd_loss(
+            m_d,
+            pf.to(dev),
+            tf.to(dev),
+            ef.to(dev),
+            le_2.to(dev),
+            om_2.to(dev),
+            pm_2.to(dev),
+            sq_2.to(dev),
+            vt.to(dev),
+            ao.to(dev),
+            ash.to(dev),
+            av.to(dev),
+            blind_miss_boost=2.0,
+            cliff_boost=1.6,
+            skip_frac=True,
+        )
+        loss_d.backward()
+        opt.step()
+        assert np.isfinite(md["kl"]) and torch.isfinite(loss_d).item()
+    if is_dml:
+        _assert_no_dml_fallback(caught)
+
+
+def test_ensemble_decoupled_logit_preserves_launch_prob(tmp_path):
+    """Verify EnsemblePlanetTransformerAgent(decoupled_logit=True) avoids Jensen launch suppression."""
+    import math
+    from orbit_wars_bot.planet_transformer import EnsemblePlanetTransformerAgent, TIMELINE_FEAT_DIM_V2
+
+    sim = FastOrbitSim.from_seed(seed=995, num_agents=2, max_steps=60)
+    for _ in range(30):
+        if sim.done:
+            break
+        sim.step([[], []])
+    obs = sim.to_observation(player=0)
+    enc = extract_planet_features(obs, player=0, max_speed=sim.ship_speed, feature_version=2)
+    n_p = len(enc.planet_ids)
+
+    m1 = PlanetTimelineTransformer(
+        timeline_dim=TIMELINE_FEAT_DIM_V2, d_model=32, n_heads=2, n_layers=1, dim_ff=64,
+        feature_version=2, arch_version=3, target_cond_launch=True,
+    ).eval()
+    m2 = copy.deepcopy(m1).eval()
+    p1 = tmp_path / "ens_m1.pt"
+    p2 = tmp_path / "ens_m2.pt"
+    torch.save({"model_config": m1.config, "model_state_dict": m1.state_dict()}, p1)
+    torch.save({"model_config": m2.config, "model_state_dict": m2.state_dict()}, p2)
+
+    ens = EnsemblePlanetTransformerAgent([p1, p2], weights=[0.5, 0.5], decoupled_logit=True)
+    # Build two opposing member distributions with identical p_launch = 0.70 on every legal row
+    p_l = 0.70
+    probs_a = np.zeros((n_p, n_p + 1), dtype=np.float32)
+    probs_b = np.zeros((n_p, n_p + 1), dtype=np.float32)
+    for i in range(n_p):
+        leg = np.where(enc.legal_edges[i])[0]
+        if len(leg) >= 2:
+            t_a = np.exp([3.0, 0.0]); t_a /= t_a.sum()
+            t_b = np.exp([0.0, 3.0]); t_b /= t_b.sum()
+            probs_a[i, 0] = 1.0 - p_l
+            probs_b[i, 0] = 1.0 - p_l
+            probs_a[i, 1 + leg[0]] = p_l * float(t_a[0])
+            probs_a[i, 1 + leg[1]] = p_l * float(t_a[1])
+            probs_b[i, 1 + leg[0]] = p_l * float(t_b[0])
+            probs_b[i, 1 + leg[1]] = p_l * float(t_b[1])
+        else:
+            probs_a[i, 0] = 1.0
+            probs_b[i, 0] = 1.0
+    fracs_z = np.ones((n_p, n_p), dtype=np.float32)
+    ens.agents[0].predict_probs_and_value = lambda _enc, **kw: (probs_a, fracs_z, 0.2)
+    ens.agents[1].predict_probs_and_value = lambda _enc, **kw: (probs_b, fracs_z, -0.2)
+
+    out_p, _, out_v = ens.predict_probs_and_value(enc)
+    assert np.allclose(out_p.sum(axis=-1), 1.0, atol=1e-5)
+    assert np.allclose(out_p[:, 1:][~enc.legal_edges], 0.0, atol=1e-7)
+    assert abs(out_v) < 1e-6
+    for i in range(n_p):
+        if np.sum(enc.legal_edges[i]) >= 2:
+            assert abs((1.0 - float(out_p[i, 0])) - p_l) < 1e-4
+    mv = ens.act(obs, sim.to_config())
+    assert isinstance(mv, list)
+
+
+def test_rl_decoupled_factorized_kl_cpu_and_dml():
+    """Verify _decoupled_factorized_kl and factorized KL ppo_update run cleanly on CPU & DirectML."""
+    from rl_finetune_transformer import _decoupled_factorized_kl, collect_episode, ppo_update
+
+    torch.manual_seed(29)
+    B, N = 2, 4
+    act_mask = torch.ones((B, N, N + 1), dtype=torch.bool)
+    act_mask[:, :, -1] = False  # make one target edge illegal
+    logits = torch.randn((B, N, N + 1))
+    logp = F.log_softmax(logits.masked_fill(~act_mask, -1e9), dim=-1)
+
+    tot0, lkl0, tkl0 = _decoupled_factorized_kl(logp, logp, act_mask, target_kl_weight=2.5)
+    assert float(tot0.abs().max().item()) < 1e-6
+    assert float(lkl0.abs().max().item()) < 1e-6 and float(tkl0.abs().max().item()) < 1e-6
+
+    # Shift ONLY conditional target logits while keeping exact hold/launch probability ratio unchanged
+    logits_tgt = logits.clone()
+    logits_tgt[:, :, 1] += 2.0
+    # Adjust shift on all legal targets by -logsumexp delta so p_launch is unchanged
+    tgt_m = act_mask[..., 1:]
+    old_lse = torch.logsumexp(logits[..., 1:].masked_fill(~tgt_m, -1e9), dim=-1, keepdim=True)
+    new_lse = torch.logsumexp(logits_tgt[..., 1:].masked_fill(~tgt_m, -1e9), dim=-1, keepdim=True)
+    logits_tgt[..., 1:] = logits_tgt[..., 1:] - (new_lse - old_lse)
+    logp_tgt = F.log_softmax(logits_tgt.masked_fill(~act_mask, -1e9), dim=-1)
+
+    tot_t, lkl_t, tkl_t = _decoupled_factorized_kl(logp_tgt, logp, act_mask, target_kl_weight=2.5)
+    assert float(lkl_t.abs().max().item()) < 1e-5
+    assert float(tkl_t.mean().item()) > 0.05 and float(tot_t.mean().item()) > float(lkl_t.mean().item())
+
+    policy = PlanetTimelineTransformer(
+        timeline_dim=14,
+        d_model=32,
+        n_heads=2,
+        n_layers=1,
+        dim_ff=64,
+        use_aux_future=True,
+        feature_version=2,
+        arch_version=3,
+        target_cond_launch=True,
+    )
+    teacher = copy.deepcopy(policy).eval()
+    fixed_anchor = copy.deepcopy(policy).eval()
+    from rl_finetune_transformer import collect_episodes_batched_2p
+
+    res = collect_episodes_batched_2p(
+        policy.eval(),
+        teacher,
+        specs=[(996, 0), (996, 1)],
+        temperature=0.45,
+        target_temperature=0.20,
+        max_steps=16,
+        force_all_in=True,
+        factorized_sample=True,
+        exact_factorized_ppo=True,
+        launch_threshold=0.53,
+    )
+    batches = [b for b, _ in res if len(b["returns"]) > 0]
+    rollout = {k: np.concatenate([x[k] for x in batches], axis=0) for k in batches[0]}
+
+    dev, is_dml = resolve_train_device("dml" if _HAS_DML_GPU else "cpu")
+    p_d = copy.deepcopy(policy).to(dev)
+    t_d = copy.deepcopy(teacher).to(dev).eval()
+    f_d = copy.deepcopy(fixed_anchor).to(dev).eval()
+    opt = build_optimizer(p_d.parameters(), lr=1e-4, use_dml=is_dml)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        stats = ppo_update(
+            p_d,
+            t_d,
+            opt,
+            rollout,
+            ppo_epochs=2,
+            batch_size=16,
+            kl_coef=0.06,
+            anchor_kl_coef=0.12,
+            fixed_anchor=f_d,
+            device=dev,
+            use_dml=is_dml,
+            augment_d4=False,
+            detach_value=True,
+            exact_factorized_ppo=True,
+            target_kl_weight=2.5,
+            temperature=0.45,
+            target_temperature=0.20,
+            launch_threshold=0.53,
+        )
+    if is_dml:
+        _assert_no_dml_fallback(caught)
+    assert all(np.isfinite(v) for v in stats.values())
+    assert stats["target_kl"] >= 0.0 and stats["launch_kl"] >= 0.0
+
+
+def test_rl_same_seed_grpo_counterfactual_advantage_dml():
+    """Verify 4-tuple same-seed GRPO rollout specs, identical group D4 orientation, and DML updates."""
+    from rl_finetune_transformer import collect_episodes_batched_2p, ppo_update
+
+    torch.manual_seed(37)
+    policy = PlanetTimelineTransformer(
+        timeline_dim=14,
+        d_model=32,
+        n_heads=2,
+        n_layers=1,
+        dim_ff=64,
+        use_aux_future=True,
+        feature_version=2,
+        arch_version=3,
+        target_cond_launch=True,
+    ).eval()
+    teacher = copy.deepcopy(policy).eval()
+
+    # Two trajectories on identical (seed=997, seat=0, gid=10) with distinct RNG exploration seeds
+    specs = [(997, 0, 10, 1001), (997, 0, 10, 2002)]
+    res = collect_episodes_batched_2p(
+        policy,
+        teacher,
+        specs=specs,
+        temperature=0.22,
+        target_temperature=0.15,
+        max_steps=16,
+        force_all_in=True,
+        rollout_d4=True,
+        factorized_sample=True,
+        exact_factorized_ppo=True,
+        launch_threshold=0.53,
+    )
+    assert len(res) == 2
+    b0, s0 = res[0]
+    b1, s1 = res[1]
+    assert int(s0["group_id"]) == 10 and int(s1["group_id"]) == 10
+    assert len(b0["returns"]) > 0 and len(b1["returns"]) > 0
+    # Tick-0 rotated planet features must match identically inside the same group_id
+    assert np.allclose(b0["planet_feats"][0], b1["planet_feats"][0], atol=1e-4)
+    assert np.all(b0["group_id"] == 10) and np.all(b1["group_id"] == 10)
+
+    rollout = {k: np.concatenate([b0[k], b1[k]], axis=0) for k in b0}
+
+    # Verify non-mixed group produces zero policy-head gradient when KL/ent/aux=0 and detach_value=True
+    roll_nonmix = {k: v.copy() for k, v in rollout.items()}
+    roll_nonmix["term_rew"][:] = 1.0
+    p_nm = copy.deepcopy(policy)
+    w_before = p_nm.launch_head[-1].weight.detach().clone()
+    opt_nm = build_optimizer(p_nm.parameters(), lr=1e-3, use_dml=False)
+    ppo_update(
+        p_nm,
+        teacher,
+        opt_nm,
+        roll_nonmix,
+        ppo_epochs=1,
+        batch_size=16,
+        kl_coef=0.0,
+        anchor_kl_coef=0.0,
+        ent_coef=0.0,
+        aux_coef=0.0,
+        augment_d4=False,
+        detach_value=True,
+        exact_factorized_ppo=True,
+        target_kl_weight=2.5,
+        use_group_grpo=True,
+        temperature=0.22,
+        target_temperature=0.15,
+        launch_threshold=0.53,
+    )
+    assert torch.allclose(w_before, p_nm.launch_head[-1].weight.detach(), atol=1e-7)
+
+    # Verify mixed counterfactual group runs cleanly on DirectML / CPU with zero fallbacks
+    roll_mix = {k: v.copy() for k, v in rollout.items()}
+    n0 = len(b0["returns"])
+    roll_mix["term_rew"][:n0] = 1.0
+    roll_mix["term_rew"][n0:] = -1.0
+
+    dev, is_dml = resolve_train_device("dml" if _HAS_DML_GPU else "cpu")
+    p_d = copy.deepcopy(policy).to(dev)
+    t_d = copy.deepcopy(teacher).to(dev).eval()
+    f_d = copy.deepcopy(teacher).to(dev).eval()
+    opt_d = build_optimizer(p_d.parameters(), lr=5e-5, use_dml=is_dml)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        stats = ppo_update(
+            p_d,
+            t_d,
+            opt_d,
+            roll_mix,
+            ppo_epochs=2,
+            batch_size=16,
+            kl_coef=0.10,
+            anchor_kl_coef=0.25,
+            ent_coef=0.0,
+            aux_coef=0.10,
+            fixed_anchor=f_d,
+            device=dev,
+            use_dml=is_dml,
+            augment_d4=False,
+            detach_value=True,
+            exact_factorized_ppo=True,
+            target_kl_weight=2.5,
+            use_group_grpo=True,
+            temperature=0.22,
+            target_temperature=0.15,
+            launch_threshold=0.53,
+        )
+    if is_dml:
+        _assert_no_dml_fallback(caught)
+    assert all(np.isfinite(v) for v in stats.values())
+
+
+def test_feature_version3_exact_ships_for_capture_and_soft_kd_target_kl_dml():
+    """Verify feature_version=3 exact ships_for_capture parity and Soft-KD target_kl_weight on CPU/DML."""
+    from distill_soft_kd import compute_soft_kd_loss
+    from orbit_wars_bot.heuristic_bot import heuristic_moves
+    from orbit_wars_bot.hober_sparring import _compute_ships_for_capture
+    from orbit_wars_bot.planet_transformer import (
+        TIMELINE_FEAT_DIM_V2,
+        build_shared_planet_physics,
+    )
+
+    # Step a live game until simultaneous fleet arrivals occur so v3 differs from v2
+    sim = FastOrbitSim.from_seed(seed=203, num_agents=2, max_steps=100)
+    obs = sim.to_observation(player=0)
+    found_diff = False
+    for _ in range(70):
+        if sim.done:
+            break
+        sim.step([heuristic_moves(sim, 0), heuristic_moves(sim, 1)])
+        obs = sim.to_observation(player=0)
+        sh_tmp = build_shared_planet_physics(obs, max_speed=sim.ship_speed)
+        e2 = extract_planet_features(obs, player=0, max_speed=sim.ship_speed, feature_version=2, shared_physics=sh_tmp)
+        e3 = extract_planet_features(obs, player=0, max_speed=sim.ship_speed, feature_version=3, shared_physics=sh_tmp)
+        if not np.allclose(e2.timeline_feats[:, :, 12], e3.timeline_feats[:, :, 12], atol=1e-6):
+            found_diff = True
+            sh = sh_tmp
+            enc2, enc3 = e2, e3
+            break
+    assert found_diff, "Expected simultaneous fleet arrivals where v3 cap_need differs from v2"
+
+    n_p = len(enc3.planet_ids)
+    assert enc3.timeline_feats.shape == (n_p, 20, TIMELINE_FEAT_DIM_V2)
+    assert enc3.edge_feats.shape == (n_p, n_p, 12)
+    # Every other timeline channel besides ch 12 must remain identical between v2 and v3
+    for ch in range(TIMELINE_FEAT_DIM_V2):
+        if ch != 12:
+            assert np.allclose(enc2.timeline_feats[:, :, ch], enc3.timeline_feats[:, :, ch], atol=1e-6)
+    exact_cap = _compute_ships_for_capture(sh, 0, max_timesteps=21)
+    pos_valid = enc3.timeline_feats[:, :, 11] > 0.5
+    exp_ch12 = np.where(pos_valid, np.log1p(np.maximum(0, exact_cap[:, 1:21])) / 6.0, 0.0)
+    assert np.allclose(enc3.timeline_feats[:, :, 12], exp_ch12, atol=1e-5)
+
+    # Verify Soft-KD target_kl_weight > 0 strictly increases loss under target mismatch & passes DML w/o fallback
+    pad = pad_encoded_state(enc3, MAX_PLANETS)
+    pf = torch.from_numpy(pad["planet_feats"][None])
+    tf = torch.from_numpy(pad["timeline_feats"][None])
+    ef = torch.from_numpy(pad["edge_feats"][None])
+    le = torch.from_numpy(pad["legal_edges"][None])
+    om = torch.from_numpy(pad["owned_mask"][None])
+    pm = torch.from_numpy(pad["pad_mask"][None])
+
+    owned_rows = np.where(pad["owned_mask"])[0]
+    row_i = int(owned_rows[0])
+    legal_cols = np.where(pad["legal_edges"][row_i])[0]
+    assert len(legal_cols) >= 2
+    sq = torch.zeros((1, MAX_PLANETS, MAX_PLANETS + 1), dtype=torch.float32)
+    sq[:, :, 0] = 0.90
+    sq[:, row_i, 0] = 0.25
+    sq[:, row_i, 1 + int(legal_cols[0])] = 0.70
+    sq[:, row_i, 1 + int(legal_cols[1])] = 0.05
+    vt = torch.tensor([0.5], dtype=torch.float32)
+    ao = torch.zeros((1, MAX_PLANETS), dtype=torch.long)
+    ash = torch.zeros((1, MAX_PLANETS), dtype=torch.float32)
+    av = pm.clone()
+
+    torch.manual_seed(53)
+    m = PlanetTimelineTransformer(
+        timeline_dim=TIMELINE_FEAT_DIM_V2,
+        d_model=32,
+        n_heads=4,
+        n_layers=1,
+        dim_ff=64,
+        use_aux_future=True,
+        feature_version=3,
+        arch_version=3,
+        target_cond_launch=True,
+    ).eval()
+    with torch.no_grad():
+        loss0, _ = compute_soft_kd_loss(
+            m, pf, tf, ef, le, om, pm, sq, vt, ao, ash, av,
+            target_kl_weight=0.0, blind_miss_boost=2.0, cliff_boost=1.6, skip_frac=True,
+        )
+        loss2, _ = compute_soft_kd_loss(
+            m, pf, tf, ef, le, om, pm, sq, vt, ao, ash, av,
+            target_kl_weight=2.0, blind_miss_boost=2.0, cliff_boost=1.6, skip_frac=True,
+        )
+    assert float(loss2.item()) > float(loss0.item())
+
+    dev, is_dml = resolve_train_device("dml" if _HAS_DML_GPU else "cpu")
+    m_d = m.to(dev).train()
+    opt = build_optimizer(m_d.parameters(), lr=1e-4, use_dml=is_dml)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        opt.zero_grad(set_to_none=True)
+        loss_d, md = compute_soft_kd_loss(
+            m_d,
+            pf.to(dev),
+            tf.to(dev),
+            ef.to(dev),
+            le.to(dev),
+            om.to(dev),
+            pm.to(dev),
+            sq.to(dev),
+            vt.to(dev),
+            ao.to(dev),
+            ash.to(dev),
+            av.to(dev),
+            target_kl_weight=2.0,
+            blind_miss_boost=2.0,
+            cliff_boost=1.6,
+            skip_frac=True,
+        )
+        loss_d.backward()
+        opt.step()
+        assert torch.isfinite(loss_d).item() and np.isfinite(md["kl"])
+    if is_dml:
+        _assert_no_dml_fallback(caught)
+
+
+
+
 

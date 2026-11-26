@@ -58,15 +58,15 @@
   <div class="wrap">
     <header>
       <div>
-        <div class="meta">AClaybrook/orbit-wars-lightzero • Boss Forensics Track (Gen 8 → Gen 13 PT-v3.5) • Seeds 200–205 &amp; 48g Suite</div>
-        <h1>#2 Hober Malloc Forensics — Gen 8 → Gen 13 PT-v3.5 (43.8% vs #2)</h1>
-        <p>Exact tick-by-tick economy, combat waste, and counterfactual policy audit across <code>PT-Gen8</code>, <code>PT-Gen9</code>, <code>PT-v2 Gen 12</code> (<code>33.3%</code>), and <code>4.67M PT-v3.5 Gen 13 KD</code> (<code>21–0–27 / 43.8%</code>) against Kaggle #2 <code>Hober Malloc (1800.1)</code>.</p>
+        <div class="meta">AClaybrook/orbit-wars-lightzero • Boss Forensics Track (Gen 8 → Gen 15B PT-v3.5) • Seeds 200–223, 300–323 &amp; 400–423</div>
+        <h1>#2 Hober Malloc Forensics — Gen 8 → Gen 15B PT-v3.5 (50.0% 48g / 45.8% 72g vs #2)</h1>
+        <p>Exact tick-by-tick economy, combat waste, and counterfactual policy audit across <code>PT-Gen8</code>, <code>PT-Gen9</code>, <code>Gen 12</code> (<code>33.3%</code>), <code>Gen 13 PT-v3.5</code> (<code>43.8%</code>), and <code>Gen 15B GRPO-it6</code> (<code>24–0–24 / 50.0% 48g</code>, <code>33–0–39 / 45.8% 72g</code>) against Kaggle #2 <code>Hober Malloc (1800.1)</code>.</p>
       </div>
       <div class="badges">
         <a href="status_report.html" class="badge">← Benchmark Report</a>
         <a href="gameplay_viewer.html" class="badge ok">▶ Watch Gen 13 Boss Wins (33 Matches)</a>
         <a href="wargame_report.html" class="badge">◆ 3v1 Wargaming Study</a>
-        <span class="badge ok">Gen 13 Single: 21–0–27 (43.8%) vs #2</span>
+        <span class="badge ok">Gen 15B Single: 24–0–24 (50.0% 48g / 45.8% 72g) vs #2</span>
       </div>
     </header>
 
@@ -233,15 +233,15 @@
             <h3 style="margin-top:4px;">DirectML Factorized PPO &amp; Packing</h3>
             <p>Replaced unsupported <code>log_sigmoid_forward</code> with DirectML-native 2-class <code>F.log_softmax</code> for exact factorized PPO (<code>0</code> fallbacks), added planet-weighted advantage centering &amp; mid-epoch <code>max_kl</code> guard, and packed valid planets before CPU Conv1D (<code>1.51×</code> rollout / <code>1.22×</code> live <code>8× D4</code> speedup).</p>
           </div>
-          <div class="box pri-b">
-            <div class="mono pri" style="font-weight:700">GEN 14 • OPTION A (~45–60 MIN)</div>
-            <h3 style="margin-top:4px;">Direct RL From #2 Hober Weights</h3>
-            <p>Start a fresh ~45–60 min low-LR KL-anchored PPO pass seeded directly from <code>#2 Hober Malloc</code>'s value/policy weights to push past the remaining ~4-game gap to <code>50%+</code>.</p>
+          <div class="box ok-b">
+            <div class="mono ok" style="font-weight:700">GEN 14 &amp; 15B • SHIPPED UPGRADES (50.0% 48g)</div>
+            <h3 style="margin-top:4px;">Wide-Map DAgger + Counterfactual GRPO-it6</h3>
+            <p>Wave 14 wide-map R7 DAgger + <code>blind_miss_boost=2.0</code> lifted unseen <code>400–423</code> from <code>37.5% → 54.2%</code> and broke the <code>PT-v3</code> mirror counter (<code>2–0–18 → 14–0–6 / 70%</code>). Wave 15B same-seed <code>K=4</code> GRPO-it6 reached <strong><code>24–0–24 (50.0%)</code> on 48g Boss</strong> (<code>33–0–39 / 45.8%</code> 72g), sharpened <code>vsign</code> <code>56.6% → 75.0%</code>, and swept <code>subham_v14</code> <code>4–0–0</code> in <code>77.2t</code>. Search 24g was ruled out (<code>25.0%</code> vs greedy <code>54.2%</code>).</p>
           </div>
           <div class="box pri-b">
-            <div class="mono pri" style="font-weight:700">GEN 14 • OPTION B (~45–60 MIN)</div>
-            <h3 style="margin-top:4px;">Diverse-Pool Balanced-Advantage RL</h3>
-            <p>Run low-LR balanced-advantage PPO on <code>PT-v3.5</code> against a mixed pool containing both <code>PT-v3 KD</code> and <code>#2</code> while preserving target accuracy, hardening mirror play and closing the <code>50%+</code> Boss gap.</p>
+            <div class="mono pri" style="font-weight:700">GEN 16 • EXACT PHYSICS PARITY (NEXT)</div>
+            <h3 style="margin-top:4px;">feature_version=3 ships_for_capture + R8</h3>
+            <p>Auditing live trajectories vs <code>#2</code> found approximate <code>cap_need</code> in <code>timeline_feats[:, :, 12]</code> disagreed with exact simultaneous-arrival <code>ships_for_capture</code> on <code>74.2%</code> (<code>233/314</code>) of ticks. Exact <code>feature_version=3</code> + <code>--target-kl-weight</code> Soft-KD is landed and verified (<code>65</code> tests passing) to power Stage 16B.</p>
           </div>
         </div>
       </div>
