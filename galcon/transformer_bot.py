@@ -28,6 +28,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from galcon.fast_c import HAS_FAST_C, extract_features_fast_c
+from galcon.fast_sim_cpp import HAS_FAST_SIM_CPP, FastGalconCppSim
 from galcon.gen5_model import GalconGen5Transformer, build_galcon_gen5_transformer
 from galcon.sim import (
     ARRIVAL_EPS,
@@ -515,6 +516,7 @@ def compute_smart_redirects(
     *,
     verify_rollout: bool = False,
     min_gain: float = 0.025,
+    use_cpp_search: Optional[bool] = None,
 ) -> Tuple[List[RedirOrder], Dict[int, int]]:
     """Upgraded tactical/rollout-verified mid-flight ``/REDIR`` oracle.
 
@@ -547,76 +549,101 @@ def compute_smart_redirects(
             if lost >= 0:
                 threatened[p.id] = (float(ps[lost]) + 2.0, lost + 1)
 
-    base_val = None
-    if verify_rollout:
-        roll0 = sim.clone()
-        for _ in range(12):
-            if roll0.done:
-                break
-            roll0.step({})
-        base_val = evaluate_galcon_state(roll0, player)
-
-    redirs: List[RedirOrder] = []
-    labels: Dict[int, int] = {}
-
-    for fl in sorted(sim.fleets.values(), key=lambda f: f.id):
-        if fl.owner != player or fl.target not in id_to_idx:
-            continue
-        cur_idx = id_to_idx[fl.target]
-        labels[fl.id] = cur_idx
-        dst = enc.planets[cur_idx]
-        _, _, po, ps = futures[cur_idx]
-        eta_cur = sim.eta_ticks(fl.x, fl.y, dst)
-        t_cur = min(GALCON_TIMELINE_HORIZON - 1, max(0, eta_cur - 1))
-
-        wasted_friendly = dst.owner == player and po[-1] > 0 and ps[-1] > fl.ships + 15.0
-        doomed_attack = dst.owner != player and po[t_cur] <= 0 and fl.ships < ps[t_cur] * 0.78
-        can_abandon_for_def = (dst.owner == 0 and po[t_cur] >= 0) or wasted_friendly or doomed_attack
-
-        if not (wasted_friendly or doomed_attack or (threatened and can_abandon_for_def)):
-            continue
-
-        best_alt_idx: Optional[int] = None
-        best_sc = 0.0
-        for j, cand in enumerate(enc.planets):
-            if j == cur_idx:
-                continue
-            eta = sim.eta_ticks(fl.x, fl.y, cand)
-            if cand.id in threatened:
-                deficit, urg_eta = threatened[cand.id]
-                if eta <= urg_eta and fl.ships >= deficit * 0.45:
-                    sc = (cand.production * 3.4) / max(1.0, float(eta))
-                    if sc > best_sc:
-                        best_sc = sc
-                        best_alt_idx = j
-            elif (wasted_friendly or doomed_attack) and cand.owner != player:
-                _, _, cpo, cps = futures[j]
-                t_idx = min(GALCON_TIMELINE_HORIZON - 1, max(0, eta - 1))
-                if cpo[t_idx] <= 0 and fl.ships > cps[t_idx] + 1.5:
-                    mult = 2.4 if cand.owner != 0 else 1.15
-                    sc = (cand.production * mult) / max(2.0, float(cps[t_idx]) + eta * 1.4)
-                    if sc > best_sc:
-                        best_sc = sc
-                        best_alt_idx = j
-
-        if best_alt_idx is not None:
-            alt_pid = enc.planet_ids[best_alt_idx]
-            if verify_rollout and base_val is not None:
-                roll1 = sim.clone()
-                roll1.step({player: [RedirOrder(fl.id, alt_pid)]})
-                for _ in range(11):
-                    if roll1.done:
+    use_fast_cpp = (
+        verify_rollout
+        and (use_cpp_search is not False)
+        and FastGalconCppSim.can_represent(sim)
+    )
+    root_cpp: Optional[FastGalconCppSim] = None
+    work_cpp: Optional[FastGalconCppSim] = None
+    try:
+        base_val = None
+        if verify_rollout:
+            if use_fast_cpp:
+                root_cpp = FastGalconCppSim.from_sim(sim)
+                work_cpp = root_cpp.clone()
+                work_cpp.step_n_ticks(12)
+                base_val = evaluate_galcon_state(work_cpp.to_summary_sim(), player)
+            else:
+                roll0 = sim.clone()
+                for _ in range(12):
+                    if roll0.done:
                         break
-                    roll1.step({})
-                alt_val = evaluate_galcon_state(roll1, player)
-                if alt_val >= base_val + min_gain:
+                    roll0.step({})
+                base_val = evaluate_galcon_state(roll0, player)
+
+        redirs: List[RedirOrder] = []
+        labels: Dict[int, int] = {}
+
+        for fl in sorted(sim.fleets.values(), key=lambda f: f.id):
+            if fl.owner != player or fl.target not in id_to_idx:
+                continue
+            cur_idx = id_to_idx[fl.target]
+            labels[fl.id] = cur_idx
+            dst = enc.planets[cur_idx]
+            _, _, po, ps = futures[cur_idx]
+            eta_cur = sim.eta_ticks(fl.x, fl.y, dst)
+            t_cur = min(GALCON_TIMELINE_HORIZON - 1, max(0, eta_cur - 1))
+
+            wasted_friendly = dst.owner == player and po[-1] > 0 and ps[-1] > fl.ships + 15.0
+            doomed_attack = dst.owner != player and po[t_cur] <= 0 and fl.ships < ps[t_cur] * 0.78
+            can_abandon_for_def = (dst.owner == 0 and po[t_cur] >= 0) or wasted_friendly or doomed_attack
+
+            if not (wasted_friendly or doomed_attack or (threatened and can_abandon_for_def)):
+                continue
+
+            best_alt_idx: Optional[int] = None
+            best_sc = 0.0
+            for j, cand in enumerate(enc.planets):
+                if j == cur_idx:
+                    continue
+                eta = sim.eta_ticks(fl.x, fl.y, cand)
+                if cand.id in threatened:
+                    deficit, urg_eta = threatened[cand.id]
+                    if eta <= urg_eta and fl.ships >= deficit * 0.45:
+                        sc = (cand.production * 3.4) / max(1.0, float(eta))
+                        if sc > best_sc:
+                            best_sc = sc
+                            best_alt_idx = j
+                elif (wasted_friendly or doomed_attack) and cand.owner != player:
+                    _, _, cpo, cps = futures[j]
+                    t_idx = min(GALCON_TIMELINE_HORIZON - 1, max(0, eta - 1))
+                    if cpo[t_idx] <= 0 and fl.ships > cps[t_idx] + 1.5:
+                        mult = 2.4 if cand.owner != 0 else 1.15
+                        sc = (cand.production * mult) / max(2.0, float(cps[t_idx]) + eta * 1.4)
+                        if sc > best_sc:
+                            best_sc = sc
+                            best_alt_idx = j
+
+            if best_alt_idx is not None:
+                alt_pid = enc.planet_ids[best_alt_idx]
+                if verify_rollout and base_val is not None:
+                    if use_fast_cpp and root_cpp is not None and work_cpp is not None:
+                        work_cpp.copy_from(root_cpp)
+                        work_cpp.step({player: [RedirOrder(fl.id, alt_pid)]})
+                        work_cpp.step_n_ticks(11)
+                        alt_val = evaluate_galcon_state(work_cpp.to_summary_sim(), player)
+                    else:
+                        roll1 = sim.clone()
+                        roll1.step({player: [RedirOrder(fl.id, alt_pid)]})
+                        for _ in range(11):
+                            if roll1.done:
+                                break
+                            roll1.step({})
+                        alt_val = evaluate_galcon_state(roll1, player)
+                    if alt_val >= base_val + min_gain:
+                        redirs.append(RedirOrder(fl.id, alt_pid))
+                        labels[fl.id] = best_alt_idx
+                else:
                     redirs.append(RedirOrder(fl.id, alt_pid))
                     labels[fl.id] = best_alt_idx
-            else:
-                redirs.append(RedirOrder(fl.id, alt_pid))
-                labels[fl.id] = best_alt_idx
 
-    return redirs, labels
+        return redirs, labels
+    finally:
+        if work_cpp is not None:
+            work_cpp.close()
+        if root_cpp is not None:
+            root_cpp.close()
 
 
 def pad_galcon_state(enc: EncodedGalconState) -> Dict[str, np.ndarray]:
@@ -1378,6 +1405,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         enable_opening_def_guard: bool = True,
         prior_bonus: float = 0.015,
         contempt: Optional[float] = None,
+        use_cpp_search: Optional[bool] = None,
         device: str = "cpu",
     ) -> None:
         super().__init__(
@@ -1404,6 +1432,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         self.enable_def_stream = bool(enable_def_stream)
         self.enable_opening_def_guard = bool(enable_opening_def_guard)
         self.prior_bonus = float(prior_bonus)
+        self.use_cpp_search = bool(HAS_FAST_SIM_CPP) if use_cpp_search is None else bool(use_cpp_search and HAS_FAST_SIM_CPP)
         # Online opponent style tracker (reset automatically whenever sim.tick decreases)
         self._last_obs_tick = 10**9
         self._last_seen_fid = -1
@@ -2287,183 +2316,298 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         eval_cands: List[List[Order]] = []
         rolls: List[GalconSim] = []
 
-        # Ply 1: step each candidate to ply_steps[0]
-        for idx, plan in enumerate(candidates):
-            if idx > 0 and time.perf_counter() >= deadline - 0.025:
-                break
-            roll = sim.clone()
-            roll.step({player: plan, opp: opp_orders})
-            for _ in range(1, ply_steps[0]):
-                if roll.done:
-                    break
-                roll.step({})
-            eval_cands.append(plan)
-            rolls.append(roll)
+        use_fast_cpp = bool(self.use_cpp_search) and FastGalconCppSim.can_represent(sim)
+        root_cpp: Optional[FastGalconCppSim] = None
+        rolls_cpp: List[FastGalconCppSim] = []
+        work_cpp: Optional[FastGalconCppSim] = None
 
-        # Subsequent reactive plies (Ply 2 .. num_plies): ONE batched forward pass per ply
-        for p_idx in range(1, len(ply_steps)):
-            prev_t = ply_steps[p_idx - 1]
-            next_t = ply_steps[p_idx]
-            if next_t <= prev_t or time.perf_counter() >= deadline - 0.015:
-                break
-            live_indices = [i for i, r in enumerate(rolls) if not r.done]
-            if not live_indices:
-                break
-            mid_encs: List[EncodedGalconState] = []
-            for i in live_indices:
-                mid_encs.append(extract_galcon_features(rolls[i], player, feature_version=self.feature_version))
-                mid_encs.append(extract_galcon_features(rolls[i], opp, feature_version=self.feature_version))
-            m_probs, m_fracs, _, m_msp, m_msf = self._batch_forward_policy_and_val(
-                mid_encs, need_value=False, ms_only=using_ms
-            )
-            for k_idx, r_idx in enumerate(live_indices):
-                r = rolls[r_idx]
-                p_enc = mid_encs[2 * k_idx]
-                o_enc = mid_encs[2 * k_idx + 1]
-                if using_ms and m_msp is not None and m_msf is not None:
-                    p_ord = self._decode_multi_send_orders(
-                        r, p_enc, m_msp[2 * k_idx], m_msf[2 * k_idx],
-                        threshold=self.multi_send_threshold, include_redirects=False,
-                    )
-                else:
-                    p_ord = self._decode_orders(
-                        r, p_enc, m_probs[2 * k_idx], m_fracs[2 * k_idx],
-                        launch_threshold=self.launch_threshold, include_redirects=False,
-                    )
-                o_ord = self._predict_opponent_reply(
-                    r,
-                    o_enc,
-                    m_probs[2 * k_idx + 1],
-                    m_fracs[2 * k_idx + 1],
-                    m_msp[2 * k_idx + 1] if m_msp is not None else None,
-                    m_msf[2 * k_idx + 1] if m_msf is not None else None,
-                )
-                r.step({player: p_ord, opp: o_ord})
-                for _ in range(prev_t + 1, next_t):
-                    if r.done:
+        try:
+            h_vals: List[float] = []
+            done_flags: List[bool] = []
+            leaf_encs: List[EncodedGalconState] = []
+            leaf_pos: List[int] = []
+
+            if use_fast_cpp:
+                root_cpp = FastGalconCppSim.from_sim(sim)
+                rem_ply0 = ply_steps[0] - 1
+
+                # Ply 1: step each candidate to ply_steps[0]
+                for idx, plan in enumerate(candidates):
+                    if idx > 0 and time.perf_counter() >= deadline - 0.025:
                         break
-                    r.step({})
+                    r_cpp = root_cpp.clone()
+                    r_cpp.step({player: plan, opp: opp_orders})
+                    if rem_ply0 > 0:
+                        r_cpp.step_n_ticks(rem_ply0)
+                    eval_cands.append(plan)
+                    rolls_cpp.append(r_cpp)
 
-        # Leaf evaluation: ONE batched forward pass across all non-terminal leaves
-        h_vals: List[float] = []
-        done_flags: List[bool] = []
-        leaf_encs: List[EncodedGalconState] = []
-        leaf_pos: List[int] = []
-        for idx, roll in enumerate(rolls):
-            h_vals.append(evaluate_galcon_state(roll, player))
-            done_flags.append(roll.done)
-            if not roll.done:
-                leaf_pos.append(idx)
-                leaf_encs.append(extract_galcon_features(roll, player, feature_version=self.feature_version))
+                # Subsequent reactive plies (Ply 2 .. num_plies): ONE batched forward pass per ply
+                for p_idx in range(1, len(ply_steps)):
+                    prev_t = ply_steps[p_idx - 1]
+                    next_t = ply_steps[p_idx]
+                    if next_t <= prev_t or time.perf_counter() >= deadline - 0.015:
+                        break
+                    live_indices = [i for i, r in enumerate(rolls_cpp) if not r.done]
+                    if not live_indices:
+                        break
+                    live_sums: List[GalconSim] = []
+                    mid_encs: List[EncodedGalconState] = []
+                    for i in live_indices:
+                        r_sum = rolls_cpp[i].to_summary_sim()
+                        live_sums.append(r_sum)
+                        mid_encs.append(extract_galcon_features(r_sum, player, feature_version=self.feature_version))
+                        mid_encs.append(extract_galcon_features(r_sum, opp, feature_version=self.feature_version))
+                    m_probs, m_fracs, _, m_msp, m_msf = self._batch_forward_policy_and_val(
+                        mid_encs, need_value=False, ms_only=using_ms
+                    )
+                    rem_mid = next_t - prev_t - 1
+                    for k_idx, r_idx in enumerate(live_indices):
+                        r_cpp = rolls_cpp[r_idx]
+                        r_sum = live_sums[k_idx]
+                        p_enc = mid_encs[2 * k_idx]
+                        o_enc = mid_encs[2 * k_idx + 1]
+                        if using_ms and m_msp is not None and m_msf is not None:
+                            p_ord = self._decode_multi_send_orders(
+                                r_sum, p_enc, m_msp[2 * k_idx], m_msf[2 * k_idx],
+                                threshold=self.multi_send_threshold, include_redirects=False,
+                            )
+                        else:
+                            p_ord = self._decode_orders(
+                                r_sum, p_enc, m_probs[2 * k_idx], m_fracs[2 * k_idx],
+                                launch_threshold=self.launch_threshold, include_redirects=False,
+                            )
+                        o_ord = self._predict_opponent_reply(
+                            r_sum,
+                            o_enc,
+                            m_probs[2 * k_idx + 1],
+                            m_fracs[2 * k_idx + 1],
+                            m_msp[2 * k_idx + 1] if m_msp is not None else None,
+                            m_msf[2 * k_idx + 1] if m_msf is not None else None,
+                        )
+                        r_cpp.step({player: p_ord, opp: o_ord})
+                        if rem_mid > 0:
+                            r_cpp.step_n_ticks(rem_mid)
 
-        nn_vals = self._batch_evaluate_leaves(leaf_encs)
-        nn_map = {pos: float(nn_vals[i]) for i, pos in enumerate(leaf_pos)}
-
-        scores: List[float] = []
-        for i in range(len(eval_cands)):
-            if done_flags[i]:
-                sc = h_vals[i]
+                # Leaf evaluation: ONE batched forward pass across all non-terminal leaves
+                for idx, r_cpp in enumerate(rolls_cpp):
+                    r_sum = r_cpp.to_summary_sim()
+                    h_vals.append(evaluate_galcon_state(r_sum, player))
+                    done_flags.append(r_sum.done)
+                    if not r_sum.done:
+                        leaf_pos.append(idx)
+                        leaf_encs.append(extract_galcon_features(r_sum, player, feature_version=self.feature_version))
             else:
-                sc = self.neural_value_weight * nn_map[i] + (1.0 - self.neural_value_weight) * h_vals[i]
-            scores.append(sc)
-
-        # Wave 5/9 adversarial soft-minimax check (on <22pl Std/Compact): stress-test top-4 candidates against aggressive enemy fan-out/focus-fire
-        if (
-            use_adv
-            and opp_adv_orders
-            and len(eval_cands) > 1
-            and time.perf_counter() < deadline - 0.015
-        ):
-            top_k = sorted(range(len(eval_cands)), key=lambda i: -(scores[i] + (self.prior_bonus if i == 0 else 0.0)))[:4]
-            adv_rolls: List[GalconSim] = []
-            adv_h: List[float] = []
-            adv_done: List[bool] = []
-            adv_encs: List[EncodedGalconState] = []
-            adv_pos: List[int] = []
-            adv_horizon = max(4, ply_steps[0])
-            for loc_i, cand_i in enumerate(top_k):
-                r_adv = sim.clone()
-                r_adv.step({player: eval_cands[cand_i], opp: opp_adv_orders})
-                for _ in range(1, adv_horizon):
-                    if r_adv.done:
+                # Ply 1: step each candidate to ply_steps[0]
+                for idx, plan in enumerate(candidates):
+                    if idx > 0 and time.perf_counter() >= deadline - 0.025:
                         break
-                    r_adv.step({})
-                adv_rolls.append(r_adv)
-                adv_h.append(evaluate_galcon_state(r_adv, player))
-                adv_done.append(r_adv.done)
-                if not r_adv.done:
-                    adv_pos.append(loc_i)
-                    adv_encs.append(extract_galcon_features(r_adv, player, feature_version=self.feature_version))
-            adv_nn = self._batch_evaluate_leaves(adv_encs)
-            adv_nn_map = {pos: float(adv_nn[idx_l]) for idx_l, pos in enumerate(adv_pos)}
-            for loc_i, cand_i in enumerate(top_k):
-                s_adv = (
-                    adv_h[loc_i]
-                    if adv_done[loc_i]
-                    else (self.neural_value_weight * adv_nn_map[loc_i] + (1.0 - self.neural_value_weight) * adv_h[loc_i])
-                )
-                scores[cand_i] = 0.65 * scores[cand_i] + 0.35 * min(scores[cand_i], s_adv)
-
-        # Wave 16 opening deep-strike defensive soft-minimax guard:
-        # Exposes suicidal long-distance opening rushes (eta >= 14 > rollout_horizon) by testing top candidates
-        # against a calm defending opponent (opp=[]) out to min(28, max_eta + 2) ticks.
-        if (
-            self.enable_opening_def_guard
-            and sim.tick <= 8
-            and len(eval_cands) > 1
-            and time.perf_counter() < deadline - 0.015
-        ):
-            max_strike_eta = 0
-            for plan in eval_cands:
-                for o in plan:
-                    if isinstance(o, SendOrder) and o.percent >= 45:
-                        sp = sim.planets.get(o.src_id)
-                        dp = sim.planets.get(o.dst_id)
-                        if sp is not None and dp is not None and dp.owner not in (0, player):
-                            eta_sd = sim.planet_eta_ticks(sp, dp)
-                            if eta_sd > max_strike_eta:
-                                max_strike_eta = eta_sd
-            if max_strike_eta >= 14:
-                def_horizon = min(28, max_strike_eta + 2)
-                top_k_def = sorted(
-                    range(len(eval_cands)),
-                    key=lambda i: -(scores[i] + (self.prior_bonus if i == 0 else 0.0)),
-                )[:6]
-                def_h: List[float] = []
-                def_done: List[bool] = []
-                def_encs: List[EncodedGalconState] = []
-                def_pos: List[int] = []
-                for loc_i, cand_i in enumerate(top_k_def):
-                    r_def = sim.clone()
-                    r_def.step({player: eval_cands[cand_i], opp: []})
-                    for _ in range(1, def_horizon):
-                        if r_def.done:
+                    roll = sim.clone()
+                    roll.step({player: plan, opp: opp_orders})
+                    for _ in range(1, ply_steps[0]):
+                        if roll.done:
                             break
-                        r_def.step({})
-                    def_h.append(evaluate_galcon_state(r_def, player))
-                    def_done.append(r_def.done)
-                    if not r_def.done:
-                        def_pos.append(loc_i)
-                        def_encs.append(extract_galcon_features(r_def, player, feature_version=self.feature_version))
-                def_nn = self._batch_evaluate_leaves(def_encs)
-                def_nn_map = {pos: float(def_nn[idx_l]) for idx_l, pos in enumerate(def_pos)}
-                for loc_i, cand_i in enumerate(top_k_def):
-                    s_def = (
-                        def_h[loc_i]
-                        if def_done[loc_i]
-                        else (self.neural_value_weight * def_nn_map[loc_i] + (1.0 - self.neural_value_weight) * def_h[loc_i])
+                        roll.step({})
+                    eval_cands.append(plan)
+                    rolls.append(roll)
+
+                # Subsequent reactive plies (Ply 2 .. num_plies): ONE batched forward pass per ply
+                for p_idx in range(1, len(ply_steps)):
+                    prev_t = ply_steps[p_idx - 1]
+                    next_t = ply_steps[p_idx]
+                    if next_t <= prev_t or time.perf_counter() >= deadline - 0.015:
+                        break
+                    live_indices = [i for i, r in enumerate(rolls) if not r.done]
+                    if not live_indices:
+                        break
+                    mid_encs = []
+                    for i in live_indices:
+                        mid_encs.append(extract_galcon_features(rolls[i], player, feature_version=self.feature_version))
+                        mid_encs.append(extract_galcon_features(rolls[i], opp, feature_version=self.feature_version))
+                    m_probs, m_fracs, _, m_msp, m_msf = self._batch_forward_policy_and_val(
+                        mid_encs, need_value=False, ms_only=using_ms
                     )
-                    scores[cand_i] = 0.55 * scores[cand_i] + 0.45 * min(scores[cand_i], s_def)
+                    for k_idx, r_idx in enumerate(live_indices):
+                        r = rolls[r_idx]
+                        p_enc = mid_encs[2 * k_idx]
+                        o_enc = mid_encs[2 * k_idx + 1]
+                        if using_ms and m_msp is not None and m_msf is not None:
+                            p_ord = self._decode_multi_send_orders(
+                                r, p_enc, m_msp[2 * k_idx], m_msf[2 * k_idx],
+                                threshold=self.multi_send_threshold, include_redirects=False,
+                            )
+                        else:
+                            p_ord = self._decode_orders(
+                                r, p_enc, m_probs[2 * k_idx], m_fracs[2 * k_idx],
+                                launch_threshold=self.launch_threshold, include_redirects=False,
+                            )
+                        o_ord = self._predict_opponent_reply(
+                            r,
+                            o_enc,
+                            m_probs[2 * k_idx + 1],
+                            m_fracs[2 * k_idx + 1],
+                            m_msp[2 * k_idx + 1] if m_msp is not None else None,
+                            m_msf[2 * k_idx + 1] if m_msf is not None else None,
+                        )
+                        r.step({player: p_ord, opp: o_ord})
+                        for _ in range(prev_t + 1, next_t):
+                            if r.done:
+                                break
+                            r.step({})
 
-        best_idx = 0
-        best_score = -1e9
-        for i in range(len(eval_cands)):
-            eff_sc = scores[i] + (self.prior_bonus if i == 0 else 0.0)
-            if eff_sc > best_score:
-                best_score = eff_sc
-                best_idx = i
+                # Leaf evaluation: ONE batched forward pass across all non-terminal leaves
+                for idx, roll in enumerate(rolls):
+                    h_vals.append(evaluate_galcon_state(roll, player))
+                    done_flags.append(roll.done)
+                    if not roll.done:
+                        leaf_pos.append(idx)
+                        leaf_encs.append(extract_galcon_features(roll, player, feature_version=self.feature_version))
 
-        return eval_cands[best_idx], eval_cands, scores, scores[best_idx]
+            nn_vals = self._batch_evaluate_leaves(leaf_encs)
+            nn_map = {pos: float(nn_vals[i]) for i, pos in enumerate(leaf_pos)}
+
+            scores: List[float] = []
+            for i in range(len(eval_cands)):
+                if done_flags[i]:
+                    sc = h_vals[i]
+                else:
+                    sc = self.neural_value_weight * nn_map[i] + (1.0 - self.neural_value_weight) * h_vals[i]
+                scores.append(sc)
+
+            # Wave 5/9 adversarial soft-minimax check (on <22pl Std/Compact): stress-test top-4 candidates against aggressive enemy fan-out/focus-fire
+            if (
+                use_adv
+                and opp_adv_orders
+                and len(eval_cands) > 1
+                and time.perf_counter() < deadline - 0.015
+            ):
+                top_k = sorted(range(len(eval_cands)), key=lambda i: -(scores[i] + (self.prior_bonus if i == 0 else 0.0)))[:4]
+                adv_h: List[float] = []
+                adv_done: List[bool] = []
+                adv_encs: List[EncodedGalconState] = []
+                adv_pos: List[int] = []
+                adv_horizon = max(4, ply_steps[0])
+                if use_fast_cpp and root_cpp is not None:
+                    if work_cpp is None:
+                        work_cpp = rolls_cpp.pop() if rolls_cpp else root_cpp.clone()
+                    rem_adv = adv_horizon - 1
+                    for loc_i, cand_i in enumerate(top_k):
+                        work_cpp.copy_from(root_cpp)
+                        work_cpp.step({player: eval_cands[cand_i], opp: opp_adv_orders})
+                        if rem_adv > 0:
+                            work_cpp.step_n_ticks(rem_adv)
+                        r_sum = work_cpp.to_summary_sim()
+                        adv_h.append(evaluate_galcon_state(r_sum, player))
+                        adv_done.append(r_sum.done)
+                        if not r_sum.done:
+                            adv_pos.append(loc_i)
+                            adv_encs.append(extract_galcon_features(r_sum, player, feature_version=self.feature_version))
+                else:
+                    for loc_i, cand_i in enumerate(top_k):
+                        r_adv = sim.clone()
+                        r_adv.step({player: eval_cands[cand_i], opp: opp_adv_orders})
+                        for _ in range(1, adv_horizon):
+                            if r_adv.done:
+                                break
+                            r_adv.step({})
+                        adv_h.append(evaluate_galcon_state(r_adv, player))
+                        adv_done.append(r_adv.done)
+                        if not r_adv.done:
+                            adv_pos.append(loc_i)
+                            adv_encs.append(extract_galcon_features(r_adv, player, feature_version=self.feature_version))
+                adv_nn = self._batch_evaluate_leaves(adv_encs)
+                adv_nn_map = {pos: float(adv_nn[idx_l]) for idx_l, pos in enumerate(adv_pos)}
+                for loc_i, cand_i in enumerate(top_k):
+                    s_adv = (
+                        adv_h[loc_i]
+                        if adv_done[loc_i]
+                        else (self.neural_value_weight * adv_nn_map[loc_i] + (1.0 - self.neural_value_weight) * adv_h[loc_i])
+                    )
+                    scores[cand_i] = 0.65 * scores[cand_i] + 0.35 * min(scores[cand_i], s_adv)
+
+            # Wave 16 opening deep-strike defensive soft-minimax guard:
+            # Exposes suicidal long-distance opening rushes (eta >= 14 > rollout_horizon) by testing top candidates
+            # against a calm defending opponent (opp=[]) out to min(28, max_eta + 2) ticks.
+            if (
+                self.enable_opening_def_guard
+                and sim.tick <= 8
+                and len(eval_cands) > 1
+                and time.perf_counter() < deadline - 0.015
+            ):
+                max_strike_eta = 0
+                for plan in eval_cands:
+                    for o in plan:
+                        if isinstance(o, SendOrder) and o.percent >= 45:
+                            sp = sim.planets.get(o.src_id)
+                            dp = sim.planets.get(o.dst_id)
+                            if sp is not None and dp is not None and dp.owner not in (0, player):
+                                eta_sd = sim.planet_eta_ticks(sp, dp)
+                                if eta_sd > max_strike_eta:
+                                    max_strike_eta = eta_sd
+                if max_strike_eta >= 14:
+                    def_horizon = min(28, max_strike_eta + 2)
+                    top_k_def = sorted(
+                        range(len(eval_cands)),
+                        key=lambda i: -(scores[i] + (self.prior_bonus if i == 0 else 0.0)),
+                    )[:6]
+                    def_h: List[float] = []
+                    def_done: List[bool] = []
+                    def_encs: List[EncodedGalconState] = []
+                    def_pos: List[int] = []
+                    if use_fast_cpp and root_cpp is not None:
+                        if work_cpp is None:
+                            work_cpp = rolls_cpp.pop() if rolls_cpp else root_cpp.clone()
+                        rem_def = def_horizon - 1
+                        for loc_i, cand_i in enumerate(top_k_def):
+                            work_cpp.copy_from(root_cpp)
+                            work_cpp.step({player: eval_cands[cand_i], opp: []})
+                            if rem_def > 0:
+                                work_cpp.step_n_ticks(rem_def)
+                            r_sum = work_cpp.to_summary_sim()
+                            def_h.append(evaluate_galcon_state(r_sum, player))
+                            def_done.append(r_sum.done)
+                            if not r_sum.done:
+                                def_pos.append(loc_i)
+                                def_encs.append(extract_galcon_features(r_sum, player, feature_version=self.feature_version))
+                    else:
+                        for loc_i, cand_i in enumerate(top_k_def):
+                            r_def = sim.clone()
+                            r_def.step({player: eval_cands[cand_i], opp: []})
+                            for _ in range(1, def_horizon):
+                                if r_def.done:
+                                    break
+                                r_def.step({})
+                            def_h.append(evaluate_galcon_state(r_def, player))
+                            def_done.append(r_def.done)
+                            if not r_def.done:
+                                def_pos.append(loc_i)
+                                def_encs.append(extract_galcon_features(r_def, player, feature_version=self.feature_version))
+                    def_nn = self._batch_evaluate_leaves(def_encs)
+                    def_nn_map = {pos: float(def_nn[idx_l]) for idx_l, pos in enumerate(def_pos)}
+                    for loc_i, cand_i in enumerate(top_k_def):
+                        s_def = (
+                            def_h[loc_i]
+                            if def_done[loc_i]
+                            else (self.neural_value_weight * def_nn_map[loc_i] + (1.0 - self.neural_value_weight) * def_h[loc_i])
+                        )
+                        scores[cand_i] = 0.55 * scores[cand_i] + 0.45 * min(scores[cand_i], s_def)
+
+            best_idx = 0
+            best_score = -1e9
+            for i in range(len(eval_cands)):
+                eff_sc = scores[i] + (self.prior_bonus if i == 0 else 0.0)
+                if eff_sc > best_score:
+                    best_score = eff_sc
+                    best_idx = i
+
+            return eval_cands[best_idx], eval_cands, scores, scores[best_idx]
+        finally:
+            for r_cpp in rolls_cpp:
+                r_cpp.close()
+            if work_cpp is not None:
+                work_cpp.close()
+            if root_cpp is not None:
+                root_cpp.close()
 
     @torch.no_grad()
     def act(self, sim: GalconSim, player: int) -> List[Order]:

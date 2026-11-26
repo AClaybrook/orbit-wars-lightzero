@@ -2597,5 +2597,238 @@ def test_galcon_sim_redirect_turning_radius_and_turn_rate():
     assert np.isclose(sim_str.planets[2].ships, 9.0, atol=1e-12)
 
 
+def test_galcon_search_fast_cpp_exact_parity(tmp_path):
+    """Verify FastGalconCppSim search & smart-redirect wiring has exact score/action parity with GalconSim.clone()."""
+    from galcon.fast_sim_cpp import HAS_FAST_SIM_CPP, FastGalconCppSim
+    from galcon.gen5_model import build_galcon_gen5_transformer
+    from galcon.sim import (
+        Fleet,
+        GalconSim,
+        Planet,
+        RedirOrder,
+        SendOrder,
+        evaluate_galcon_state,
+    )
+    from galcon.transformer_bot import (
+        EnsembleGalconSearchAgent,
+        GalconSearchTransformerAgent,
+        build_galcon_gen4_transformer,
+        compute_smart_redirects,
+        extract_galcon_features,
+    )
+
+    # 1. FastGalconCppSim.can_represent(), context manager, idempotent close(), and to_summary_sim() parity
+    sim_default = GalconSim.create(seed=1001, num_planets=18, width=480.0, height=320.0, symmetric=True)
+    sim_no_cpp = GalconSim.create(seed=1001, num_planets=18, width=480.0, height=320.0, symmetric=True, use_cpp=False)
+    assert FastGalconCppSim.can_represent(sim_no_cpp) is False
+    assert FastGalconCppSim.can_represent(sim_default) is HAS_FAST_SIM_CPP
+
+    # Oversized synthetic world (> 64 planets) cleanly rejected by can_represent
+    oversized_planets = [
+        Planet(id=i + 1, owner=(1 if i == 0 else (2 if i == 1 else 0)), ships=20.0, x=20.0 + (i % 10) * 40.0, y=20.0 + (i // 10) * 40.0, production=50.0, radius=12.0)
+        for i in range(65)
+    ]
+    sim_oversized = GalconSim(oversized_planets, width=500.0, height=400.0)
+    assert FastGalconCppSim.can_represent(sim_oversized) is False
+
+    # Launch multi-ship flocks so to_summary_sim() is tested with active fleets
+    sim_mid = sim_default.clone()
+    p1_home = next(p for p in sim_mid.planets.values() if p.owner == 1)
+    p2_home = next(p for p in sim_mid.planets.values() if p.owner == 2)
+    neutrals = sorted((p for p in sim_mid.planets.values() if p.owner == 0), key=lambda p: p.id)
+    sim_mid.step({
+        1: [SendOrder(p1_home.id, neutrals[0].id, 35), SendOrder(p1_home.id, neutrals[2].id, 30)],
+        2: [SendOrder(p2_home.id, neutrals[1].id, 35), SendOrder(p2_home.id, neutrals[3].id, 30)],
+    })
+    for _ in range(3):
+        sim_mid.step({})
+
+    if HAS_FAST_SIM_CPP:
+        with FastGalconCppSim.from_sim(sim_mid) as fc:
+            fc.step_n_ticks(5)
+            full_s = fc.to_sim()
+            sum_s = fc.to_summary_sim()
+            assert sum_s.tick == full_s.tick
+            assert sum_s.done == full_s.done
+            assert sum_s.winner() == full_s.winner()
+            assert sum_s.next_fleet_id == full_s.next_fleet_id
+            assert list(sum_s.planets.keys()) == list(full_s.planets.keys())
+            assert list(sum_s.fleets.keys()) == list(full_s.fleets.keys())
+            for fid, fl_sum in sum_s.fleets.items():
+                fl_full = full_s.fleets[fid]
+                assert fl_sum.units is None and fl_sum.unit_headings is None
+                assert fl_sum.ships == fl_full.ships and fl_sum.x == fl_full.x and fl_sum.y == fl_full.y
+                assert fl_sum.target == fl_full.target and fl_sum.num_units == fl_full.num_units
+            assert evaluate_galcon_state(sum_s, 1) == evaluate_galcon_state(full_s, 1)
+            enc_sum = extract_galcon_features(sum_s, 1, feature_version=2)
+            enc_full = extract_galcon_features(full_s, 1, feature_version=2)
+            assert np.array_equal(enc_sum.planet_feats, enc_full.planet_feats)
+            assert np.array_equal(enc_sum.timeline_feats, enc_full.timeline_feats)
+            assert np.array_equal(enc_sum.edge_feats, enc_full.edge_feats)
+        # Idempotent close after context manager exit
+        fc.close()
+        fc.close()
+
+    # 2. compute_smart_redirects(..., verify_rollout=True): doomed-attack rescue + active midgame parity
+    p_home = Planet(id=1, owner=1, ships=60.0, x=40.0, y=120.0, production=100.0, radius=24.0)
+    p_fortress = Planet(id=2, owner=2, ships=120.0, x=240.0, y=120.0, production=100.0, radius=24.0)
+    p_soft = Planet(id=3, owner=2, ships=8.0, x=150.0, y=45.0, production=90.0, radius=22.0)
+    p_neu = Planet(id=4, owner=0, ships=10.0, x=150.0, y=195.0, production=70.0, radius=19.0)
+    # Multi-unit doomed fleet of 25 ships heading at 120-ship fortress -> should redirect to soft enemy p_soft
+    fl_doomed = Fleet(id=1000, owner=1, ships=25.0, x=115.0, y=110.0, source=1, target=2, num_units=16)
+    sim_doomed = GalconSim([p_home, p_fortress, p_soft, p_neu], [fl_doomed], width=320.0, height=240.0)
+    enc_doomed = extract_galcon_features(sim_doomed, 1, feature_version=2)
+    redirs_cpp, labels_cpp = compute_smart_redirects(sim_doomed, enc_doomed, verify_rollout=True, use_cpp_search=True)
+    redirs_py, labels_py = compute_smart_redirects(sim_doomed, enc_doomed, verify_rollout=True, use_cpp_search=False)
+    assert redirs_cpp == redirs_py
+    assert labels_cpp == labels_py
+    assert redirs_cpp == [RedirOrder(1000, 3)]
+
+    # Also test compute_smart_redirects on active midgame state with multiple flocks
+    enc_mid = extract_galcon_features(sim_mid, 1, feature_version=2)
+    r_mid_cpp, l_mid_cpp = compute_smart_redirects(sim_mid, enc_mid, verify_rollout=True, use_cpp_search=True)
+    r_mid_py, l_mid_py = compute_smart_redirects(sim_mid, enc_mid, verify_rollout=True, use_cpp_search=False)
+    assert r_mid_cpp == r_mid_py
+    assert l_mid_cpp == l_mid_py
+
+    # 3. Synthetic lightweight Gen 5 + Gen 4 checkpoints for GalconSearchTransformerAgent & EnsembleGalconSearchAgent
+    torch.manual_seed(1010)
+    m_gen5 = build_galcon_gen5_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128, edge_hidden=16)
+    ckpt_gen5 = tmp_path / "gen5_search_parity.pt"
+    torch.save(
+        {
+            "model_config": m_gen5.config,
+            "model_state_dict": m_gen5.state_dict(),
+            "has_trained_redir": True,
+            "has_trained_multi_send": True,
+            "use_canonical_d4": True,
+        },
+        ckpt_gen5,
+    )
+
+    torch.manual_seed(1011)
+    m_gen4 = build_galcon_gen4_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128)
+    ckpt_gen4 = tmp_path / "gen4_search_parity.pt"
+    torch.save(
+        {
+            "model_config": m_gen4.config,
+            "model_state_dict": m_gen4.state_dict(),
+            "has_trained_redir": True,
+            "has_trained_multi_send": True,
+            "use_canonical_d4": True,
+        },
+        ckpt_gen4,
+    )
+
+    # Build 3 diverse test states:
+    # (a) Opening tick=0, 18pl symmetric (triggers Wave 16 opening def guard + use_adv)
+    sim_open_18 = GalconSim.create(seed=14002, num_planets=18, width=480.0, height=320.0, symmetric=True)
+
+    # (b) Midgame <22pl (tick=12, 18pl) with active multi-ship flocks & redirects (2-ply + adv soft-minimax)
+    sim_mid_18 = GalconSim.create(seed=14005, num_planets=18, width=400.0, height=240.0, symmetric=True)
+    h1 = next(p for p in sim_mid_18.planets.values() if p.owner == 1)
+    h2 = next(p for p in sim_mid_18.planets.values() if p.owner == 2)
+    n18 = sorted((p for p in sim_mid_18.planets.values() if p.owner == 0), key=lambda p: p.id)
+    sim_mid_18.step({
+        1: [SendOrder(h1.id, n18[0].id, 35), SendOrder(h1.id, n18[2].id, 30)],
+        2: [SendOrder(h2.id, n18[1].id, 35), SendOrder(h2.id, n18[3].id, 30)],
+    })
+    for t_i in range(1, 12):
+        if t_i == 6:
+            sim_mid_18.step({
+                1: [SendOrder(h1.id, n18[4].id, 40)],
+                2: [SendOrder(h2.id, n18[5].id, 40)],
+            })
+        else:
+            sim_mid_18.step({})
+    assert sim_mid_18.tick == 12 and len(sim_mid_18.fleets) >= 2
+
+    # (c) Large 22pl (tick=10, 480x320) with active multi-ship flocks (triggers 3-ply h=22 map-adaptive search)
+    sim_large_22 = GalconSim.create(seed=14009, num_planets=22, width=480.0, height=320.0, symmetric=True)
+    lh1 = next(p for p in sim_large_22.planets.values() if p.owner == 1)
+    lh2 = next(p for p in sim_large_22.planets.values() if p.owner == 2)
+    n22 = sorted((p for p in sim_large_22.planets.values() if p.owner == 0), key=lambda p: p.id)
+    sim_large_22.step({
+        1: [SendOrder(lh1.id, n22[0].id, 30), SendOrder(lh1.id, n22[2].id, 30)],
+        2: [SendOrder(lh2.id, n22[1].id, 30), SendOrder(lh2.id, n22[3].id, 30)],
+    })
+    for t_i in range(1, 10):
+        if t_i == 5:
+            sim_large_22.step({
+                1: [SendOrder(lh1.id, n22[4].id, 35)],
+                2: [SendOrder(lh2.id, n22[5].id, 35)],
+            })
+        else:
+            sim_large_22.step({})
+    assert sim_large_22.tick == 10 and len(sim_large_22.planets) == 22 and len(sim_large_22.fleets) >= 2
+
+    states = [
+        ("open_18pl", sim_open_18),
+        ("mid_18pl", sim_mid_18),
+        ("large_22pl", sim_large_22),
+    ]
+
+    for ckpt in (ckpt_gen5, ckpt_gen4):
+        ag_cpp = GalconSearchTransformerAgent(
+            ckpt,
+            time_budget_sec=5.0,
+            use_d4_canonical=True,
+            use_d4_tta=False,
+            use_cpp_search=True,
+        )
+        ag_py = GalconSearchTransformerAgent(
+            ckpt,
+            time_budget_sec=5.0,
+            use_d4_canonical=True,
+            use_d4_tta=False,
+            use_cpp_search=False,
+        )
+        assert ag_cpp.use_cpp_search is HAS_FAST_SIM_CPP
+        assert ag_py.use_cpp_search is False
+
+        for label, st in states:
+            best_c, cands_c, scores_c, bsc_c = ag_cpp.act_with_search_info(st, 1)
+            best_p, cands_p, scores_p, bsc_p = ag_py.act_with_search_info(st, 1)
+            assert cands_c == cands_p, f"{ckpt.name}/{label}: candidate mismatch"
+            assert len(scores_c) == len(scores_p) >= 2
+            max_diff = max(abs(a - b) for a, b in zip(scores_c, scores_p))
+            assert max_diff <= 1e-6, f"{ckpt.name}/{label}: score diff {max_diff:.3e} > 1e-6"
+            assert abs(bsc_c - bsc_p) <= 1e-6
+            assert best_c == best_p, f"{ckpt.name}/{label}: best action mismatch"
+
+        # Clean fallback when sim.use_cpp=False
+        sim_py_only = sim_mid_18.clone(use_cpp=False)
+        assert FastGalconCppSim.can_represent(sim_py_only) is False
+        best_fb, cands_fb, scores_fb, _ = ag_cpp.act_with_search_info(sim_py_only, 1)
+        best_ref, cands_ref, scores_ref, _ = ag_py.act_with_search_info(sim_py_only, 1)
+        assert cands_fb == cands_ref and best_fb == best_ref
+        assert max(abs(a - b) for a, b in zip(scores_fb, scores_ref)) <= 1e-6
+
+    # 4. EnsembleGalconSearchAgent inherits use_cpp_search via **kwargs and achieves exact parity
+    ens_cpp = EnsembleGalconSearchAgent(
+        [ckpt_gen5, ckpt_gen4],
+        time_budget_sec=5.0,
+        use_d4_canonical=True,
+        use_d4_tta=False,
+        use_cpp_search=True,
+    )
+    ens_py = EnsembleGalconSearchAgent(
+        [ckpt_gen5, ckpt_gen4],
+        time_budget_sec=5.0,
+        use_d4_canonical=True,
+        use_d4_tta=False,
+        use_cpp_search=False,
+    )
+    assert ens_cpp.use_cpp_search is HAS_FAST_SIM_CPP
+    assert ens_py.use_cpp_search is False
+    for label, st in states:
+        eb_c, ec_c, es_c, _ = ens_cpp.act_with_search_info(st, 1)
+        eb_p, ec_p, es_p, _ = ens_py.act_with_search_info(st, 1)
+        assert ec_c == ec_p, f"ensemble/{label}: candidate mismatch"
+        assert max(abs(a - b) for a, b in zip(es_c, es_p)) <= 1e-6
+        assert eb_c == eb_p, f"ensemble/{label}: best action mismatch"
+
+
+
 
 

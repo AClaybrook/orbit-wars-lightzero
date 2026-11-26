@@ -47,6 +47,8 @@ _EPS_DIST2 = 1e-12
 _SIM_MAX_PLANETS = 64
 _SIM_MAX_FLEETS = 512
 _SIM_MAX_UNITS = 4096
+_SIM_SEARCH_MAX_FLEETS = 400
+_SIM_SEARCH_MAX_UNITS = 3200
 
 _COMPILE_FLAGS = ("-O3", "-march=native", "-ffp-contract=off", "-shared", "-fPIC", "-std=c++17")
 _C_VP = ctypes.c_void_p
@@ -239,6 +241,10 @@ class _PhysicsScratch:
         self._alloc_fleets(_SIM_MAX_FLEETS)
         self._alloc_units(_SIM_MAX_UNITS)
         self._alloc_orders(64)
+        self.cfg_f64 = (ctypes.c_double * 10)()
+        self.cfg_i32 = (ctypes.c_int32 * 4)()
+        self.ptr_cfg_f64 = ctypes.addressof(self.cfg_f64)
+        self.ptr_cfg_i32 = ctypes.addressof(self.cfg_i32)
 
     def _alloc_planets(self, cap: int) -> None:
         self.p_cap = cap
@@ -513,6 +519,7 @@ def step_physics_cpp(sim: "GalconSim") -> None:
 
 
 _ORDER_TYPES: Optional[tuple] = None
+_SIM_TYPES: Optional[tuple] = None
 
 
 def _get_order_types() -> tuple:
@@ -522,6 +529,15 @@ def _get_order_types() -> tuple:
 
         _ORDER_TYPES = (SendOrder, RedirOrder)
     return _ORDER_TYPES
+
+
+def _get_sim_types() -> tuple:
+    global _SIM_TYPES
+    if _SIM_TYPES is None:
+        from galcon.sim import Fleet, GalconSim, Planet
+
+        _SIM_TYPES = (Fleet, GalconSim, Planet)
+    return _SIM_TYPES
 
 
 class FastGalconCppSim:
@@ -551,11 +567,49 @@ class FastGalconCppSim:
             if lib is not None:
                 lib.sim_destroy(handle)
 
+    def __enter__(self) -> "FastGalconCppSim":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
     def __del__(self) -> None:
         try:
             self.close()
         except Exception:
             pass
+
+    @classmethod
+    def can_represent(
+        cls,
+        sim: "GalconSim",
+        *,
+        max_fleets: int = _SIM_SEARCH_MAX_FLEETS,
+        max_units: int = _SIM_SEARCH_MAX_UNITS,
+    ) -> bool:
+        """Return ``True`` iff ``sim`` fits safely inside the native C++ ``SimState`` limits.
+
+        Leaves default headroom (``400 / 512`` fleets, ``3200 / 4096`` units) so multi-ply search
+        rollouts spawning new fleets never hit fixed POD capacity limits, and respects
+        ``sim.use_cpp`` so pure-Python test sims cleanly fall back to ``sim.clone()``.
+        """
+        if not HAS_FAST_SIM_CPP or _LIB is None:
+            return False
+        if not getattr(sim, "use_cpp", True):
+            return False
+        n_planets = len(sim.planets)
+        if n_planets <= 0 or n_planets > _SIM_MAX_PLANETS:
+            return False
+        fl_lim = min(int(max_fleets), _SIM_MAX_FLEETS)
+        if len(sim.fleets) > fl_lim:
+            return False
+        u_lim = min(int(max_units), _SIM_MAX_UNITS)
+        total_units = 0
+        for fl in sim.fleets.values():
+            total_units += len(fl.units) if fl.units else max(1, int(fl.num_units))
+            if total_units > u_lim:
+                return False
+        return True
 
     def _require_handle(self) -> int:
         handle = self._handle
@@ -772,9 +826,127 @@ class FastGalconCppSim:
         if n_i > 0:
             self._lib.sim_step_ticks(self._require_handle(), n_i)
 
+    def to_summary_sim(self, *, use_cpp: Optional[bool] = None) -> "GalconSim":
+        """Materialize a lightweight read-only ``GalconSim`` snapshot without copying per-unit arrays.
+
+        Reads planet state and fleet summaries (``id, owner, ships, x, y, source, target, radius,
+        num_units``) directly from C++ into a ``GalconSim`` instance (leaving ``units`` and
+        ``unit_headings`` as ``None``), suitable for feature extraction, heuristic evaluation,
+        and order decoding inside search rollouts.
+        """
+        Fleet, GalconSim, Planet = _get_sim_types()
+
+        handle = self._require_handle()
+        meta = self._read_meta()
+        tick = int(meta[0])
+        done = bool(meta[1])
+        winner = int(meta[2])
+        np_ = int(meta[3])
+        nf = int(meta[4])
+        next_fid = int(meta[6])
+
+        sc = _get_scratch()
+        self._lib.sim_get_config(handle, sc.ptr_cfg_f64, sc.ptr_cfg_i32)
+        cfg_f64 = sc.cfg_f64
+        cfg_i32 = sc.cfg_i32
+
+        planets_dict: Dict[int, Planet] = {}
+        idx_to_pid: List[int] = []
+        if np_ > 0:
+            sc.ensure_planets(np_)
+            self._lib.sim_read_planets_full(
+                handle,
+                sc.ptr_p_id,
+                sc.ptr_p_owner,
+                sc.ptr_p_ships,
+                sc.ptr_p_x,
+                sc.ptr_p_y,
+                sc.ptr_p_prod,
+                sc.ptr_p_radius,
+            )
+            p_id = sc.p_id
+            p_owner = sc.p_owner
+            p_ships = sc.p_ships
+            p_x = sc.p_x
+            p_y = sc.p_y
+            p_prod = sc.p_prod
+            p_radius = sc.p_radius
+            for i in range(np_):
+                pid = p_id[i]
+                idx_to_pid.append(pid)
+                planets_dict[pid] = Planet(
+                    pid,
+                    p_owner[i],
+                    p_ships[i],
+                    p_x[i],
+                    p_y[i],
+                    p_prod[i],
+                    p_radius[i],
+                )
+
+        fleets_dict: Dict[int, Fleet] = {}
+        if nf > 0:
+            sc.ensure_fleets(nf)
+            self._lib.sim_read_fleets(
+                handle,
+                sc.ptr_fl_id,
+                sc.ptr_fl_owner,
+                sc.ptr_fl_source,
+                sc.ptr_fl_tgt,
+                sc.ptr_fl_start,
+                sc.ptr_fl_cnt,
+                sc.ptr_fl_ships,
+                sc.ptr_fl_cx,
+                sc.ptr_fl_cy,
+                sc.ptr_fl_rad,
+            )
+            fl_id = sc.fl_id
+            fl_owner = sc.fl_owner
+            fl_source = sc.fl_source
+            fl_tgt = sc.fl_tgt
+            fl_cnt = sc.fl_cnt
+            fl_ships = sc.fl_ships
+            fl_cx = sc.fl_cx
+            fl_cy = sc.fl_cy
+            fl_rad = sc.fl_rad
+            for fi in range(nf):
+                fid = fl_id[fi]
+                tgt_idx = fl_tgt[fi]
+                tgt_pid = idx_to_pid[tgt_idx] if 0 <= tgt_idx < np_ else -1
+                fleets_dict[fid] = Fleet(
+                    fid,
+                    fl_owner[fi],
+                    fl_ships[fi],
+                    fl_cx[fi],
+                    fl_cy[fi],
+                    fl_source[fi],
+                    tgt_pid,
+                    fl_rad[fi],
+                    fl_cnt[fi],
+                    None,
+                    None,
+                )
+
+        sim = object.__new__(GalconSim)
+        sim.planets = planets_dict
+        sim.fleets = fleets_dict
+        sim.width = float(cfg_f64[0])
+        sim.height = float(cfg_f64[1])
+        sim.fleet_speed = float(cfg_f64[2])
+        sim.tick_dt = float(cfg_f64[3])
+        sim.max_ticks = int(cfg_i32[0])
+        sim.tick = tick
+        sim.next_fleet_id = next_fid
+        sim.allow_redirect = bool(cfg_i32[3])
+        sim.physics_substeps = max(1, int(cfg_i32[1]))
+        sim.use_cpp = bool(HAS_FAST_SIM_CPP) if use_cpp is None else bool(use_cpp and HAS_FAST_SIM_CPP)
+        sim.done = done
+        sim._winner = winner
+        return sim
+
     def to_sim(self, *, use_cpp: Optional[bool] = None) -> "GalconSim":
         """Materialize the current C++ state back into a Python ``GalconSim``."""
-        from galcon.sim import Fleet, GalconSim, Planet
+        Fleet, GalconSim, Planet = _get_sim_types()
 
         handle = self._require_handle()
         meta = self._read_meta()
@@ -786,11 +958,10 @@ class FastGalconCppSim:
         nu = int(meta[5])
         next_fid = int(meta[6])
 
-        cfg_f64 = (ctypes.c_double * 10)()
-        cfg_i32 = (ctypes.c_int32 * 4)()
-        self._lib.sim_get_config(handle, ctypes.addressof(cfg_f64), ctypes.addressof(cfg_i32))
-
         sc = _get_scratch()
+        self._lib.sim_get_config(handle, sc.ptr_cfg_f64, sc.ptr_cfg_i32)
+        cfg_f64 = sc.cfg_f64
+        cfg_i32 = sc.cfg_i32
         planets: List[Planet] = []
         idx_to_pid: List[int] = []
         if np_ > 0:
