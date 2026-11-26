@@ -38,11 +38,16 @@ local _users = {}
 local _planets = {}
 local _fleets = {}
 local _orders = {}
+local _pending_fleet_id = -1000
 
 local ItemMT = {}
 ItemMT.__index = ItemMT
 ItemMT.__tostring = function(self) return tostring(self.n) end
 ItemMT.__concat = function(a, b) return tostring(a) .. tostring(b) end
+
+local function make_item(tbl)
+    return setmetatable(tbl, ItemMT)
+end
 
 function ItemMT:distance(other)
     local dx = (self.position_x or 0) - (other.position_x or 0)
@@ -56,25 +61,57 @@ end
 
 function ItemMT:fleet_send(perc, target)
     if not self.has_planet or not target or not target.has_planet then return end
+    if self.n == target.n then return end
     local p = math.floor(tonumber(perc) + 0.5)
     if p < 1 then return end
     if p > 100 then p = 100 end
-    local send_s = math.floor(self.ships_value * (p / 100.0) + 1e-9)
-    if send_s < 1 then return end
+    local send_s = math.min(self.ships_value, self.ships_value * (p / 100.0))
+    if send_s < 1.0 - 1e-9 then return end
     self.ships_value = math.max(0.0, self.ships_value - send_s)
-    _orders[#_orders + 1] = string.format("S %d %d %d", self.n, target.n, p)
+    local ord_idx = #_orders + 1
+    _orders[ord_idx] = string.format("S %d %d %d", self.n, target.n, p)
+
+    -- Expose newly launched fleet immediately to same-tick g2.search("fleet") calls
+    local dx = (target.position_x or 0) - (self.position_x or 0)
+    local dy = (target.position_y or 0) - (self.position_y or 0)
+    local dist = math.sqrt(dx * dx + dy * dy)
+    local spawn_r = (self.planet_r or 12.0) + 6.0
+    local sx = (self.position_x or 0) + ((dist > 1e-6) and (dx / dist) * spawn_r or spawn_r)
+    local sy = (self.position_y or 0) + ((dist > 1e-6) and (dy / dist) * spawn_r or 0.0)
+    _pending_fleet_id = _pending_fleet_id - 1
+    local fid = _pending_fleet_id
+    local fl = make_item({
+        n = fid,
+        has_fleet = true,
+        owner_n = self.owner_n,
+        fleet_ships = send_s,
+        position_x = sx,
+        position_y = sy,
+        fleet_target = target.n,
+        fleet_r = 6.0,
+        _order_idx = ord_idx,
+        _src_n = self.n,
+        _pct = p,
+    })
+    _items[fid] = fl
+    _fleets[#_fleets + 1] = fl
+    return fl
 end
 
 function ItemMT:fleet_redirect(target)
     if not self.has_fleet or not target or not target.has_planet then return end
     if self.fleet_target ~= target.n then
         self.fleet_target = target.n
-        _orders[#_orders + 1] = string.format("R %d %d", self.n, target.n)
+        if self._order_idx ~= nil then
+            if self._src_n == target.n then
+                _orders[self._order_idx] = ""
+            else
+                _orders[self._order_idx] = string.format("S %d %d %d", self._src_n, target.n, self._pct)
+            end
+        else
+            _orders[#_orders + 1] = string.format("R %d %d", self.n, target.n)
+        end
     end
-end
-
-local function make_item(tbl)
-    return setmetatable(tbl, ItemMT)
 end
 
 g2 = {}
@@ -312,6 +349,7 @@ while true do
         _planets = {}
         _fleets = {}
         _orders = {}
+        _pending_fleet_id = -1000
         _botwar_mem = {}
         if type(reset_fn) == "function" then reset_fn() end
         io.write("OK\n")
@@ -320,6 +358,7 @@ while true do
         -- Preserve persistent planet table identities across ticks (bots like Sparky cache planet refs!)
         _fleets = {}
         _orders = {}
+        _pending_fleet_id = -1000
         for k, v in pairs(_items) do
             if v.has_fleet then _items[k] = nil end
         end
@@ -428,7 +467,9 @@ while true do
                 end
             end
             for i = 1, #_orders do
-                io.write(_orders[i] .. "\n")
+                if _orders[i] ~= "" then
+                    io.write(_orders[i] .. "\n")
+                end
             end
             io.write("END\n")
             io.flush()

@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from galcon.sim import GalconSim, Order, RedirOrder
+
+
+def _floor_tenths(val: float) -> float:
+    """Truncate downward to 0.1 without ever crossing up to the next integer."""
+    floored_int = math.floor(val)
+    tenths = min(9, max(0, math.floor((val - floored_int) * 10.0)))
+    return round(floored_int + tenths * 0.1, 1)
 
 
 def record_galcon_match(
@@ -40,11 +48,11 @@ def record_galcon_match(
     redir_counts = [0, 0]
 
     def snap() -> None:
-        p_dyn = [[sim.planets[pid].owner, round(sim.planets[pid].ships, 1)] for pid in pid_order]
+        p_dyn = [[sim.planets[pid].owner, _floor_tenths(sim.planets[pid].ships)] for pid in pid_order]
         f_dyn = [
             [
                 f.owner,
-                round(f.ships, 1),
+                _floor_tenths(f.ships),
                 round(f.x, 1),
                 round(f.y, 1),
                 f.target,
@@ -57,7 +65,7 @@ def record_galcon_match(
                 "t": sim.tick,
                 "p": p_dyn,
                 "f": f_dyn,
-                "s": [round(sim.total_ships(1), 1), round(sim.total_ships(2), 1)],
+                "s": [_floor_tenths(sim.total_ships(1)), _floor_tenths(sim.total_ships(2))],
                 "pr": [round(sim.total_production(1), 0), round(sim.total_production(2), 0)],
                 "rc": [redir_counts[0], redir_counts[1]],
             }
@@ -346,7 +354,7 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
         ctx.fillStyle = "#0b1120";
         ctx.font = "bold 10px ui-monospace, monospace";
         ctx.textAlign = "center"; ctx.textBaseline = "middle";
-        ctx.fillText(Math.round(ships), tx(fx), ty(fy));
+        ctx.fillText(Math.floor(ships), tx(fx), ty(fy));
       }});
 
       m.planets.forEach((row, idx) => {{
@@ -371,8 +379,8 @@ def render_galcon_viewer_html(matches: Sequence[Dict[str, Any]]) -> str:
       const rc = f.rc || [0, 0];
       document.getElementById("p1Name").textContent = "Blue: " + m.players[0];
       document.getElementById("p2Name").textContent = "Red: " + m.players[1];
-      document.getElementById("p1Stats").textContent = `Ships: ${{Math.round(f.s[0])}} • Prod: ${{Math.round(f.pr[0])}}` + (rc[0] > 0 ? ` • /REDIR: ${{rc[0]}}` : "");
-      document.getElementById("p2Stats").textContent = `Ships: ${{Math.round(f.s[1])}} • Prod: ${{Math.round(f.pr[1])}}` + (rc[1] > 0 ? ` • /REDIR: ${{rc[1]}}` : "");
+      document.getElementById("p1Stats").textContent = `Ships: ${{Math.floor(f.s[0])}} • Prod: ${{Math.round(f.pr[0])}}` + (rc[0] > 0 ? ` • /REDIR: ${{rc[0]}}` : "");
+      document.getElementById("p2Stats").textContent = `Ships: ${{Math.floor(f.s[1])}} • Prod: ${{Math.round(f.pr[1])}}` + (rc[1] > 0 ? ` • /REDIR: ${{rc[1]}}` : "");
       document.getElementById("tickLabel").textContent = `Tick ${{f.t}} / ${{m.ticks}} (${{(f.t * 0.25).toFixed(1)}}s)`;
       const tot = Math.max(1, f.s[0] + f.s[1]);
       document.getElementById("advFill").style.width = `${{Math.round(100 * f.s[0] / tot)}}%`;
