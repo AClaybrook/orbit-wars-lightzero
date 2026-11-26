@@ -3023,3 +3023,100 @@ end
         assert len(orders) == 1 and isinstance(orders[0], SendOrder) and orders[0].percent == 50
     finally:
         bridge.close()
+
+
+def test_cpp_sim_multitick_and_fleet_slice_aabb_bit_exact():
+    """Verify hoisted step_n_ticks_fast, fleet-slice dynamic AABB separation, and spawn broadphase match Python bit-for-bit."""
+    from galcon.fast_sim_cpp import HAS_FAST_SIM_CPP, FastGalconCppSim
+
+    if not HAS_FAST_SIM_CPP:
+        pytest.skip("C++ sim_core library unavailable")
+
+    sim_py = GalconSim.create(
+        seed=14000, num_planets=18, width=480.0, height=320.0, symmetric=True, max_ticks=60, use_cpp=False
+    )
+    pids = sorted(sim_py.planets.keys())
+    for i in range(6):
+        sim_py.planets[pids[i]].owner = 1
+        sim_py.planets[pids[i]].ships = 60.0
+        sim_py.planets[pids[-1 - i]].owner = 2
+        sim_py.planets[pids[-1 - i]].ships = 60.0
+
+    # Launch multi-fleet converging waves (same-target multi-fleet + partial landings across 16 ticks)
+    o1 = [SendOrder(pids[i], pids[6 + (i % 3)], 50) for i in range(6)]
+    o2 = [SendOrder(pids[-1 - i], pids[6 + (i % 3)], 50) for i in range(6)]
+
+    root_cpp = FastGalconCppSim.from_sim(sim_py)
+    try:
+        sim_py.step({1: o1, 2: o2})
+        root_cpp.step({1: o1, 2: o2})
+
+        for _ in range(16):
+            if sim_py.done:
+                break
+            sim_py.step({})
+        root_cpp.step_n_ticks(16)
+        out_cpp = root_cpp.to_sim()
+    finally:
+        root_cpp.close()
+
+    assert sim_py.tick == out_cpp.tick
+    assert sim_py.done == out_cpp.done
+    assert sim_py.winner() == out_cpp.winner()
+    for pid in pids:
+        assert sim_py.planets[pid].owner == out_cpp.planets[pid].owner
+        assert sim_py.planets[pid].ships == out_cpp.planets[pid].ships
+    assert list(sim_py.fleets.keys()) == list(out_cpp.fleets.keys())
+    for fid in sim_py.fleets:
+        fp, fc = sim_py.fleets[fid], out_cpp.fleets[fid]
+        assert fp.ships == fc.ships
+        assert fp.x == fc.x and fp.y == fc.y
+        assert fp.radius == fc.radius
+        assert fp.units == fc.units
+        assert fp.unit_headings == fc.unit_headings
+
+
+def test_cpp_zero_copy_features_and_heuristic_eval_parity():
+    """Verify zero-copy C++ feature extraction and C++ heuristic eval match summary-sim Python/C99 paths."""
+    from galcon.fast_c import HAS_FAST_C
+    from galcon.fast_sim_cpp import HAS_FAST_SIM_CPP, FastGalconCppSim
+    from galcon.sim import evaluate_galcon_state
+    from galcon.transformer_bot import extract_galcon_features, extract_galcon_features_from_cpp
+
+    if not (HAS_FAST_SIM_CPP and HAS_FAST_C):
+        pytest.skip("Requires compiled C++ sim_core and C99 fast_c libraries")
+
+    sim = GalconSim.create(seed=14001, num_planets=18, width=480.0, height=320.0, symmetric=True, max_ticks=40)
+    pids = sorted(sim.planets.keys())
+    sim.planets[pids[0]].owner = 1
+    sim.planets[pids[0]].ships = 80.0
+    sim.planets[pids[-1]].owner = 2
+    sim.planets[pids[-1]].ships = 80.0
+    sim.step({1: [SendOrder(pids[0], pids[4], 50)], 2: [SendOrder(pids[-1], pids[5], 50)]})
+
+    cpp_sim = FastGalconCppSim.from_sim(sim)
+    try:
+        cpp_sim.step_n_ticks(5)
+        r_sum = cpp_sim.to_summary_sim()
+        for fv in (1, 2):
+            for pl in (1, 2):
+                ref_enc = extract_galcon_features(r_sum, pl, feature_version=fv)
+                ref_h = evaluate_galcon_state(r_sum, pl)
+                p_pair = cpp_sim.read_planets_light()
+                zc_enc, zc_h, zc_done = extract_galcon_features_from_cpp(
+                    cpp_sim, pl, feature_version=fv, need_heuristic=True, planets_pair=p_pair
+                )
+                assert zc_enc is not None
+                assert zc_done == r_sum.done
+                assert zc_enc.planet_ids == ref_enc.planet_ids
+                assert np.array_equal(zc_enc.planet_feats, ref_enc.planet_feats)
+                assert np.array_equal(zc_enc.timeline_feats, ref_enc.timeline_feats)
+                assert np.array_equal(zc_enc.edge_feats, ref_enc.edge_feats)
+                assert np.array_equal(zc_enc.legal_edges, ref_enc.legal_edges)
+                assert np.array_equal(zc_enc.owned_mask, ref_enc.owned_mask)
+                assert np.array_equal(zc_enc.safe_surplus, ref_enc.safe_surplus)
+                assert abs(zc_h - ref_h) < 1e-12
+                assert abs(cpp_sim.evaluate_heuristic(pl) - ref_h) < 1e-12
+    finally:
+        cpp_sim.close()
+

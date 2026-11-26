@@ -68,6 +68,34 @@ class COrder(ctypes.Structure):
     ]
 
 
+class CSimStateView(ctypes.Structure):
+    """Zero-copy C ABI view into a live ``SimState``'s contiguous planet & fleet buffers."""
+
+    _fields_ = [
+        ("tick", ctypes.c_int32),
+        ("max_ticks", ctypes.c_int32),
+        ("done", ctypes.c_int32),
+        ("winner", ctypes.c_int32),
+        ("n_planets", ctypes.c_int32),
+        ("n_fleets", ctypes.c_int32),
+        ("tick_dt", ctypes.c_double),
+        ("fleet_speed", ctypes.c_double),
+        ("prod_divisor", ctypes.c_double),
+        ("p_id", ctypes.c_void_p),
+        ("p_owner", ctypes.c_void_p),
+        ("p_ships", ctypes.c_void_p),
+        ("p_x", ctypes.c_void_p),
+        ("p_y", ctypes.c_void_p),
+        ("p_prod", ctypes.c_void_p),
+        ("p_radius", ctypes.c_void_p),
+        ("fl_target_idx", ctypes.c_void_p),
+        ("fl_owner", ctypes.c_void_p),
+        ("fl_ships", ctypes.c_void_p),
+        ("fl_cx", ctypes.c_void_p),
+        ("fl_cy", ctypes.c_void_p),
+    ]
+
+
 def _materialize_fleet_units_local(cx: float, cy: float, count: int) -> List[List[float]]:
     k = max(1, int(count))
     cx_f = float(cx)
@@ -218,6 +246,15 @@ def _load_or_build_lib() -> Optional[ctypes.CDLL]:
 
         lib.sim_read_unit_headings.argtypes = [_C_VP, _C_VP, _C_VP]
         lib.sim_read_unit_headings.restype = None
+
+        lib.sim_get_state_view.argtypes = [_C_VP, _C_VP]
+        lib.sim_get_state_view.restype = None
+
+        lib.sim_eval_heuristic_from_po.argtypes = [_C_VP, _C_I32, _C_VP, _C_I32]
+        lib.sim_eval_heuristic_from_po.restype = _C_F64
+
+        lib.sim_eval_heuristic.argtypes = [_C_VP, _C_I32, _C_I32]
+        lib.sim_eval_heuristic.restype = _C_F64
 
         return lib
     except Exception:
@@ -547,7 +584,7 @@ class FastGalconCppSim:
     and native C++ ``step_n_ticks``) while maintaining bit-exact parity with ``GalconSim``.
     """
 
-    __slots__ = ("_handle", "_lib", "_meta", "_ptr_meta")
+    __slots__ = ("_handle", "_lib", "_meta", "_ptr_meta", "_state_view", "_ptr_state_view")
 
     def __init__(self, _handle: int) -> None:
         if not HAS_FAST_SIM_CPP or _LIB is None:
@@ -558,6 +595,8 @@ class FastGalconCppSim:
         self._lib: ctypes.CDLL = _LIB
         self._meta = (ctypes.c_int32 * 7)()
         self._ptr_meta = ctypes.addressof(self._meta)
+        self._state_view = CSimStateView()
+        self._ptr_state_view = ctypes.addressof(self._state_view)
 
     def close(self) -> None:
         handle = self._handle
@@ -825,6 +864,56 @@ class FastGalconCppSim:
         n_i = int(n)
         if n_i > 0:
             self._lib.sim_step_ticks(self._require_handle(), n_i)
+
+    def get_state_view(self) -> CSimStateView:
+        """Populate and return a zero-copy ``CSimStateView`` pointing into live C++ arrays."""
+        self._lib.sim_get_state_view(self._require_handle(), self._ptr_state_view)
+        return self._state_view
+
+    def evaluate_heuristic(self, player: int, horizon: int = 24) -> float:
+        """Evaluate tactical heuristic value in ``[-1, +1]`` natively in C++ (matches ``evaluate_galcon_state``)."""
+        return float(self._lib.sim_eval_heuristic(self._require_handle(), int(player), int(horizon)))
+
+    def evaluate_heuristic_from_po(self, player: int, po_all_ptr: int, horizon: int = 24) -> float:
+        """Evaluate tactical heuristic value natively in C++ reusing an already-projected ``po_all`` buffer."""
+        return float(
+            self._lib.sim_eval_heuristic_from_po(self._require_handle(), int(player), int(po_all_ptr), int(horizon))
+        )
+
+    def read_planets_light(self) -> Tuple[List[int], List["Planet"]]:
+        """Read only the planet list (skipping fleets and ``GalconSim`` wrapper) for fast order decoding."""
+        _, _, Planet = _get_sim_types()
+        handle = self._require_handle()
+        meta = self._read_meta()
+        np_ = int(meta[3])
+        if np_ <= 0:
+            return [], []
+        sc = _get_scratch()
+        sc.ensure_planets(np_)
+        self._lib.sim_read_planets_full(
+            handle,
+            sc.ptr_p_id,
+            sc.ptr_p_owner,
+            sc.ptr_p_ships,
+            sc.ptr_p_x,
+            sc.ptr_p_y,
+            sc.ptr_p_prod,
+            sc.ptr_p_radius,
+        )
+        p_id = sc.p_id
+        p_owner = sc.p_owner
+        p_ships = sc.p_ships
+        p_x = sc.p_x
+        p_y = sc.p_y
+        p_prod = sc.p_prod
+        p_radius = sc.p_radius
+        planet_ids: List[int] = []
+        planets: List["Planet"] = []
+        for i in range(np_):
+            pid = p_id[i]
+            planet_ids.append(pid)
+            planets.append(Planet(pid, p_owner[i], p_ships[i], p_x[i], p_y[i], p_prod[i], p_radius[i]))
+        return planet_ids, planets
 
     def to_summary_sim(self, *, use_cpp: Optional[bool] = None) -> "GalconSim":
         """Materialize a lightweight read-only ``GalconSim`` snapshot without copying per-unit arrays.

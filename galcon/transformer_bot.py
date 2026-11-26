@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from galcon.fast_c import HAS_FAST_C, extract_features_fast_c
+from galcon.fast_c import HAS_FAST_C, extract_features_fast_c, extract_features_fast_c_from_cpp
 from galcon.fast_sim_cpp import HAS_FAST_SIM_CPP, FastGalconCppSim
 from galcon.gen5_model import GalconGen5Transformer, build_galcon_gen5_transformer
 from galcon.sim import (
@@ -183,6 +183,56 @@ def canonicalize_galcon_d4(planet_feats: np.ndarray) -> np.ndarray:
             best_arr = cand
     assert best_arr is not None
     return best_arr
+
+
+def extract_galcon_features_from_cpp(
+    cpp_sim: FastGalconCppSim,
+    player: int,
+    *,
+    feature_version: int = 1,
+    need_heuristic: bool = False,
+    planets_pair: Optional[Tuple[List[int], List[Planet]]] = None,
+) -> Tuple[Optional[EncodedGalconState], float, bool]:
+    """Zero-copy feature extraction + optional C++ heuristic eval directly from ``FastGalconCppSim``.
+
+    Skips ``to_summary_sim()`` and pure-Python ``project_all_planet_futures()`` completely when
+    ``HAS_FAST_C`` is available and ``n_planets <= GALCON_MAX_PLANETS``.
+    Returns ``(enc_or_none_if_done_leaf, h_val, done)``.
+    """
+    if HAS_FAST_C and cpp_sim.num_planets <= GALCON_MAX_PLANETS:
+        if need_heuristic and cpp_sim.done:
+            return None, cpp_sim.evaluate_heuristic(player, 24), True
+        res = extract_features_fast_c_from_cpp(
+            cpp_sim, player, GALCON_TIMELINE_HORIZON, feature_version, PRODUCTION_DIVISOR
+        )
+        if res is not None:
+            my_arrs, en_arrs, po_all, ps_all, pf, tf, ef, legal, owned_mask, safe_surplus, done = res
+            h_val = cpp_sim.evaluate_heuristic(player, 24) if need_heuristic else 0.0
+            if planets_pair is not None:
+                planet_ids, planets = planets_pair
+            else:
+                planet_ids, planets = [0] * int(pf.shape[0]), []
+            enc = EncodedGalconState(
+                player=player,
+                planet_ids=planet_ids,
+                planets=planets,
+                planet_feats=pf,
+                timeline_feats=tf,
+                edge_feats=ef,
+                legal_edges=legal,
+                owned_mask=owned_mask,
+                safe_surplus=safe_surplus,
+                feature_version=feature_version,
+                futures=[],
+            )
+            return enc, h_val, done
+
+    r_sum = cpp_sim.to_summary_sim()
+    h_val = evaluate_galcon_state(r_sum, player) if need_heuristic else 0.0
+    if need_heuristic and r_sum.done:
+        return None, h_val, True
+    enc = extract_galcon_features(r_sum, player, feature_version=feature_version)
+    return enc, h_val, r_sum.done
 
 
 def extract_galcon_features(
@@ -563,7 +613,7 @@ def compute_smart_redirects(
                 root_cpp = FastGalconCppSim.from_sim(sim)
                 work_cpp = root_cpp.clone()
                 work_cpp.step_n_ticks(12)
-                base_val = evaluate_galcon_state(work_cpp.to_summary_sim(), player)
+                base_val = work_cpp.evaluate_heuristic(player)
             else:
                 roll0 = sim.clone()
                 for _ in range(12):
@@ -622,7 +672,7 @@ def compute_smart_redirects(
                         work_cpp.copy_from(root_cpp)
                         work_cpp.step({player: [RedirOrder(fl.id, alt_pid)]})
                         work_cpp.step_n_ticks(11)
-                        alt_val = evaluate_galcon_state(work_cpp.to_summary_sim(), player)
+                        alt_val = work_cpp.evaluate_heuristic(player)
                     else:
                         roll1 = sim.clone()
                         roll1.step({player: [RedirOrder(fl.id, alt_pid)]})
@@ -1548,7 +1598,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         k = len(leaf_encs)
         if k == 0:
             return np.zeros((0,), dtype=np.float32)
-        n = len(leaf_encs[0].planet_ids)
+        n = int(leaf_encs[0].planet_feats.shape[0])
         pf_t = torch.from_numpy(np.stack([self._prep_pf(e) for e in leaf_encs], axis=0)).to(self.device)
         tf_t = torch.from_numpy(np.stack([e.timeline_feats for e in leaf_encs], axis=0)).to(self.device)
         ef_t = torch.from_numpy(np.stack([e.edge_feats for e in leaf_encs], axis=0)).to(self.device)
@@ -2351,13 +2401,27 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                     live_indices = [i for i, r in enumerate(rolls_cpp) if not r.done]
                     if not live_indices:
                         break
-                    live_sums: List[GalconSim] = []
+                    live_sums: List[Optional[GalconSim]] = []
                     mid_encs: List[EncodedGalconState] = []
                     for i in live_indices:
-                        r_sum = rolls_cpp[i].to_summary_sim()
-                        live_sums.append(r_sum)
-                        mid_encs.append(extract_galcon_features(r_sum, player, feature_version=self.feature_version))
-                        mid_encs.append(extract_galcon_features(r_sum, opp, feature_version=self.feature_version))
+                        r_c = rolls_cpp[i]
+                        if using_ms and HAS_FAST_C and r_c.num_planets <= GALCON_MAX_PLANETS:
+                            live_sums.append(None)
+                            p_pair = r_c.read_planets_light()
+                            p_enc_i, _, _ = extract_galcon_features_from_cpp(
+                                r_c, player, feature_version=self.feature_version, planets_pair=p_pair
+                            )
+                            o_enc_i, _, _ = extract_galcon_features_from_cpp(
+                                r_c, opp, feature_version=self.feature_version, planets_pair=p_pair
+                            )
+                            assert p_enc_i is not None and o_enc_i is not None
+                            mid_encs.append(p_enc_i)
+                            mid_encs.append(o_enc_i)
+                        else:
+                            r_sum = r_c.to_summary_sim()
+                            live_sums.append(r_sum)
+                            mid_encs.append(extract_galcon_features(r_sum, player, feature_version=self.feature_version))
+                            mid_encs.append(extract_galcon_features(r_sum, opp, feature_version=self.feature_version))
                     m_probs, m_fracs, _, m_msp, m_msf = self._batch_forward_policy_and_val(
                         mid_encs, need_value=False, ms_only=using_ms
                     )
@@ -2373,6 +2437,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                                 threshold=self.multi_send_threshold, include_redirects=False,
                             )
                         else:
+                            assert r_sum is not None
                             p_ord = self._decode_orders(
                                 r_sum, p_enc, m_probs[2 * k_idx], m_fracs[2 * k_idx],
                                 launch_threshold=self.launch_threshold, include_redirects=False,
@@ -2391,12 +2456,14 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
 
                 # Leaf evaluation: ONE batched forward pass across all non-terminal leaves
                 for idx, r_cpp in enumerate(rolls_cpp):
-                    r_sum = r_cpp.to_summary_sim()
-                    h_vals.append(evaluate_galcon_state(r_sum, player))
-                    done_flags.append(r_sum.done)
-                    if not r_sum.done:
+                    l_enc, l_h, l_done = extract_galcon_features_from_cpp(
+                        r_cpp, player, feature_version=self.feature_version, need_heuristic=True
+                    )
+                    h_vals.append(l_h)
+                    done_flags.append(l_done)
+                    if not l_done and l_enc is not None:
                         leaf_pos.append(idx)
-                        leaf_encs.append(extract_galcon_features(r_sum, player, feature_version=self.feature_version))
+                        leaf_encs.append(l_enc)
             else:
                 # Ply 1: step each candidate to ply_steps[0]
                 for idx, plan in enumerate(candidates):
@@ -2496,12 +2563,14 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                         work_cpp.step({player: eval_cands[cand_i], opp: opp_adv_orders})
                         if rem_adv > 0:
                             work_cpp.step_n_ticks(rem_adv)
-                        r_sum = work_cpp.to_summary_sim()
-                        adv_h.append(evaluate_galcon_state(r_sum, player))
-                        adv_done.append(r_sum.done)
-                        if not r_sum.done:
+                        a_enc, a_h, a_done = extract_galcon_features_from_cpp(
+                            work_cpp, player, feature_version=self.feature_version, need_heuristic=True
+                        )
+                        adv_h.append(a_h)
+                        adv_done.append(a_done)
+                        if not a_done and a_enc is not None:
                             adv_pos.append(loc_i)
-                            adv_encs.append(extract_galcon_features(r_sum, player, feature_version=self.feature_version))
+                            adv_encs.append(a_enc)
                 else:
                     for loc_i, cand_i in enumerate(top_k):
                         r_adv = sim.clone()
@@ -2563,12 +2632,14 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                             work_cpp.step({player: eval_cands[cand_i], opp: []})
                             if rem_def > 0:
                                 work_cpp.step_n_ticks(rem_def)
-                            r_sum = work_cpp.to_summary_sim()
-                            def_h.append(evaluate_galcon_state(r_sum, player))
-                            def_done.append(r_sum.done)
-                            if not r_sum.done:
+                            d_enc, d_h, d_done = extract_galcon_features_from_cpp(
+                                work_cpp, player, feature_version=self.feature_version, need_heuristic=True
+                            )
+                            def_h.append(d_h)
+                            def_done.append(d_done)
+                            if not d_done and d_enc is not None:
                                 def_pos.append(loc_i)
-                                def_encs.append(extract_galcon_features(r_sum, player, feature_version=self.feature_version))
+                                def_encs.append(d_enc)
                     else:
                         for loc_i, cand_i in enumerate(top_k_def):
                             r_def = sim.clone()

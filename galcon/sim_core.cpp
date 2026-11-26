@@ -48,6 +48,33 @@ struct ArrivalBucket {
     int32_t count;
 };
 
+struct PhysicsScratch {
+    uint8_t u_alive[SIM_MAX_UNITS];
+    int32_t fl_alive_cnt[SIM_MAX_FLEETS];
+    double tmp_x[SIM_MAX_UNITS];
+    double tmp_y[SIM_MAX_UNITS];
+    ArrivalBucket arr_buckets[SIM_MAX_PLANETS];
+    int32_t dirty_planets[SIM_MAX_PLANETS];
+    int32_t near_planets[SIM_MAX_PLANETS];
+    double p_min_r[SIM_MAX_PLANETS];
+    double p_min_r2[SIM_MAX_PLANETS];
+    double p_land_r[SIM_MAX_PLANETS];
+    double p_land_r2_guard[SIM_MAX_PLANETS];
+    double p_prod_sub[SIM_MAX_PLANETS];
+    int32_t tgt_head[SIM_MAX_PLANETS];
+    int32_t tgt_tail[SIM_MAX_PLANETS];
+    int32_t tgt_cnt[SIM_MAX_PLANETS];
+    int32_t fl_next[SIM_MAX_FLEETS];
+    int32_t grp_uids[SIM_MAX_UNITS];
+    double grp_x[SIM_MAX_UNITS];
+    double grp_y[SIM_MAX_UNITS];
+};
+
+static inline PhysicsScratch& get_physics_scratch() {
+    static thread_local PhysicsScratch s;
+    return s;
+}
+
 static inline double dist2d(double dx, double dy) {
     return std::sqrt(dx * dx + dy * dy);
 }
@@ -101,8 +128,8 @@ static inline int32_t physical_ship_count_cpp(
     return parts < 1 ? 1 : parts;
 }
 
-template <bool CheckAlive, bool PairCap>
-static inline void separate_fleet_gs(
+template <bool CheckAlive, bool PairCap, bool TrackMaxOv = false>
+static inline double separate_fleet_gs_core(
     int32_t start,
     int32_t end,
     double* __restrict__ ux,
@@ -113,6 +140,7 @@ static inline void separate_fleet_gs(
     double half_k,
     double max_sep_push
 ) {
+    double max_ov = 0.0;
     for (int32_t a = start; a < end; ++a) {
         if constexpr (CheckAlive) {
             if (!u_alive[a]) continue;
@@ -138,7 +166,11 @@ static inline void separate_fleet_gs(
                     nx = std::cos(ang);
                     ny = std::sin(ang);
                 }
-                double push = half_k * (min_sep - dist);
+                const double ov = min_sep - dist;
+                if constexpr (TrackMaxOv) {
+                    if (ov > max_ov) max_ov = ov;
+                }
+                double push = half_k * ov;
                 if constexpr (PairCap) {
                     if (push > max_sep_push) push = max_sep_push;
                 }
@@ -152,6 +184,272 @@ static inline void separate_fleet_gs(
         }
         ux[a] = ax;
         uy[a] = ay;
+    }
+    return max_ov;
+}
+
+template <bool CheckAlive, bool PairCap>
+static inline void separate_fleet_gs(
+    int32_t start,
+    int32_t end,
+    double* __restrict__ ux,
+    double* __restrict__ uy,
+    const uint8_t* __restrict__ u_alive,
+    double min_sep,
+    double min_sep2,
+    double half_k,
+    double max_sep_push
+) {
+    separate_fleet_gs_core<CheckAlive, PairCap, false>(
+        start, end, ux, uy, u_alive, min_sep, min_sep2, half_k, max_sep_push
+    );
+}
+
+// Bit-exact fleet-slice dynamic AABB Gauss-Seidel separation for multi-fleet target groups.
+// Each fleet slice [sl_start[c], sl_end[c]) maintains a conservative enclosing AABB updated
+// whenever any unit inside that slice moves. Any unit `a` whose distance to slice `cb`'s AABB
+// is >= min_sep skips all units in `cb` in 4 comparisons while preserving exact (a, b) order.
+template <bool PairCap>
+static void separate_multi_fleet_gs(
+    int32_t n_slices,
+    const int32_t* __restrict__ sl_start,
+    const int32_t* __restrict__ sl_end,
+    double* __restrict__ sl_x0,
+    double* __restrict__ sl_x1,
+    double* __restrict__ sl_y0,
+    double* __restrict__ sl_y1,
+    double* __restrict__ ux,
+    double* __restrict__ uy,
+    double min_sep,
+    double min_sep2,
+    double half_k,
+    double max_sep_push
+) {
+    for (int32_t ca = 0; ca < n_slices; ++ca) {
+        const int32_t sa = sl_start[ca];
+        const int32_t ea = sl_end[ca];
+        double ax0 = sl_x0[ca], ax1 = sl_x1[ca], ay0 = sl_y0[ca], ay1 = sl_y1[ca];
+        for (int32_t a = sa; a < ea; ++a) {
+            double ax = ux[a];
+            double ay = uy[a];
+            // 1. Remainder of own fleet slice
+            for (int32_t b = a + 1; b < ea; ++b) {
+                const double dx = ux[b] - ax;
+                const double dy = uy[b] - ay;
+                const double d2 = dx * dx + dy * dy;
+                if (d2 < min_sep2) {
+                    double nx, ny, dist;
+                    if (d2 > EPS_DIST2) {
+                        dist = std::sqrt(d2);
+                        nx = dx / dist;
+                        ny = dy / dist;
+                    } else {
+                        dist = 0.0;
+                        const double ang = GOLDEN_ANGLE * (double)(a * 31 + b + 1);
+                        nx = std::cos(ang);
+                        ny = std::sin(ang);
+                    }
+                    double push = half_k * (min_sep - dist);
+                    if constexpr (PairCap) {
+                        if (push > max_sep_push) push = max_sep_push;
+                    }
+                    const double px_d = nx * push;
+                    const double py_d = ny * push;
+                    ax -= px_d;
+                    ay -= py_d;
+                    const double nbx = ux[b] + px_d;
+                    const double nby = uy[b] + py_d;
+                    ux[b] = nbx;
+                    uy[b] = nby;
+                    if (nbx < ax0) ax0 = nbx;
+                    if (nbx > ax1) ax1 = nbx;
+                    if (nby < ay0) ay0 = nby;
+                    if (nby > ay1) ay1 = nby;
+                }
+            }
+            // 2. Subsequent fleet slices screened by dynamic AABB
+            for (int32_t cb = ca + 1; cb < n_slices; ++cb) {
+                if (ax + min_sep <= sl_x0[cb] || ax - min_sep >= sl_x1[cb] ||
+                    ay + min_sep <= sl_y0[cb] || ay - min_sep >= sl_y1[cb]) {
+                    continue;
+                }
+                const int32_t sb = sl_start[cb];
+                const int32_t eb = sl_end[cb];
+                double cx0 = sl_x0[cb], cx1 = sl_x1[cb], cy0 = sl_y0[cb], cy1 = sl_y1[cb];
+                for (int32_t b = sb; b < eb; ++b) {
+                    const double dx = ux[b] - ax;
+                    const double dy = uy[b] - ay;
+                    const double d2 = dx * dx + dy * dy;
+                    if (d2 < min_sep2) {
+                        double nx, ny, dist;
+                        if (d2 > EPS_DIST2) {
+                            dist = std::sqrt(d2);
+                            nx = dx / dist;
+                            ny = dy / dist;
+                        } else {
+                            dist = 0.0;
+                            const double ang = GOLDEN_ANGLE * (double)(a * 31 + b + 1);
+                            nx = std::cos(ang);
+                            ny = std::sin(ang);
+                        }
+                        double push = half_k * (min_sep - dist);
+                        if constexpr (PairCap) {
+                            if (push > max_sep_push) push = max_sep_push;
+                        }
+                        const double px_d = nx * push;
+                        const double py_d = ny * push;
+                        ax -= px_d;
+                        ay -= py_d;
+                        const double nbx = ux[b] + px_d;
+                        const double nby = uy[b] + py_d;
+                        ux[b] = nbx;
+                        uy[b] = nby;
+                        if (nbx < cx0) cx0 = nbx;
+                        if (nbx > cx1) cx1 = nbx;
+                        if (nby < cy0) cy0 = nby;
+                        if (nby > cy1) cy1 = nby;
+                    }
+                }
+                sl_x0[cb] = cx0;
+                sl_x1[cb] = cx1;
+                sl_y0[cb] = cy0;
+                sl_y1[cb] = cy1;
+            }
+            ux[a] = ax;
+            uy[a] = ay;
+        }
+        sl_x0[ca] = ax0;
+        sl_x1[ca] = ax1;
+        sl_y0[ca] = ay0;
+        sl_y1[ca] = ay1;
+    }
+}
+
+static void separate_multi_fleet_jacobi(
+    int32_t n_slices,
+    const int32_t* __restrict__ sl_start,
+    const int32_t* __restrict__ sl_end,
+    const double* __restrict__ sl_x0,
+    const double* __restrict__ sl_x1,
+    const double* __restrict__ sl_y0,
+    const double* __restrict__ sl_y1,
+    const double* __restrict__ ux,
+    const double* __restrict__ uy,
+    double* __restrict__ tmp_x,
+    double* __restrict__ tmp_y,
+    double min_sep,
+    double min_sep2,
+    double half_k
+) {
+    for (int32_t ca = 0; ca < n_slices; ++ca) {
+        const int32_t sa = sl_start[ca];
+        const int32_t ea = sl_end[ca];
+        for (int32_t a = sa; a < ea; ++a) {
+            const double ax = ux[a];
+            const double ay = uy[a];
+            for (int32_t b = a + 1; b < ea; ++b) {
+                const double dx = ux[b] - ax;
+                const double dy = uy[b] - ay;
+                const double d2 = dx * dx + dy * dy;
+                if (d2 < min_sep2) {
+                    double nx, ny, dist;
+                    if (d2 > EPS_DIST2) {
+                        dist = std::sqrt(d2);
+                        nx = dx / dist;
+                        ny = dy / dist;
+                    } else {
+                        dist = 0.0;
+                        const double ang = GOLDEN_ANGLE * (double)(a * 31 + b + 1);
+                        nx = std::cos(ang);
+                        ny = std::sin(ang);
+                    }
+                    const double push = half_k * (min_sep - dist);
+                    tmp_x[a] -= nx * push;
+                    tmp_y[a] -= ny * push;
+                    tmp_x[b] += nx * push;
+                    tmp_y[b] += ny * push;
+                }
+            }
+            for (int32_t cb = ca + 1; cb < n_slices; ++cb) {
+                if (ax + min_sep <= sl_x0[cb] || ax - min_sep >= sl_x1[cb] ||
+                    ay + min_sep <= sl_y0[cb] || ay - min_sep >= sl_y1[cb]) {
+                    continue;
+                }
+                const int32_t sb = sl_start[cb];
+                const int32_t eb = sl_end[cb];
+                for (int32_t b = sb; b < eb; ++b) {
+                    const double dx = ux[b] - ax;
+                    const double dy = uy[b] - ay;
+                    const double d2 = dx * dx + dy * dy;
+                    if (d2 < min_sep2) {
+                        double nx, ny, dist;
+                        if (d2 > EPS_DIST2) {
+                            dist = std::sqrt(d2);
+                            nx = dx / dist;
+                            ny = dy / dist;
+                        } else {
+                            dist = 0.0;
+                            const double ang = GOLDEN_ANGLE * (double)(a * 31 + b + 1);
+                            nx = std::cos(ang);
+                            ny = std::sin(ang);
+                        }
+                        const double push = half_k * (min_sep - dist);
+                        tmp_x[a] -= nx * push;
+                        tmp_y[a] -= ny * push;
+                        tmp_x[b] += nx * push;
+                        tmp_y[b] += ny * push;
+                    }
+                }
+            }
+        }
+    }
+}
+
+template <bool CheckAlive>
+static inline void separate_fleet_jacobi_scalar(
+    int32_t start,
+    int32_t end,
+    const double* __restrict__ ux,
+    const double* __restrict__ uy,
+    const uint8_t* __restrict__ u_alive,
+    double* __restrict__ tmp_x,
+    double* __restrict__ tmp_y,
+    double min_sep,
+    double min_sep2,
+    double half_k
+) {
+    for (int32_t a = start; a < end; ++a) {
+        if constexpr (CheckAlive) {
+            if (!u_alive[a]) continue;
+        }
+        const double ax = ux[a];
+        const double ay = uy[a];
+        for (int32_t b = a + 1; b < end; ++b) {
+            if constexpr (CheckAlive) {
+                if (!u_alive[b]) continue;
+            }
+            const double dx = ux[b] - ax;
+            const double dy = uy[b] - ay;
+            const double d2 = dx * dx + dy * dy;
+            if (d2 < min_sep2) {
+                double nx, ny, dist;
+                if (d2 > EPS_DIST2) {
+                    dist = std::sqrt(d2);
+                    nx = dx / dist;
+                    ny = dy / dist;
+                } else {
+                    dist = 0.0;
+                    const double ang = GOLDEN_ANGLE * (double)((a - start) * 31 + (b - start) + 1);
+                    nx = std::cos(ang);
+                    ny = std::sin(ang);
+                }
+                const double push = half_k * (min_sep - dist);
+                tmp_x[a] -= nx * push;
+                tmp_y[a] -= ny * push;
+                tmp_x[b] += nx * push;
+                tmp_y[b] += ny * push;
+            }
+        }
     }
 }
 
@@ -167,7 +465,7 @@ static inline void separate_fleet_gs(
 //   0.0 = pure radial pushout
 //   >0  = tiny deterministic tangential nudge only when a unit is near-antipodal
 //         to target on an obstacle planet (dot(radial, to_target) < -0.995)
-int32_t run_physics_substeps(
+static int32_t run_physics_substeps_core(
     int32_t n_planets,
     int32_t* __restrict__ p_owner,
     double* __restrict__ p_ships,
@@ -178,7 +476,7 @@ int32_t run_physics_substeps(
     int32_t n_fleets,
     const int32_t* __restrict__ fl_owner,
     const int32_t* __restrict__ fl_target_idx,
-    const double* __restrict__ fl_spu,
+    double* __restrict__ fl_spu,
     int32_t* __restrict__ fl_unit_start,
     int32_t* __restrict__ fl_unit_count,
     double* __restrict__ fl_out_ships,
@@ -220,9 +518,12 @@ int32_t run_physics_substeps(
     int32_t* __restrict__ fl_next,
     int32_t* __restrict__ grp_uids,
     double* __restrict__ grp_x,
-    double* __restrict__ grp_y
+    double* __restrict__ grp_y,
+    int32_t n_ticks,
+    bool (*on_tick_end)(void*),
+    void* tick_ctx
 ) {
-    if (n_planets <= 0) return 0;
+    if (n_planets <= 0 || n_ticks <= 0) return 0;
     if (substeps < 1) substeps = 1;
 
     const double sub_dt = tick_dt / (double)substeps;
@@ -232,11 +533,16 @@ int32_t run_physics_substeps(
         for (int32_t p = 0; p < n_planets; ++p) {
             p_prod_sub[p] = (p_prod[p] / prod_divisor) * sub_dt;
         }
-        for (int32_t s = 0; s < substeps; ++s) {
-            for (int32_t p = 0; p < n_planets; ++p) {
-                if (p_owner[p] > 0) {
-                    p_ships[p] += p_prod_sub[p];
+        for (int32_t t = 0; t < n_ticks; ++t) {
+            for (int32_t s = 0; s < substeps; ++s) {
+                for (int32_t p = 0; p < n_planets; ++p) {
+                    if (p_owner[p] > 0) {
+                        p_ships[p] += p_prod_sub[p];
+                    }
                 }
+            }
+            if (on_tick_end && on_tick_end(tick_ctx)) {
+                break;
             }
         }
         return 0;
@@ -268,8 +574,10 @@ int32_t run_physics_substeps(
     if (total_units > 0) {
         std::memset(u_alive, 1, (size_t)total_units);
     }
+    int32_t active_fleets = 0;
     for (int32_t f = 0; f < n_fleets; ++f) {
         fl_alive_cnt[f] = fl_unit_count[f];
+        if (fl_unit_count[f] > 0) ++active_fleets;
     }
 
     // Group fleets by target planet index (preserving ascending fleet index order)
@@ -292,7 +600,22 @@ int32_t run_physics_substeps(
         tgt_cnt[tgt] += 1;
     }
 
-    for (int32_t s = 0; s < substeps; ++s) {
+    for (int32_t t = 0; t < n_ticks; ++t) {
+        if (active_fleets <= 0) {
+            for (int32_t s = 0; s < substeps; ++s) {
+                for (int32_t p = 0; p < n_planets; ++p) {
+                    if (p_owner[p] > 0) {
+                        p_ships[p] += p_prod_sub[p];
+                    }
+                }
+            }
+            if (on_tick_end && on_tick_end(tick_ctx)) {
+                break;
+            }
+            continue;
+        }
+
+        for (int32_t s = 0; s < substeps; ++s) {
         // 1. Production on owned planets
         for (int32_t p = 0; p < n_planets; ++p) {
             if (p_owner[p] > 0) {
@@ -324,34 +647,10 @@ int32_t run_physics_substeps(
                             tmp_x[u] = 0.0;
                             tmp_y[u] = 0.0;
                         }
-                        for (int32_t a = start; a < end; ++a) {
-                            if (!all_alive && !u_alive[a]) continue;
-                            const double ax = ux[a];
-                            const double ay = uy[a];
-                            for (int32_t b = a + 1; b < end; ++b) {
-                                if (!all_alive && !u_alive[b]) continue;
-                                const double dx = ux[b] - ax;
-                                const double dy = uy[b] - ay;
-                                const double d2 = dx * dx + dy * dy;
-                                if (d2 < min_sep2) {
-                                    double nx, ny, dist;
-                                    if (d2 > EPS_DIST2) {
-                                        dist = std::sqrt(d2);
-                                        nx = dx / dist;
-                                        ny = dy / dist;
-                                    } else {
-                                        dist = 0.0;
-                                        const double ang = GOLDEN_ANGLE * (double)((a - start) * 31 + (b - start) + 1);
-                                        nx = std::cos(ang);
-                                        ny = std::sin(ang);
-                                    }
-                                    const double push = half_k * (min_sep - dist);
-                                    tmp_x[a] -= nx * push;
-                                    tmp_y[a] -= ny * push;
-                                    tmp_x[b] += nx * push;
-                                    tmp_y[b] += ny * push;
-                                }
-                            }
+                        if (all_alive) {
+                            separate_fleet_jacobi_scalar<false>(start, end, ux, uy, u_alive, tmp_x, tmp_y, min_sep, min_sep2, half_k);
+                        } else {
+                            separate_fleet_jacobi_scalar<true>(start, end, ux, uy, u_alive, tmp_x, tmp_y, min_sep, min_sep2, half_k);
                         }
                         for (int32_t u = start; u < end; ++u) {
                             if (!all_alive && !u_alive[u]) continue;
@@ -403,6 +702,11 @@ int32_t run_physics_substeps(
                         }
                     }
                 } else {
+                    // Gather alive units per fleet slice and record each slice's enclosing AABB.
+                    constexpr int32_t MAX_SLICES = 64;
+                    int32_t sl_start[MAX_SLICES], sl_end[MAX_SLICES];
+                    double sl_x0[MAX_SLICES], sl_x1[MAX_SLICES], sl_y0[MAX_SLICES], sl_y1[MAX_SLICES];
+                    int32_t n_slices = 0;
                     int32_t m = 0;
                     for (int32_t f = tgt_head[tgt]; f >= 0; f = fl_next[f]) {
                         const int32_t alive_c = fl_alive_cnt[f];
@@ -410,22 +714,53 @@ int32_t run_physics_substeps(
                         const int32_t start = fl_unit_start[f];
                         const int32_t cnt = fl_unit_count[f];
                         const int32_t end = start + cnt;
+                        const int32_t s0 = m;
+                        double x0 = 1e300, x1 = -1e300, y0 = 1e300, y1 = -1e300;
                         if (alive_c == cnt) {
                             for (int32_t u = start; u < end; ++u) {
+                                const double xu = ux[u];
+                                const double yu = uy[u];
                                 grp_uids[m] = u;
-                                grp_x[m] = ux[u];
-                                grp_y[m] = uy[u];
+                                grp_x[m] = xu;
+                                grp_y[m] = yu;
+                                if (xu < x0) x0 = xu;
+                                if (xu > x1) x1 = xu;
+                                if (yu < y0) y0 = yu;
+                                if (yu > y1) y1 = yu;
                                 ++m;
                             }
                         } else {
                             for (int32_t u = start; u < end; ++u) {
                                 if (u_alive[u]) {
+                                    const double xu = ux[u];
+                                    const double yu = uy[u];
                                     grp_uids[m] = u;
-                                    grp_x[m] = ux[u];
-                                    grp_y[m] = uy[u];
+                                    grp_x[m] = xu;
+                                    grp_y[m] = yu;
+                                    if (xu < x0) x0 = xu;
+                                    if (xu > x1) x1 = xu;
+                                    if (yu < y0) y0 = yu;
+                                    if (yu > y1) y1 = yu;
                                     ++m;
                                 }
                             }
+                        }
+                        if (n_slices < MAX_SLICES) {
+                            sl_start[n_slices] = s0;
+                            sl_end[n_slices] = m;
+                            sl_x0[n_slices] = x0;
+                            sl_x1[n_slices] = x1;
+                            sl_y0[n_slices] = y0;
+                            sl_y1[n_slices] = y1;
+                            ++n_slices;
+                        } else {
+                            // Overflow: fold tail into last slice conservatively
+                            const int32_t last = MAX_SLICES - 1;
+                            sl_end[last] = m;
+                            if (x0 < sl_x0[last]) sl_x0[last] = x0;
+                            if (x1 > sl_x1[last]) sl_x1[last] = x1;
+                            if (y0 < sl_y0[last]) sl_y0[last] = y0;
+                            if (y1 > sl_y1[last]) sl_y1[last] = y1;
                         }
                     }
                     if (m <= 1) continue;
@@ -435,32 +770,13 @@ int32_t run_physics_substeps(
                             tmp_x[u] = 0.0;
                             tmp_y[u] = 0.0;
                         }
-                        for (int32_t a = 0; a < m; ++a) {
-                            const double ax = grp_x[a];
-                            const double ay = grp_y[a];
-                            for (int32_t b = a + 1; b < m; ++b) {
-                                const double dx = grp_x[b] - ax;
-                                const double dy = grp_y[b] - ay;
-                                const double d2 = dx * dx + dy * dy;
-                                if (d2 < min_sep2) {
-                                    double nx, ny, dist;
-                                    if (d2 > EPS_DIST2) {
-                                        dist = std::sqrt(d2);
-                                        nx = dx / dist;
-                                        ny = dy / dist;
-                                    } else {
-                                        dist = 0.0;
-                                        const double ang = GOLDEN_ANGLE * (double)(a * 31 + b + 1);
-                                        nx = std::cos(ang);
-                                        ny = std::sin(ang);
-                                    }
-                                    const double push = half_k * (min_sep - dist);
-                                    tmp_x[a] -= nx * push;
-                                    tmp_y[a] -= ny * push;
-                                    tmp_x[b] += nx * push;
-                                    tmp_y[b] += ny * push;
-                                }
-                            }
+                        if (n_slices >= 2) {
+                            separate_multi_fleet_jacobi(
+                                n_slices, sl_start, sl_end, sl_x0, sl_x1, sl_y0, sl_y1,
+                                grp_x, grp_y, tmp_x, tmp_y, min_sep, min_sep2, half_k
+                            );
+                        } else {
+                            separate_fleet_jacobi_scalar<false>(0, m, grp_x, grp_y, u_alive, tmp_x, tmp_y, min_sep, min_sep2, half_k);
                         }
                         for (int32_t u = 0; u < m; ++u) {
                             double dx = tmp_x[u];
@@ -482,10 +798,24 @@ int32_t run_physics_substeps(
                             std::memcpy(tmp_y, grp_y, (size_t)m * sizeof(double));
                         }
 
-                        if (pair_cap) {
-                            separate_fleet_gs<false, true>(0, m, grp_x, grp_y, u_alive, min_sep, min_sep2, half_k, max_sep_push);
+                        if (n_slices >= 2) {
+                            if (pair_cap) {
+                                separate_multi_fleet_gs<true>(
+                                    n_slices, sl_start, sl_end, sl_x0, sl_x1, sl_y0, sl_y1,
+                                    grp_x, grp_y, min_sep, min_sep2, half_k, max_sep_push
+                                );
+                            } else {
+                                separate_multi_fleet_gs<false>(
+                                    n_slices, sl_start, sl_end, sl_x0, sl_x1, sl_y0, sl_y1,
+                                    grp_x, grp_y, min_sep, min_sep2, half_k, max_sep_push
+                                );
+                            }
                         } else {
-                            separate_fleet_gs<false, false>(0, m, grp_x, grp_y, u_alive, min_sep, min_sep2, half_k, max_sep_push);
+                            if (pair_cap) {
+                                separate_fleet_gs<false, true>(0, m, grp_x, grp_y, u_alive, min_sep, min_sep2, half_k, max_sep_push);
+                            } else {
+                                separate_fleet_gs<false, false>(0, m, grp_x, grp_y, u_alive, min_sep, min_sep2, half_k, max_sep_push);
+                            }
                         }
 
                         if (ship_cap) {
@@ -668,50 +998,58 @@ int32_t run_physics_substeps(
                     }
                     ux[u] = x;
                     uy[u] = y;
+                    if (x < min_x) min_x = x;
+                    if (x > max_x) max_x = x;
+                    if (y < min_y) min_y = y;
+                    if (y > max_y) max_y = y;
                 }
             }
 
-            // Step 5a: Touch-to-land check
+            // Step 5a: Touch-to-land check (exact fleet-AABB early-out skips mid-flight fleets)
             const double land_r = p_land_r[tgt];
-            const double land_r2_g = p_land_r2_guard[tgt];
-            const int32_t owner = fl_owner[f];
-            const double spu = fl_spu[f];
-            int32_t alive_left = alive_c;
+            const double land_r_g = land_r + 1e-6;
+            if (max_x >= tx - land_r_g && min_x <= tx + land_r_g &&
+                max_y >= ty - land_r_g && min_y <= ty + land_r_g) {
+                const double land_r2_g = p_land_r2_guard[tgt];
+                const int32_t owner = fl_owner[f];
+                const double spu = fl_spu[f];
+                int32_t alive_left = alive_c;
 
-            for (int32_t u = start; u < end; ++u) {
-                if (!all_alive && !u_alive[u]) continue;
-                const double dx = tx - ux[u];
-                const double dy = ty - uy[u];
-                const double d2 = dx * dx + dy * dy;
-                if (d2 <= land_r2_g && std::sqrt(d2) <= land_r) {
-                    u_alive[u] = 0;
-                    --alive_left;
+                for (int32_t u = start; u < end; ++u) {
+                    if (!all_alive && !u_alive[u]) continue;
+                    const double dx = tx - ux[u];
+                    const double dy = ty - uy[u];
+                    const double d2 = dx * dx + dy * dy;
+                    if (d2 <= land_r2_g && std::sqrt(d2) <= land_r) {
+                        u_alive[u] = 0;
+                        --alive_left;
 
-                    ArrivalBucket& b = arr_buckets[tgt];
-                    if (b.count == 0) {
-                        dirty_planets[n_dirty++] = tgt;
-                        if (p_ships[tgt] > 0.0) {
-                            b.owners[0] = p_owner[tgt];
-                            b.ships[0] = p_ships[tgt];
-                            b.count = 1;
+                        ArrivalBucket& b = arr_buckets[tgt];
+                        if (b.count == 0) {
+                            dirty_planets[n_dirty++] = tgt;
+                            if (p_ships[tgt] > 0.0) {
+                                b.owners[0] = p_owner[tgt];
+                                b.ships[0] = p_ships[tgt];
+                                b.count = 1;
+                            }
                         }
-                    }
-                    bool found = false;
-                    for (int32_t k = 0; k < b.count; ++k) {
-                        if (b.owners[k] == owner) {
-                            b.ships[k] += spu;
-                            found = true;
-                            break;
+                        bool found = false;
+                        for (int32_t k = 0; k < b.count; ++k) {
+                            if (b.owners[k] == owner) {
+                                b.ships[k] += spu;
+                                found = true;
+                                break;
+                            }
                         }
-                    }
-                    if (!found && b.count < MAX_ARR_OWNERS) {
-                        b.owners[b.count] = owner;
-                        b.ships[b.count] = spu;
-                        b.count++;
+                        if (!found && b.count < MAX_ARR_OWNERS) {
+                            b.owners[b.count] = owner;
+                            b.ships[b.count] = spu;
+                            b.count++;
+                        }
                     }
                 }
+                fl_alive_cnt[f] = alive_left;
             }
-            fl_alive_cnt[f] = alive_left;
         }
 
         // Step 5b: Resolve gradual combat on planets with arrivals
@@ -746,7 +1084,54 @@ int32_t run_physics_substeps(
             }
             b.count = 0;
         }
-    }
+        } // end substeps loop
+
+        if (n_ticks > 1) {
+            int32_t next_active = 0;
+            for (int32_t f = 0; f < n_fleets; ++f) {
+                const int32_t alive_c = fl_alive_cnt[f];
+                if (alive_c > 0) {
+                    fl_out_ships[f] = (double)alive_c * fl_spu[f];
+                    ++next_active;
+                } else {
+                    fl_out_ships[f] = 0.0;
+                }
+            }
+            active_fleets = next_active;
+            if (on_tick_end && on_tick_end(tick_ctx)) {
+                break;
+            }
+            if (t + 1 < n_ticks && active_fleets > 0) {
+                for (int32_t f = 0; f < n_fleets; ++f) {
+                    const int32_t old_count = fl_unit_count[f];
+                    if (old_count <= 0) continue;
+                    const int32_t alive_c = fl_alive_cnt[f];
+                    if (alive_c <= 0) {
+                        fl_unit_count[f] = 0;
+                    } else {
+                        fl_spu[f] = fl_out_ships[f] / (double)(alive_c > 1 ? alive_c : 1);
+                        if (alive_c < old_count) {
+                            const int32_t st_u = fl_unit_start[f];
+                            int32_t wp = st_u;
+                            for (int32_t u = st_u; u < st_u + old_count; ++u) {
+                                if (u_alive[u]) {
+                                    if (wp != u) {
+                                        ux[wp] = ux[u];
+                                        uy[wp] = uy[u];
+                                        uhx[wp] = uhx[u];
+                                        uhy[wp] = uhy[u];
+                                    }
+                                    u_alive[wp] = 1;
+                                    ++wp;
+                                }
+                            }
+                            fl_unit_count[f] = alive_c;
+                        }
+                    }
+                }
+            }
+        }
+    } // end ticks loop
 
     // 6. Compact alive units in-place & compute fleet summaries
     int32_t write_pos = 0;
@@ -813,6 +1198,79 @@ int32_t run_physics_substeps(
     }
 
     return write_pos;
+}
+
+int32_t run_physics_substeps(
+    int32_t n_planets,
+    int32_t* __restrict__ p_owner,
+    double* __restrict__ p_ships,
+    const double* __restrict__ p_x,
+    const double* __restrict__ p_y,
+    const double* __restrict__ p_prod,
+    const double* __restrict__ p_radius,
+    int32_t n_fleets,
+    const int32_t* __restrict__ fl_owner,
+    const int32_t* __restrict__ fl_target_idx,
+    const double* __restrict__ fl_spu,
+    int32_t* __restrict__ fl_unit_start,
+    int32_t* __restrict__ fl_unit_count,
+    double* __restrict__ fl_out_ships,
+    double* __restrict__ fl_out_cx,
+    double* __restrict__ fl_out_cy,
+    double* __restrict__ fl_out_radius,
+    int32_t total_units,
+    double* __restrict__ ux,
+    double* __restrict__ uy,
+    double* __restrict__ uhx,
+    double* __restrict__ uhy,
+    double tick_dt,
+    double fleet_speed,
+    int32_t substeps,
+    double ship_radius,
+    double sep_stiffness,
+    double max_sep_push,
+    int32_t sep_mode,
+    double prod_divisor,
+    double obstacle_escape_eps,
+    double turn_rate,
+    double turn_min_speed_factor,
+    // Scratch buffers
+    uint8_t* __restrict__ u_alive,
+    int32_t* __restrict__ fl_alive_cnt,
+    double* __restrict__ tmp_x,
+    double* __restrict__ tmp_y,
+    ArrivalBucket* __restrict__ arr_buckets,
+    int32_t* __restrict__ dirty_planets,
+    int32_t* __restrict__ near_planets,
+    double* __restrict__ p_min_r,
+    double* __restrict__ p_min_r2,
+    double* __restrict__ p_land_r,
+    double* __restrict__ p_land_r2_guard,
+    double* __restrict__ p_prod_sub,
+    int32_t* __restrict__ tgt_head,
+    int32_t* __restrict__ tgt_tail,
+    int32_t* __restrict__ tgt_cnt,
+    int32_t* __restrict__ fl_next,
+    int32_t* __restrict__ grp_uids,
+    double* __restrict__ grp_x,
+    double* __restrict__ grp_y
+) {
+    return run_physics_substeps_core(
+        n_planets, p_owner, p_ships, p_x, p_y, p_prod, p_radius,
+        n_fleets, fl_owner, fl_target_idx, const_cast<double*>(fl_spu), fl_unit_start, fl_unit_count,
+        fl_out_ships, fl_out_cx, fl_out_cy, fl_out_radius,
+        total_units, ux, uy, uhx, uhy,
+        tick_dt, fleet_speed, substeps, ship_radius,
+        sep_stiffness, max_sep_push, sep_mode, prod_divisor, obstacle_escape_eps,
+        turn_rate, turn_min_speed_factor,
+        u_alive, fl_alive_cnt, tmp_x, tmp_y,
+        arr_buckets, dirty_planets, near_planets,
+        p_min_r, p_min_r2, p_land_r, p_land_r2_guard, p_prod_sub,
+        tgt_head, tgt_tail, tgt_cnt, fl_next, grp_uids, grp_x, grp_y,
+        1,
+        nullptr,
+        nullptr
+    );
 }
 
 } // namespace
@@ -1043,8 +1501,11 @@ struct SimState {
             static thread_local double s_oy[SIM_MAX_UNITS];
             static thread_local double s_p_mr[SIM_MAX_PLANETS];
             static thread_local double s_p_mr2[SIM_MAX_PLANETS];
+            static thread_local int32_t s_near_p[SIM_MAX_PLANETS];
+            double max_mr = 0.0;
             for (int32_t pi = 0; pi < n_planets; ++pi) {
                 const double mr = p_radius[pi] + ship_radius;
+                if (mr > max_mr) max_mr = mr;
                 s_p_mr[pi] = mr;
                 s_p_mr2[pi] = mr * mr;
             }
@@ -1056,39 +1517,9 @@ struct SimState {
                         std::memcpy(s_ox, fux, (size_t)parts * sizeof(double));
                         std::memcpy(s_oy, fuy, (size_t)parts * sizeof(double));
                     }
-                    for (int32_t a = 0; a < parts; ++a) {
-                        double ax = fux[a];
-                        double ay = fuy[a];
-                        for (int32_t b = a + 1; b < parts; ++b) {
-                            const double ddx = fux[b] - ax;
-                            const double ddy = fuy[b] - ay;
-                            const double d2 = ddx * ddx + ddy * ddy;
-                            if (d2 < min_sep2) {
-                                double nx, ny, dist;
-                                if (d2 > EPS_DIST2) {
-                                    dist = std::sqrt(d2);
-                                    nx = ddx / dist;
-                                    ny = ddy / dist;
-                                } else {
-                                    dist = 0.0;
-                                    const double ang = GOLDEN_ANGLE * (double)(a * 31 + b + 1);
-                                    nx = std::cos(ang);
-                                    ny = std::sin(ang);
-                                }
-                                const double ov = min_sep - dist;
-                                if (ov > max_ov) max_ov = ov;
-                                const double push = half_k * ov;
-                                const double px_d = nx * push;
-                                const double py_d = ny * push;
-                                ax -= px_d;
-                                ay -= py_d;
-                                fux[b] += px_d;
-                                fuy[b] += py_d;
-                            }
-                        }
-                        fux[a] = ax;
-                        fuy[a] = ay;
-                    }
+                    max_ov = separate_fleet_gs_core<false, false, true>(
+                        0, parts, fux, fuy, nullptr, min_sep, min_sep2, half_k, max_sep_push
+                    );
                     if (max_sep_push > 0.0) {
                         for (int32_t u = 0; u < parts; ++u) {
                             const double ddx = fux[u] - s_ox[u];
@@ -1103,43 +1534,79 @@ struct SimState {
                     }
                 }
 
+                // Exact padded planet broadphase around spawned unit AABB
+                double min_x = fux[0], max_x = fux[0], min_y = fuy[0], max_y = fuy[0];
+                for (int32_t u = 1; u < parts; ++u) {
+                    const double xu = fux[u];
+                    const double yu = fuy[u];
+                    if (xu < min_x) min_x = xu;
+                    if (xu > max_x) max_x = xu;
+                    if (yu < min_y) min_y = yu;
+                    if (yu > max_y) max_y = yu;
+                }
+                bool any_exact_hit = false;
+                for (int32_t pi = 0; pi < n_planets; ++pi) {
+                    if (pi == di) continue;
+                    const double mr = s_p_mr[pi];
+                    if (p_x[pi] + mr >= min_x && p_x[pi] - mr <= max_x &&
+                        p_y[pi] + mr >= min_y && p_y[pi] - mr <= max_y) {
+                        any_exact_hit = true;
+                        break;
+                    }
+                }
+
                 double max_pp = 0.0;
-                for (int32_t u = 0; u < parts; ++u) {
-                    double x = fux[u];
-                    double y = fuy[u];
+                if (any_exact_hit) {
+                    int32_t n_near = 0;
+                    const double pad_min_x = min_x - max_mr;
+                    const double pad_max_x = max_x + max_mr;
+                    const double pad_min_y = min_y - max_mr;
+                    const double pad_max_y = max_y + max_mr;
                     for (int32_t pi = 0; pi < n_planets; ++pi) {
                         if (pi == di) continue;
-                        const double px_i = p_x[pi];
-                        const double py_i = p_y[pi];
-                        const double ddx = x - px_i;
-                        const double ddy = y - py_i;
-                        const double d2 = ddx * ddx + ddy * ddy;
-                        if (d2 < s_p_mr2[pi]) {
-                            const double mr = s_p_mr[pi];
-                            if (d2 > EPS_DIST2) {
-                                const double dist = std::sqrt(d2);
-                                const double pp = mr - dist;
-                                if (pp > max_pp) max_pp = pp;
-                                x = px_i + (ddx / dist) * mr;
-                                y = py_i + (ddy / dist) * mr;
-                            } else {
-                                if (mr > max_pp) max_pp = mr;
-                                const double tdx = tx - px_i;
-                                const double tdy = ty - py_i;
-                                const double td2 = tdx * tdx + tdy * tdy;
-                                if (td2 > EPS_DIST2) {
-                                    const double td = std::sqrt(td2);
-                                    x = px_i + (tdx / td) * mr;
-                                    y = py_i + (tdy / td) * mr;
+                        const double mr = s_p_mr[pi];
+                        if (p_x[pi] + mr >= pad_min_x && p_x[pi] - mr <= pad_max_x &&
+                            p_y[pi] + mr >= pad_min_y && p_y[pi] - mr <= pad_max_y) {
+                            s_near_p[n_near++] = pi;
+                        }
+                    }
+                    for (int32_t u = 0; u < parts; ++u) {
+                        double x = fux[u];
+                        double y = fuy[u];
+                        for (int32_t ni = 0; ni < n_near; ++ni) {
+                            const int32_t pi = s_near_p[ni];
+                            const double px_i = p_x[pi];
+                            const double py_i = p_y[pi];
+                            const double ddx = x - px_i;
+                            const double ddy = y - py_i;
+                            const double d2 = ddx * ddx + ddy * ddy;
+                            if (d2 < s_p_mr2[pi]) {
+                                const double mr = s_p_mr[pi];
+                                if (d2 > EPS_DIST2) {
+                                    const double dist = std::sqrt(d2);
+                                    const double pp = mr - dist;
+                                    if (pp > max_pp) max_pp = pp;
+                                    x = px_i + (ddx / dist) * mr;
+                                    y = py_i + (ddy / dist) * mr;
                                 } else {
-                                    x = px_i + mr;
-                                    y = py_i;
+                                    if (mr > max_pp) max_pp = mr;
+                                    const double tdx = tx - px_i;
+                                    const double tdy = ty - py_i;
+                                    const double td2 = tdx * tdx + tdy * tdy;
+                                    if (td2 > EPS_DIST2) {
+                                        const double td = std::sqrt(td2);
+                                        x = px_i + (tdx / td) * mr;
+                                        y = py_i + (tdy / td) * mr;
+                                    } else {
+                                        x = px_i + mr;
+                                        y = py_i;
+                                    }
                                 }
                             }
                         }
+                        fux[u] = x;
+                        fuy[u] = y;
                     }
-                    fux[u] = x;
-                    fuy[u] = y;
                 }
 
                 if (max_ov <= SPAWN_SETTLE_TOL && max_pp <= SPAWN_SETTLE_TOL) {
@@ -1205,25 +1672,7 @@ struct SimState {
             fl_spu[f] = fl_ships[f] / (double)(c > 1 ? c : 1);
         }
 
-        static thread_local uint8_t s_u_alive[SIM_MAX_UNITS];
-        static thread_local int32_t s_fl_alive_cnt[SIM_MAX_FLEETS];
-        static thread_local double s_tmp_x[SIM_MAX_UNITS];
-        static thread_local double s_tmp_y[SIM_MAX_UNITS];
-        static thread_local ArrivalBucket s_arr_buckets[SIM_MAX_PLANETS];
-        static thread_local int32_t s_dirty_planets[SIM_MAX_PLANETS];
-        static thread_local int32_t s_near_planets[SIM_MAX_PLANETS];
-        static thread_local double s_p_min_r[SIM_MAX_PLANETS];
-        static thread_local double s_p_min_r2[SIM_MAX_PLANETS];
-        static thread_local double s_p_land_r[SIM_MAX_PLANETS];
-        static thread_local double s_p_land_r2_guard[SIM_MAX_PLANETS];
-        static thread_local double s_p_prod_sub[SIM_MAX_PLANETS];
-        static thread_local int32_t s_tgt_head[SIM_MAX_PLANETS];
-        static thread_local int32_t s_tgt_tail[SIM_MAX_PLANETS];
-        static thread_local int32_t s_tgt_cnt[SIM_MAX_PLANETS];
-        static thread_local int32_t s_fl_next[SIM_MAX_FLEETS];
-        static thread_local int32_t s_grp_uids[SIM_MAX_UNITS];
-        static thread_local double s_grp_x[SIM_MAX_UNITS];
-        static thread_local double s_grp_y[SIM_MAX_UNITS];
+        PhysicsScratch& s = get_physics_scratch();
 
         n_units = run_physics_substeps(
             n_planets,
@@ -1235,10 +1684,10 @@ struct SimState {
             tick_dt, fleet_speed, substeps, ship_radius,
             sep_stiffness, max_sep_push, sep_mode, prod_divisor, obstacle_escape_eps,
             turn_rate, turn_min_speed_factor,
-            s_u_alive, s_fl_alive_cnt, s_tmp_x, s_tmp_y,
-            s_arr_buckets, s_dirty_planets, s_near_planets,
-            s_p_min_r, s_p_min_r2, s_p_land_r, s_p_land_r2_guard, s_p_prod_sub,
-            s_tgt_head, s_tgt_tail, s_tgt_cnt, s_fl_next, s_grp_uids, s_grp_x, s_grp_y
+            s.u_alive, s.fl_alive_cnt, s.tmp_x, s.tmp_y,
+            s.arr_buckets, s.dirty_planets, s.near_planets,
+            s.p_min_r, s.p_min_r2, s.p_land_r, s.p_land_r2_guard, s.p_prod_sub,
+            s.tgt_head, s.tgt_tail, s.tgt_cnt, s.fl_next, s.grp_uids, s.grp_x, s.grp_y
         );
 
         int32_t wf = 0;
@@ -1264,6 +1713,76 @@ struct SimState {
 
         tick += 1;
         check_terminal();
+    }
+
+    struct MultiTickCtx {
+        SimState* self;
+        int32_t stepped;
+    };
+
+    static bool on_multi_tick_end(void* raw_ctx) {
+        MultiTickCtx* ctx = static_cast<MultiTickCtx*>(raw_ctx);
+        SimState* st = ctx->self;
+        st->tick += 1;
+        ctx->stepped += 1;
+        st->check_terminal();
+        return st->done != 0;
+    }
+
+    int32_t step_n_ticks_fast(int32_t n_ticks) {
+        if (done || n_ticks <= 0) return 0;
+        if (n_ticks == 1) {
+            step_one_tick();
+            return 1;
+        }
+
+        for (int32_t f = 0; f < n_fleets; ++f) {
+            const int32_t c = fl_unit_count[f];
+            fl_spu[f] = fl_ships[f] / (double)(c > 1 ? c : 1);
+        }
+
+        PhysicsScratch& s = get_physics_scratch();
+        MultiTickCtx ctx{this, 0};
+        n_units = run_physics_substeps_core(
+            n_planets,
+            p_owner, p_ships, p_x, p_y, p_prod, p_radius,
+            n_fleets,
+            fl_owner, fl_target_idx, fl_spu, fl_unit_start, fl_unit_count,
+            fl_ships, fl_cx, fl_cy, fl_radius,
+            n_units, ux, uy, uhx, uhy,
+            tick_dt, fleet_speed, substeps, ship_radius,
+            sep_stiffness, max_sep_push, sep_mode, prod_divisor, obstacle_escape_eps,
+            turn_rate, turn_min_speed_factor,
+            s.u_alive, s.fl_alive_cnt, s.tmp_x, s.tmp_y,
+            s.arr_buckets, s.dirty_planets, s.near_planets,
+            s.p_min_r, s.p_min_r2, s.p_land_r, s.p_land_r2_guard, s.p_prod_sub,
+            s.tgt_head, s.tgt_tail, s.tgt_cnt, s.fl_next, s.grp_uids, s.grp_x, s.grp_y,
+            n_ticks,
+            &SimState::on_multi_tick_end,
+            &ctx
+        );
+
+        int32_t wf = 0;
+        for (int32_t f = 0; f < n_fleets; ++f) {
+            if (fl_unit_count[f] > 0) {
+                if (wf != f) {
+                    fl_id[wf] = fl_id[f];
+                    fl_owner[wf] = fl_owner[f];
+                    fl_source_id[wf] = fl_source_id[f];
+                    fl_target_idx[wf] = fl_target_idx[f];
+                    fl_spu[wf] = fl_spu[f];
+                    fl_unit_start[wf] = fl_unit_start[f];
+                    fl_unit_count[wf] = fl_unit_count[f];
+                    fl_ships[wf] = fl_ships[f];
+                    fl_cx[wf] = fl_cx[f];
+                    fl_cy[wf] = fl_cy[f];
+                    fl_radius[wf] = fl_radius[f];
+                }
+                ++wf;
+            }
+        }
+        n_fleets = wf;
+        return ctx.stepped;
     }
 };
 
@@ -1373,25 +1892,7 @@ int32_t step_physics_cpp(
     if (n_planets <= 0) return 0;
 
     if (n_planets <= SIM_MAX_PLANETS && n_fleets <= SIM_MAX_FLEETS && total_units <= SIM_MAX_UNITS) {
-        static thread_local uint8_t s_u_alive[SIM_MAX_UNITS];
-        static thread_local int32_t s_fl_alive_cnt[SIM_MAX_FLEETS];
-        static thread_local double s_tmp_x[SIM_MAX_UNITS];
-        static thread_local double s_tmp_y[SIM_MAX_UNITS];
-        static thread_local ArrivalBucket s_arr_buckets[SIM_MAX_PLANETS];
-        static thread_local int32_t s_dirty_planets[SIM_MAX_PLANETS];
-        static thread_local int32_t s_near_planets[SIM_MAX_PLANETS];
-        static thread_local double s_p_min_r[SIM_MAX_PLANETS];
-        static thread_local double s_p_min_r2[SIM_MAX_PLANETS];
-        static thread_local double s_p_land_r[SIM_MAX_PLANETS];
-        static thread_local double s_p_land_r2_guard[SIM_MAX_PLANETS];
-        static thread_local double s_p_prod_sub[SIM_MAX_PLANETS];
-        static thread_local int32_t s_tgt_head[SIM_MAX_PLANETS];
-        static thread_local int32_t s_tgt_tail[SIM_MAX_PLANETS];
-        static thread_local int32_t s_tgt_cnt[SIM_MAX_PLANETS];
-        static thread_local int32_t s_fl_next[SIM_MAX_FLEETS];
-        static thread_local int32_t s_grp_uids[SIM_MAX_UNITS];
-        static thread_local double s_grp_x[SIM_MAX_UNITS];
-        static thread_local double s_grp_y[SIM_MAX_UNITS];
+        PhysicsScratch& s = get_physics_scratch();
 
         return run_physics_substeps(
             n_planets, p_owner, p_ships, p_x, p_y, p_prod, p_radius,
@@ -1401,10 +1902,10 @@ int32_t step_physics_cpp(
             tick_dt, fleet_speed, substeps, ship_radius,
             sep_stiffness, max_sep_push, sep_mode, prod_divisor, obstacle_escape_eps,
             turn_rate, turn_min_speed_factor,
-            s_u_alive, s_fl_alive_cnt, s_tmp_x, s_tmp_y,
-            s_arr_buckets, s_dirty_planets, s_near_planets,
-            s_p_min_r, s_p_min_r2, s_p_land_r, s_p_land_r2_guard, s_p_prod_sub,
-            s_tgt_head, s_tgt_tail, s_tgt_cnt, s_fl_next, s_grp_uids, s_grp_x, s_grp_y
+            s.u_alive, s.fl_alive_cnt, s.tmp_x, s.tmp_y,
+            s.arr_buckets, s.dirty_planets, s.near_planets,
+            s.p_min_r, s.p_min_r2, s.p_land_r, s.p_land_r2_guard, s.p_prod_sub,
+            s.tgt_head, s.tgt_tail, s.tgt_cnt, s.fl_next, s.grp_uids, s.grp_x, s.grp_y
         );
     }
 
@@ -1637,12 +2138,7 @@ void sim_step_with_orders(SimState* st, int32_t n_orders, const COrder* orders) 
 
 int32_t sim_step_ticks(SimState* st, int32_t n_ticks) {
     if (!st) return 0;
-    int32_t stepped = 0;
-    for (int32_t t = 0; t < n_ticks && !st->done; ++t) {
-        st->step_one_tick();
-        ++stepped;
-    }
-    return stepped;
+    return st->step_n_ticks_fast(n_ticks);
 }
 
 void sim_get_meta(const SimState* st, int32_t* out_meta) {
@@ -1747,6 +2243,202 @@ void sim_read_unit_headings(const SimState* st, double* out_uhx, double* out_uhy
     const int32_t nu = st->n_units;
     std::memcpy(out_uhx, st->uhx, (size_t)nu * sizeof(double));
     std::memcpy(out_uhy, st->uhy, (size_t)nu * sizeof(double));
+}
+
+struct SimStateView {
+    int32_t tick;
+    int32_t max_ticks;
+    int32_t done;
+    int32_t winner;
+    int32_t n_planets;
+    int32_t n_fleets;
+    double tick_dt;
+    double fleet_speed;
+    double prod_divisor;
+    const int32_t* p_id;
+    const int32_t* p_owner;
+    const double* p_ships;
+    const double* p_x;
+    const double* p_y;
+    const double* p_prod;
+    const double* p_radius;
+    const int32_t* fl_target_idx;
+    const int32_t* fl_owner;
+    const double* fl_ships;
+    const double* fl_cx;
+    const double* fl_cy;
+};
+
+void sim_get_state_view(const SimState* st, SimStateView* out) {
+    if (!st || !out) return;
+    out->tick = st->tick;
+    out->max_ticks = st->max_ticks;
+    out->done = st->done;
+    out->winner = st->winner;
+    out->n_planets = st->n_planets;
+    out->n_fleets = st->n_fleets;
+    out->tick_dt = st->tick_dt;
+    out->fleet_speed = st->fleet_speed;
+    out->prod_divisor = st->prod_divisor;
+    out->p_id = st->p_id;
+    out->p_owner = st->p_owner;
+    out->p_ships = st->p_ships;
+    out->p_x = st->p_x;
+    out->p_y = st->p_y;
+    out->p_prod = st->p_prod;
+    out->p_radius = st->p_radius;
+    out->fl_target_idx = st->fl_target_idx;
+    out->fl_owner = st->fl_owner;
+    out->fl_ships = st->fl_ships;
+    out->fl_cx = st->fl_cx;
+    out->fl_cy = st->fl_cy;
+}
+
+double sim_eval_heuristic_from_po(const SimState* st, int32_t player, const float* po_all, int32_t horizon) {
+    if (!st) return 0.0;
+    if (st->done) {
+        return (st->winner == player) ? 1.0 : ((st->winner == 0) ? 0.0 : -1.0);
+    }
+    const int32_t opp = (player == 1) ? 2 : 1;
+    double my_ships = 0.0, en_ships = 0.0;
+    double my_prod = 0.0, en_prod = 0.0;
+    double fut_my_prod = 0.0, fut_en_prod = 0.0;
+    const int32_t np = st->n_planets;
+    const int32_t last_col = (horizon > 0) ? (horizon - 1) : 0;
+    for (int32_t i = 0; i < np; ++i) {
+        const int32_t o = st->p_owner[i];
+        const double pr = st->p_prod[i];
+        if (o == player) {
+            my_ships += st->p_ships[i];
+            my_prod += pr;
+        } else if (o == opp) {
+            en_ships += st->p_ships[i];
+            en_prod += pr;
+        }
+        if (po_all && horizon > 0) {
+            const float po = po_all[i * horizon + last_col];
+            if (po > 0.0f) fut_my_prod += pr;
+            else if (po < 0.0f) fut_en_prod += pr;
+        }
+    }
+    const int32_t nf = st->n_fleets;
+    for (int32_t f = 0; f < nf; ++f) {
+        const int32_t o = st->fl_owner[f];
+        if (o == player) my_ships += st->fl_ships[f];
+        else if (o == opp) en_ships += st->fl_ships[f];
+    }
+    const double ship_denom = (my_ships + en_ships > 30.0) ? (my_ships + en_ships) : 30.0;
+    const double prod_denom = (my_prod + en_prod > 40.0) ? (my_prod + en_prod) : 40.0;
+    const double fut_denom = (fut_my_prod + fut_en_prod > 40.0) ? (fut_my_prod + fut_en_prod) : 40.0;
+    const double ship_adv = (my_ships - en_ships) / ship_denom;
+    const double prod_adv = (my_prod - en_prod) / prod_denom;
+    const double fut_prod_adv = (fut_my_prod - fut_en_prod) / fut_denom;
+    const double raw = 1.15 * ship_adv + 0.70 * prod_adv + 1.10 * fut_prod_adv;
+    return std::tanh(raw);
+}
+
+double sim_eval_heuristic(const SimState* st, int32_t player, int32_t horizon) {
+    if (!st) return 0.0;
+    if (st->done) {
+        return (st->winner == player) ? 1.0 : ((st->winner == 0) ? 0.0 : -1.0);
+    }
+    const int32_t np = st->n_planets;
+    if (np <= 0) return 0.0;
+    const int32_t H = (horizon > 0 && horizon <= 64) ? horizon : 24;
+    const int32_t opp = (player == 1) ? 2 : 1;
+    const double step_dist_raw = st->fleet_speed * st->tick_dt;
+    const double step_dist = (step_dist_raw > 1e-6) ? step_dist_raw : 1e-6;
+
+    double my_ships = 0.0, en_ships = 0.0;
+    double my_prod = 0.0, en_prod = 0.0;
+    for (int32_t i = 0; i < np; ++i) {
+        const int32_t o = st->p_owner[i];
+        if (o == player) {
+            my_ships += st->p_ships[i];
+            my_prod += st->p_prod[i];
+        } else if (o == opp) {
+            en_ships += st->p_ships[i];
+            en_prod += st->p_prod[i];
+        }
+    }
+
+    static thread_local float s_my_arr[SIM_MAX_PLANETS * 64];
+    static thread_local float s_en_arr[SIM_MAX_PLANETS * 64];
+    uint8_t has_inc[SIM_MAX_PLANETS];
+    std::memset(has_inc, 0, (size_t)np);
+    std::memset(s_my_arr, 0, (size_t)(np * H) * sizeof(float));
+    std::memset(s_en_arr, 0, (size_t)(np * H) * sizeof(float));
+
+    const int32_t nf = st->n_fleets;
+    for (int32_t f = 0; f < nf; ++f) {
+        const int32_t fo = st->fl_owner[f];
+        const double fs = st->fl_ships[f];
+        if (fo == player) my_ships += fs;
+        else if (fo == opp) en_ships += fs;
+        const int32_t idx_p = st->fl_target_idx[f];
+        if (idx_p < 0 || idx_p >= np) continue;
+        const double dx = st->p_x[idx_p] - st->fl_cx[f];
+        const double dy = st->p_y[idx_p] - st->fl_cy[f];
+        const double raw_d = std::sqrt(dx * dx + dy * dy) - st->p_radius[idx_p] - st->ship_radius;
+        const double dist = (raw_d > 0.0) ? raw_d : 0.0;
+        int32_t eta = static_cast<int32_t>(std::ceil((dist - ARRIVAL_EPS) / step_dist));
+        if (eta < 1) eta = 1;
+        const int32_t t_i = eta - 1;
+        if (t_i >= 0 && t_i < H) {
+            has_inc[idx_p] = 1;
+            if (fo == player) s_my_arr[idx_p * H + t_i] += static_cast<float>(fs);
+            else s_en_arr[idx_p * H + t_i] += static_cast<float>(fs);
+        }
+    }
+
+    double fut_my_prod = 0.0, fut_en_prod = 0.0;
+    for (int32_t i = 0; i < np; ++i) {
+        int32_t cur_owner = (st->p_owner[i] == player) ? 1 : ((st->p_owner[i] == 0) ? 0 : -1);
+        if (has_inc[i]) {
+            double cur_ships = st->p_ships[i];
+            const double g_i = (st->p_prod[i] / st->prod_divisor) * st->tick_dt;
+            const int32_t base = i * H;
+            for (int32_t t = 0; t < H; ++t) {
+                if (cur_owner != 0) cur_ships += g_i;
+                const double ma = static_cast<double>(s_my_arr[base + t]);
+                const double ea = static_cast<double>(s_en_arr[base + t]);
+                if (ma > 0.0 || ea > 0.0) {
+                    const double f_my = ma + ((cur_owner == 1) ? cur_ships : 0.0);
+                    const double f_en = ea + ((cur_owner == -1) ? cur_ships : 0.0);
+                    const double f_nu = (cur_owner == 0) ? cur_ships : 0.0;
+                    double top_v, sec_v;
+                    int32_t top_o;
+                    if (f_my >= f_en && f_my >= f_nu) {
+                        top_v = f_my; top_o = 1;
+                        sec_v = (f_en >= f_nu) ? f_en : f_nu;
+                    } else if (f_en >= f_my && f_en >= f_nu) {
+                        top_v = f_en; top_o = -1;
+                        sec_v = (f_my >= f_nu) ? f_my : f_nu;
+                    } else {
+                        top_v = f_nu; top_o = 0;
+                        sec_v = (f_my >= f_en) ? f_my : f_en;
+                    }
+                    if (std::fabs(top_v - sec_v) <= TIE_EPS) {
+                        cur_ships = 0.0;
+                    } else {
+                        cur_owner = top_o;
+                        cur_ships = top_v - sec_v;
+                    }
+                }
+            }
+        }
+        if (cur_owner > 0) fut_my_prod += st->p_prod[i];
+        else if (cur_owner < 0) fut_en_prod += st->p_prod[i];
+    }
+
+    const double ship_denom = (my_ships + en_ships > 30.0) ? (my_ships + en_ships) : 30.0;
+    const double prod_denom = (my_prod + en_prod > 40.0) ? (my_prod + en_prod) : 40.0;
+    const double fut_denom = (fut_my_prod + fut_en_prod > 40.0) ? (fut_my_prod + fut_en_prod) : 40.0;
+    const double ship_adv = (my_ships - en_ships) / ship_denom;
+    const double prod_adv = (my_prod - en_prod) / prod_denom;
+    const double fut_prod_adv = (fut_my_prod - fut_en_prod) / fut_denom;
+    const double raw = 1.15 * ship_adv + 0.70 * prod_adv + 1.10 * fut_prod_adv;
+    return std::tanh(raw);
 }
 
 } // extern "C"

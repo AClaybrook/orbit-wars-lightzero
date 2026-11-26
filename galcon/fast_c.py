@@ -559,3 +559,88 @@ def extract_features_fast_c(
         owned_u8.view(np.bool_),
         safe_surplus,
     )
+
+
+def extract_features_fast_c_from_cpp(
+    cpp_sim,
+    player: int,
+    horizon: int,
+    feature_version: int,
+    prod_div: float,
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool]]:
+    """Zero-copy fused C99 feature extraction directly from a live ``FastGalconCppSim`` handle.
+
+    Avoids ``to_summary_sim()`` Python ``Planet``/``Fleet``/dict reconstruction and skips copying
+    planet/fleet arrays into Python scratch buffers by passing the C++ ``SimState`` pointers
+    directly into ``extract_galcon_features_c``.
+    Returns ``(*arrays, done)`` or ``None`` if C lib is unavailable or ``n_planets`` is out of bounds.
+    """
+    if _EXTRACT_FN is None:
+        return None
+    view = cpp_sim.get_state_view()
+    n = int(view.n_planets)
+    if n <= 0 or n > 64:
+        return None
+    nf = int(view.n_fleets)
+    step_prog = min(1.0, float(view.tick) / max(1.0, float(view.max_ticks)))
+    step_dist = max(1e-6, float(view.fleet_speed) * float(view.tick_dt))
+
+    p_dim = 22 if feature_version >= 2 else 18
+    e_dim = 12 if feature_version >= 2 else 10
+    my_arrs = np.empty((n, horizon), dtype=np.float32)
+    en_arrs = np.empty((n, horizon), dtype=np.float32)
+    po_all = np.empty((n, horizon), dtype=np.float32)
+    ps_all = np.empty((n, horizon), dtype=np.float32)
+    pf = np.empty((n, p_dim), dtype=np.float32)
+    tf = np.empty((n, horizon, 8), dtype=np.float32)
+    ef = np.empty((n, n, e_dim), dtype=np.float32)
+    legal_u8 = np.empty((n, n), dtype=np.uint8)
+    owned_u8 = np.empty((n,), dtype=np.uint8)
+    safe_surplus = np.empty((n,), dtype=np.float32)
+
+    _EXTRACT_FN(
+        n,
+        horizon,
+        feature_version,
+        int(player),
+        float(view.tick_dt),
+        float(step_dist),
+        float(prod_div),
+        float(step_prog),
+        view.p_x,
+        view.p_y,
+        view.p_radius,
+        view.p_ships,
+        view.p_prod,
+        view.p_owner,
+        nf,
+        view.fl_target_idx,
+        view.fl_owner,
+        view.fl_ships,
+        view.fl_cx,
+        view.fl_cy,
+        my_arrs.ctypes.data,
+        en_arrs.ctypes.data,
+        po_all.ctypes.data,
+        ps_all.ctypes.data,
+        pf.ctypes.data,
+        tf.ctypes.data,
+        ef.ctypes.data,
+        legal_u8.ctypes.data,
+        owned_u8.ctypes.data,
+        safe_surplus.ctypes.data,
+    )
+    return (
+        my_arrs,
+        en_arrs,
+        po_all,
+        ps_all,
+        pf,
+        tf,
+        ef,
+        legal_u8.view(np.bool_),
+        owned_u8.view(np.bool_),
+        safe_surplus,
+        bool(view.done),
+    )
+
