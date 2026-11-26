@@ -717,7 +717,7 @@ def collect_episodes_batched_2p(
     policy: PlanetTimelineTransformer,
     opp_model: Optional[PlanetTimelineTransformer],
     *,
-    specs: Sequence[Tuple[int, int]],  # list of (seed, hero_slot)
+    specs: Sequence[Tuple[int, ...]],  # (seed, hero_slot) or (seed, hero_slot, group_id, rng_seed)
     temperature: float = 0.80,
     max_steps: int = 220,
     gamma: float = 0.99,
@@ -745,12 +745,30 @@ def collect_episodes_batched_2p(
     feat_ver = max(int(getattr(policy, "feature_version", 1)), opp_fv)
     tl_dim_pol = int(getattr(policy, "timeline_dim", 8))
 
-    rngs = [np.random.default_rng(s) for s, _ in specs]
-    sims = [FastOrbitSim.from_seed(seed=s, num_agents=2, max_steps=max_steps) for s, _ in specs]
-    hero_slots = [int(sl) for _, sl in specs]
-    k_rots = [int(rngs[i].integers(0, 4)) if rollout_d4 else 0 for i in range(m)]
-    flip_xs = [bool(rngs[i].integers(0, 2)) if rollout_d4 else False for i in range(m)]
-    opp_k_rots = [int(rngs[i].integers(0, 4)) for i in range(m)]
+    parsed_specs: List[Tuple[int, int, int, int]] = []
+    for sp in specs:
+        if len(sp) >= 4:
+            parsed_specs.append((int(sp[0]), int(sp[1]), int(sp[2]), int(sp[3])))
+        else:
+            parsed_specs.append((int(sp[0]), int(sp[1]), -1, int(sp[0])))
+
+    rngs = [np.random.default_rng(rseed) for _, _, _, rseed in parsed_specs]
+    sims = [FastOrbitSim.from_seed(seed=s, num_agents=2, max_steps=max_steps) for s, _, _, _ in parsed_specs]
+    hero_slots = [sl for _, sl, _, _ in parsed_specs]
+    group_ids = [gid for _, _, gid, _ in parsed_specs]
+    k_rots: List[int] = []
+    flip_xs: List[bool] = []
+    opp_k_rots: List[int] = []
+    for i, (s, _, gid, _) in enumerate(parsed_specs):
+        if gid >= 0:
+            grp_rng = np.random.default_rng(gid * 31337 + s)
+            k_rots.append(int(grp_rng.integers(0, 4)) if rollout_d4 else 0)
+            flip_xs.append(bool(grp_rng.integers(0, 2)) if rollout_d4 else False)
+            opp_k_rots.append(int(grp_rng.integers(0, 4)))
+        else:
+            k_rots.append(int(rngs[i].integers(0, 4)) if rollout_d4 else 0)
+            flip_xs.append(bool(rngs[i].integers(0, 2)) if rollout_d4 else False)
+            opp_k_rots.append(int(rngs[i].integers(0, 4)))
 
     traj_pf: List[List[np.ndarray]] = [[] for _ in range(m)]
     traj_tf: List[List[np.ndarray]] = [[] for _ in range(m)]
@@ -927,6 +945,7 @@ def collect_episodes_batched_2p(
             advs[t] = last_gae
             rets[t] = np.clip(last_gae + vals[t], -1.2, 1.2)
 
+        gid = int(group_ids[idx])
         stats = {
             "win": 1.0 if win_pid == hp else 0.0,
             "rank": hero_rank,
@@ -935,6 +954,7 @@ def collect_episodes_batched_2p(
             "num_players": 2.0,
             "hero_slot": float(hp),
             "is_hober": 1.0 if hober_opp is not None else 0.0,
+            "group_id": float(gid),
         }
         if t_len == 0:
             empty = {
@@ -950,6 +970,8 @@ def collect_episodes_batched_2p(
                 "returns": np.zeros((0,), np.float32),
                 "step_ticks": np.zeros((0,), np.int32),
                 "is_hober": np.zeros((0,), bool),
+                "group_id": np.zeros((0,), np.int64),
+                "term_rew": np.zeros((0,), np.float32),
                 "aux_owner": np.zeros((0, MAX_PLANETS), np.int64),
                 "aux_ships": np.zeros((0, MAX_PLANETS), np.float32),
                 "aux_valid": np.zeros((0, MAX_PLANETS), bool),
@@ -994,6 +1016,8 @@ def collect_episodes_batched_2p(
             "returns": rets,
             "step_ticks": np.asarray(steps_i, dtype=np.int32),
             "is_hober": np.full((t_len,), hober_opp is not None, dtype=bool),
+            "group_id": np.full((t_len,), gid, dtype=np.int64),
+            "term_rew": np.full((t_len,), float(term_rew), dtype=np.float32),
             "aux_owner": np.stack(traj_ao, axis=0),
             "aux_ships": np.stack(traj_ash, axis=0),
             "aux_valid": np.stack(traj_av, axis=0),
@@ -1468,6 +1492,35 @@ def _trim_batch_n(
     return pf, tf, ef, le, om, pm, act, old_lp, aux_o, aux_s, aux_v
 
 
+def _decoupled_factorized_kl(
+    logp_all: torch.Tensor,
+    ref_logp_all: torch.Tensor,
+    act_mask: torch.Tensor,
+    target_kl_weight: float,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute DirectML-native binary launch KL + weighted conditional target KL."""
+    neg_inf = -1e9
+    tgt_mask = act_mask[..., 1:]
+    has_t = tgt_mask.any(dim=-1, keepdim=True)
+    safe_t = tgt_mask | (~has_t)
+    tgt_mask_f = tgt_mask.to(logp_all.dtype)
+
+    log_p_l_raw = torch.logsumexp(logp_all[..., 1:].masked_fill(~safe_t, neg_inf), dim=-1)
+    log_q_l_raw = torch.logsumexp(ref_logp_all[..., 1:].masked_fill(~safe_t, neg_inf), dim=-1)
+    lp2 = F.log_softmax(torch.stack([logp_all[..., 0], log_p_l_raw], dim=-1), dim=-1)
+    lq2 = F.log_softmax(torch.stack([ref_logp_all[..., 0], log_q_l_raw], dim=-1), dim=-1)
+    p2 = lp2.exp()
+    launch_kl = (p2 * (lp2 - lq2)).sum(dim=-1).clamp_min(0.0)
+
+    log_pt = F.log_softmax(logp_all[..., 1:].masked_fill(~safe_t, neg_inf), dim=-1)
+    log_qt = F.log_softmax(ref_logp_all[..., 1:].masked_fill(~safe_t, neg_inf), dim=-1)
+    pt = log_pt.exp() * tgt_mask_f
+    tgt_kl = (pt * (log_pt - log_qt) * tgt_mask_f).sum(dim=-1).clamp_min(0.0)
+    tgt_w = torch.maximum(p2[..., 1].detach(), lq2[..., 1].exp().detach()).clamp_min(0.20)
+    total_kl = launch_kl + float(target_kl_weight) * tgt_w * tgt_kl
+    return total_kl, launch_kl, tgt_kl
+
+
 def ppo_update(
     policy: PlanetTimelineTransformer,
     anchor: PlanetTimelineTransformer,
@@ -1491,6 +1544,8 @@ def ppo_update(
     max_kl: float = 0.0,
     detach_value: bool = False,
     exact_factorized_ppo: bool = False,
+    target_kl_weight: float = 0.0,
+    use_group_grpo: bool = False,
     temperature: float = 0.75,
     target_temperature: float = 0.30,
     launch_threshold: float = 0.50,
@@ -1502,6 +1557,8 @@ def ppo_update(
             "loss": 0.0,
             "kl": 0.0,
             "anchor_kl": 0.0,
+            "launch_kl": 0.0,
+            "target_kl": 0.0,
             "entropy": 0.0,
             "val_loss": 0.0,
             "aux_loss": 0.0,
@@ -1523,19 +1580,41 @@ def ppo_update(
             return out.astype(np.float32)
         return np.clip((g_adv - g_adv.mean()) / (g_adv.std() + 1e-6), -2.5, 2.5).astype(np.float32)
 
-    is_hober_arr = rollout.get("is_hober")
-    if (
-        is_hober_arr is not None
-        and len(is_hober_arr) == n
-        and int(np.sum(is_hober_arr)) >= 16
-        and int(np.sum(~is_hober_arr)) >= 16
-    ):
-        # GRPO-style opponent-group planet-weighted advantage normalization: keeps live Boss wins
-        # strongly positive with zero planet-count bias toward majority-class HOLD.
-        for grp in (is_hober_arr, ~is_hober_arr):
-            adv[grp] = _norm_adv_planet_weighted(adv[grp], valid_cnts[grp])
+    if use_group_grpo and ("group_id" in rollout) and ("term_rew" in rollout):
+        group_ids = rollout["group_id"]
+        term_rews = rollout["term_rew"].astype(np.float64)
+        adv = np.zeros((n,), dtype=np.float32)
+        for gid in np.unique(group_ids):
+            if gid < 0:
+                continue
+            g_mask = group_ids == gid
+            g_r = term_rews[g_mask]
+            if float(g_r.max() - g_r.min()) < 1e-4:
+                continue  # All K won or all K lost -> zero noisy gradient
+            g_w = valid_cnts[g_mask]
+            w_sum = float(g_w.sum())
+            if w_sum <= 0.0:
+                continue
+            mean_r = float((g_r * g_w).sum() / w_sum)
+            var_r = float((((g_r - mean_r) ** 2) * g_w).sum() / w_sum)
+            std_r = float(np.sqrt(max(var_r, 1e-6)))
+            g_adv = np.clip((g_r - mean_r) / (std_r + 1e-6), -2.5, 2.5)
+            g_adv = g_adv - float((g_adv * g_w).sum() / w_sum)
+            adv[g_mask] = g_adv.astype(np.float32)
     else:
-        adv = _norm_adv_planet_weighted(adv, valid_cnts)
+        is_hober_arr = rollout.get("is_hober")
+        if (
+            is_hober_arr is not None
+            and len(is_hober_arr) == n
+            and int(np.sum(is_hober_arr)) >= 16
+            and int(np.sum(~is_hober_arr)) >= 16
+        ):
+            # GRPO-style opponent-group planet-weighted advantage normalization: keeps live Boss wins
+            # strongly positive with zero planet-count bias toward majority-class HOLD.
+            for grp in (is_hober_arr, ~is_hober_arr):
+                adv[grp] = _norm_adv_planet_weighted(adv[grp], valid_cnts[grp])
+        else:
+            adv = _norm_adv_planet_weighted(adv, valid_cnts)
     step_ticks = rollout.get("step_ticks")
     if step_ticks is not None and midgame_adv_weight != 1.0:
         mid_mask = (step_ticks >= 25) & (step_ticks <= 75)
@@ -1562,6 +1641,8 @@ def ppo_update(
     loss_acc = torch.zeros((), device=train_dev)
     kl_acc = torch.zeros((), device=train_dev)
     akl_acc = torch.zeros((), device=train_dev)
+    lkl_acc = torch.zeros((), device=train_dev)
+    tkl_acc = torch.zeros((), device=train_dev)
     ent_acc = torch.zeros((), device=train_dev)
     vl_acc = torch.zeros((), device=train_dev)
     aux_loss_acc = torch.zeros((), device=train_dev)
@@ -1583,7 +1664,7 @@ def ppo_update(
         ref_logp_cache = torch.zeros((n, max_p_total, max_p_total + 1), dtype=torch.float16)
         if want_fixed:
             fixed_logp_cache = torch.zeros((n, max_p_total, max_p_total + 1), dtype=torch.float16)
-        ref_bs = max(batch_size, 512)
+        ref_bs = min(max(batch_size, 256), 256)
         ref_batches = snap_bucket_batches(p_counts, ref_bs, buckets=(24, 32, 44), max_cap=max_p_total, shuffle=False)
         with torch.no_grad():
             for idx_c, cn in ref_batches:
@@ -1725,13 +1806,27 @@ def ppo_update(
                     surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * adv_bn
                     pol_loss = -(torch.min(surr1, surr2) * valid_f).sum() / denom
 
-                    kl_per = (probs_all * (logp_all - ref_logp_all) * act_mask_f).sum(dim=-1).clamp_min(0.0)
+                    if target_kl_weight > 0.0:
+                        kl_per, lkl_per, tkl_per = _decoupled_factorized_kl(
+                            logp_all, ref_logp_all, act_mask, target_kl_weight
+                        )
+                        lkl_mean = (lkl_per * valid_f).sum() / denom
+                        tkl_mean = (tkl_per * valid_f).sum() / denom
+                    else:
+                        kl_per = (probs_all * (logp_all - ref_logp_all) * act_mask_f).sum(dim=-1).clamp_min(0.0)
+                        lkl_mean = logits.sum() * 0.0
+                        tkl_mean = logits.sum() * 0.0
                     kl_mean = (kl_per * valid_f).sum() / denom
                     ent_per = -(probs_all * logp_all * act_mask_f).sum(dim=-1)
                     ent_mean = (ent_per * valid_f).sum() / denom
 
                     if fixed_logp_all is not None:
-                        akl_per = (probs_all * (logp_all - fixed_logp_all) * act_mask_f).sum(dim=-1).clamp_min(0.0)
+                        if target_kl_weight > 0.0:
+                            akl_per, _, _ = _decoupled_factorized_kl(
+                                logp_all, fixed_logp_all, act_mask, target_kl_weight
+                            )
+                        else:
+                            akl_per = (probs_all * (logp_all - fixed_logp_all) * act_mask_f).sum(dim=-1).clamp_min(0.0)
                         anchor_kl_mean = (akl_per * valid_f).sum() / denom
                     else:
                         anchor_kl_mean = logits.sum() * 0.0
@@ -1739,6 +1834,8 @@ def ppo_update(
                     pol_loss = logits.sum() * 0.0
                     kl_mean = logits.sum() * 0.0
                     anchor_kl_mean = logits.sum() * 0.0
+                    lkl_mean = logits.sum() * 0.0
+                    tkl_mean = logits.sum() * 0.0
                     ent_mean = logits.sum() * 0.0
 
                 v_loss = F.mse_loss(val, ret_t)
@@ -1775,6 +1872,8 @@ def ppo_update(
                 loss_acc = loss_acc + total_loss.detach()
                 kl_acc = kl_acc + kl_mean.detach()
                 akl_acc = akl_acc + anchor_kl_mean.detach()
+                lkl_acc = lkl_acc + lkl_mean.detach()
+                tkl_acc = tkl_acc + tkl_mean.detach()
                 ent_acc = ent_acc + ent_mean.detach()
                 vl_acc = vl_acc + v_loss.detach()
                 aux_loss_acc = aux_loss_acc + aux_loss.detach()
@@ -1801,6 +1900,8 @@ def ppo_update(
         "loss": float(loss_acc.item()) / denom_steps,
         "kl": float(kl_acc.item()) / denom_steps,
         "anchor_kl": float(akl_acc.item()) / denom_steps,
+        "launch_kl": float(lkl_acc.item()) / denom_steps,
+        "target_kl": float(tkl_acc.item()) / denom_steps,
         "entropy": float(ent_acc.item()) / denom_steps,
         "val_loss": float(vl_acc.item()) / denom_steps,
         "aux_loss": float(aux_loss_acc.item()) / denom_steps,
@@ -1829,6 +1930,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--iterations", type=int, default=6)
     parser.add_argument("--episodes-per-iter", type=int, default=12)
     parser.add_argument("--mirror-pairs", type=int, default=0, help="Paired-seed 2P map count per iter (2*M episodes).")
+    parser.add_argument("--grpo-k", type=int, default=1, help="Same-seed same-seat counterfactual GRPO group size (1=off, 4=recommended).")
     parser.add_argument("--paired-seeds", action="store_true", help="Force paired-seed rollout mode.")
     parser.add_argument("--workers", type=int, default=min(2, os.cpu_count() or 1))
     parser.add_argument("--train-threads", type=int, default=4)
@@ -1840,6 +1942,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--clip-eps", type=float, default=0.15)
     parser.add_argument("--kl-coef", type=float, default=0.05)
     parser.add_argument("--anchor-kl-coef", type=float, default=0.025)
+    parser.add_argument("--target-kl-weight", type=float, default=0.0, help="Decoupled conditional target-KL weight (0=coupled KL).")
     parser.add_argument("--max-kl", type=float, default=0.0, help="Optional per-epoch approx-KL early-stop ceiling (0=off).")
     parser.add_argument("--detach-value", action="store_true", help="Detach trunk hidden state before value head during PPO updates.")
     parser.add_argument("--aux-coef", type=float, default=0.15)
@@ -1964,10 +2067,15 @@ def main(argv: list[str] | None = None) -> int:
         if (args.hober_share > 0.0 or args.hober_eval_pairs > 0)
         else ""
     )
+    grpo_k = max(1, int(args.grpo_k))
     print(
         f"[RL-League-PPO] Loaded {args.init} | dev={dev_tag} | pool={[n for n, _, _ in pinned_pool]} | "
         f"iters={args.iterations} "
-        + (f"pairs={n_pairs} (2P={2*n_pairs}ep)" if use_paired else f"eps/iter={args.episodes_per_iter}")
+        + (
+            (f"grpo={n_pairs}x{grpo_k} (2P={n_pairs*grpo_k}ep)" if grpo_k > 1 else f"pairs={n_pairs} (2P={2*n_pairs}ep)")
+            if use_paired
+            else f"eps/iter={args.episodes_per_iter}"
+        )
         + f" workers={args.workers} rbatch={args.rollout_batch} async={args.async_rollout} | lr={args.lr} clip={args.clip_eps} kl={args.kl_coef} akl={args.anchor_kl_coef} "
         f"ema={args.teacher_ema} aux={args.aux_coef} shaping={args.shaping_coef} gamma={args.gamma} lam={args.gae_lambda} T={args.temperature} "
         f"oppT={args.opp_temperature} max_t={args.max_steps} all_in={args.force_all_in} 2p_only={args.two_player_only} mid_adv={args.midgame_adv_weight}{hober_tag}",
@@ -2014,9 +2122,10 @@ def main(argv: list[str] | None = None) -> int:
                         opp_path = _HOBER_SENTINEL
                     elif opp_kind == "pool":
                         u = random.random()
-                        if rolling_snaps and u < 0.30:
+                        snap_thresh = 0.25 if grpo_k > 1 else 0.30
+                        if rolling_snaps and u < snap_thresh:
                             _, opp_path, opp_model = rolling_snaps[-1]
-                        elif u < 0.75:
+                        elif grpo_k > 1 or u < 0.75:
                             _, opp_path, opp_model = random.choice(pinned_pool)
                         else:
                             _, opp_path, opp_model = random.choice(active_pool_arg)
@@ -2029,10 +2138,19 @@ def main(argv: list[str] | None = None) -> int:
                     and all(n_pl == 2 and ok in ("pool", "hober") for n_pl, ok, _, _, _ in pair_specs)
                 )
                 if can_batch:
-                    by_opp: Dict[Optional[str], List[Tuple[int, int]]] = {}
-                    for _, _, map_seed, opp_path, _ in pair_specs:
-                        by_opp.setdefault(opp_path, []).extend([(map_seed, 0), (map_seed, 1)])
-                    chunk_sz = max(2, (int(args.rollout_batch) // 2) * 2)
+                    by_opp: Dict[Optional[str], List[Tuple[int, ...]]] = {}
+                    if grpo_k > 1:
+                        for g_idx, (_, _, map_seed, opp_path, _) in enumerate(pair_specs):
+                            seat = g_idx % 2
+                            gid = it_idx * 1000 + g_idx
+                            for r_idx in range(grpo_k):
+                                rseed = map_seed * 1009 + r_idx * 97 + seat * 13 + it_idx * 7919
+                                by_opp.setdefault(opp_path, []).append((map_seed, seat, gid, rseed))
+                        chunk_sz = max(grpo_k, (int(args.rollout_batch) // grpo_k) * grpo_k)
+                    else:
+                        for _, _, map_seed, opp_path, _ in pair_specs:
+                            by_opp.setdefault(opp_path, []).extend([(map_seed, 0), (map_seed, 1)])
+                        chunk_sz = max(2, (int(args.rollout_batch) // 2) * 2)
                     # Schedule heaviest chunks (live #2 Hober sparring) first to avoid stragglers
                     ordered_items = sorted(
                         by_opp.items(),
@@ -2248,7 +2366,16 @@ def main(argv: list[str] | None = None) -> int:
                     ep_ranks_4p.append(st["rank"])
 
             splits = sweeps = 0
-            if use_paired:
+            mixed_groups = total_groups = 0
+            if use_paired and grpo_k > 1:
+                grp_wins: Dict[int, List[float]] = {}
+                for _, st in results:
+                    gid = int(st.get("group_id", -1))
+                    if gid >= 0:
+                        grp_wins.setdefault(gid, []).append(st["win"])
+                total_groups = len(grp_wins)
+                mixed_groups = sum(1 for ws in grp_wins.values() if max(ws) - min(ws) > 0.2)
+            elif use_paired:
                 for k in range(0, len(results) - 1, 2):
                     wa = results[k][1]["win"]
                     wb = results[k + 1][1]["win"]
@@ -2292,6 +2419,8 @@ def main(argv: list[str] | None = None) -> int:
                 max_kl=args.max_kl,
                 detach_value=args.detach_value,
                 exact_factorized_ppo=bool(args.exact_factorized_ppo and args.factorized_sample),
+                target_kl_weight=args.target_kl_weight,
+                use_group_grpo=(grpo_k > 1),
                 temperature=args.temperature,
                 target_temperature=args.target_temperature,
                 launch_threshold=args.launch_threshold,
@@ -2342,6 +2471,7 @@ def main(argv: list[str] | None = None) -> int:
                     force_all_in=args.force_all_in,
                     launch_threshold=args.launch_threshold,
                     hober_eval_pairs=args.hober_eval_pairs,
+                    decoupled_logit_tta=args.decoupled_logit_tta,
                 )
                 tag_str = " ".join(f"{t}={100*v:.1f}%" for t, v in ev["per_tag_2p"].items())
                 if args.two_player_only:
@@ -2356,17 +2486,27 @@ def main(argv: list[str] | None = None) -> int:
                     save_best = True
                     eval_str += " *BEST*"
 
-            pair_str = f" (sw={sweeps}, sp={splits})" if use_paired else ""
+            if use_paired and grpo_k > 1:
+                pair_str = f" (mix={mixed_groups}/{total_groups})"
+            elif use_paired:
+                pair_str = f" (sw={sweeps}, sp={splits})"
+            else:
+                pair_str = ""
             boss_str = f" boss={wr_hober:4.1f}%" if wr_hober is not None else ""
             vdec_mask = rollout["owned_mask"] & rollout["legal_edges"].any(axis=-1)
             lrate_pct = 100.0 * float((rollout["action_cls"][vdec_mask] > 0).mean()) if np.any(vdec_mask) else 0.0
             warm_str = " [VAL-WARMUP]" if is_val_warmup else ""
             stats_4p = "" if args.two_player_only else f" 4P={wr4:5.1f}%(rk={rk4:.2f})"
             aux_str = f" aux={100*upd['aux_acc']:.1f}%" if args.aux_coef > 0.0 and upd["aux_acc"] > 0.0 else ""
+            fkl_str = (
+                f" lkl={upd['launch_kl']:.4f} tkl={upd['target_kl']:.4f}"
+                if args.target_kl_weight > 0.0
+                else ""
+            )
             print(
                 f"  iter {it:2d}/{args.iterations} ({time.time()-t0:5.1f}s [roll={roll_sec:.1f}s upd={upd_sec:.1f}s]) | "
                 f"states={len(rollout['returns']):4d} | 2P={wr2:5.1f}%{boss_str}{pair_str}{stats_4p} | "
-                f"rew={mean_rew:+.2f} lr%={lrate_pct:4.1f}% kl={upd['kl']:.4f} akl={upd['anchor_kl']:.4f} ent={upd['entropy']:.3f} "
+                f"rew={mean_rew:+.2f} lr%={lrate_pct:4.1f}% kl={upd['kl']:.4f} akl={upd['anchor_kl']:.4f}{fkl_str} ent={upd['entropy']:.3f} "
                 f"vl={upd['val_loss']:.3f}{aux_str}{warm_str}{eval_str}",
                 flush=True,
             )

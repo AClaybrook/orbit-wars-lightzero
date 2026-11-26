@@ -32,6 +32,7 @@ from orbit_wars_bot.planet_transformer import (
     MAX_PLANETS,
     MAX_ROUTE_ETA,
     EncodedPlanetState,
+    compute_ships_for_capture,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -72,51 +73,7 @@ def _compute_ships_for_capture(
     max_timesteps: int = _MAX_TIMESTEPS,
 ) -> np.ndarray:
     """Compute exact `ships_for_capture(planet, dt, player)` matching Hober's Rust ledger."""
-    n = int(shared_physics["n"])
-    if n == 0:
-        return np.zeros((0, max_timesteps), dtype=np.int32)
-
-    fo = shared_physics["fut_owner"][:, :max_timesteps]  # (n, T)
-    fs = shared_physics["fut_ships"][:, :max_timesteps]  # (n, T)
-    tv = shared_physics["tr_valid"][:, :max_timesteps]   # (n, T)
-    pprod = shared_physics["pprod"]                      # (n,)
-    planet_ids = shared_physics["planet_ids"]
-    arrivals = shared_physics["arrivals"]
-
-    # Default formula (exact whenever no simultaneous arrivals occur on that tick)
-    cap = np.where((fo == player) | (~tv), 0, np.maximum(fs, 0) + 1).astype(np.int32)
-
-    # Refine ticks that have incoming fleet arrivals (mirrors src/movegen.rs lines 154-189)
-    for i, pid in enumerate(planet_ids):
-        arr_list = arrivals.get(pid)
-        if not arr_list:
-            continue
-        by_dt: Dict[int, List[Any]] = {}
-        for a in arr_list:
-            if 1 <= a.eta < max_timesteps:
-                by_dt.setdefault(int(a.eta), []).append(a)
-        for dt, turn_arrs in by_dt.items():
-            if not tv[i, dt] or fo[i, dt] == player:
-                cap[i, dt] = 0
-                continue
-            prev_own = int(fo[i, dt - 1]) if tv[i, dt - 1] else int(fo[i, dt])
-            prev_sh = int(fs[i, dt - 1]) if tv[i, dt - 1] else int(fs[i, dt])
-            pre_sh = prev_sh + (int(pprod[i]) if prev_own != -1 else 0)
-            p_arr = 0
-            other_arr: Dict[int, int] = {}
-            for a in turn_arrs:
-                ao = int(a.owner)
-                if ao == player:
-                    p_arr += int(a.ships)
-                else:
-                    other_arr[ao] = other_arr.get(ao, 0) + int(a.ships)
-            strongest_other = max(other_arr.values(), default=0)
-            if prev_own == player:
-                needed = strongest_other - max(0, pre_sh) - p_arr
-            else:
-                needed = strongest_other + max(0, pre_sh) + 1 - p_arr
-            cap[i, dt] = max(0, int(needed))
-    return cap
+    return compute_ships_for_capture(shared_physics, player, max_timesteps=max_timesteps)
 
 
 def build_hober_inputs_fast(

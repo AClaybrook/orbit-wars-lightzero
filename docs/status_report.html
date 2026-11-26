@@ -66,43 +66,43 @@
   <div class="wrap">
     <header>
       <div>
-        <div class="meta">AClaybrook/orbit-wars-lightzero • High-Elo Neural Tier • Gen 3 → Gen 13 (4.67M PT-v3.5 KD)</div>
-        <h1>Orbit Wars AI — Gen 13 PT-v3.5 Progression &amp; Bot Comparison Report</h1>
-        <p>Single-model 4.67M PT-v3.5 breakthrough taking 21–0–27 (43.8%) off Kaggle #2 Hober Malloc (1800.1) across 48 games, beating Gen 12 PPO 18–0–2 (90.0%), and sweeping Gen 11 &amp; Gen 10 20–0–0 each.</p>
+        <div class="meta">AClaybrook/orbit-wars-lightzero • High-Elo Neural Tier • Gen 3 → Gen 15B (4.67M PT-v3.5 GRPO-it6)</div>
+        <h1>Orbit Wars AI — Gen 15B PT-v3.5 Progression &amp; Bot Comparison Report</h1>
+        <p>Single-model 4.67M PT-v3.5 GRPO-it6 hitting 50.0% (24–0–24) across the 48-game Kaggle #2 Hober Malloc suite (33–0–39 / 45.8% over 72g), beating Gen 14 KD 60%, sweeping Gen 13 PT-v3.5 &amp; PT-v3 70% each, and beating Gen 12 PPO 80%.</p>
       </div>
       <div class="badges">
         <a href="gameplay_viewer.html" class="badge ok">▶ Watch Bot Comparison Battles (33 Matches)</a>
-        <a href="boss_forensics.html" class="badge info">◆ #2 Boss Forensics (Gen 8 → 13)</a>
+        <a href="boss_forensics.html" class="badge info">◆ #2 Boss Forensics (Gen 8 → 15B)</a>
         <a href="wargame_report.html" class="badge info">◆ 3v1 Wargaming Study</a>
-        <span class="badge info">Best: 4.67M PT-v3.5 Gen 13 KD (43.8% vs #2)</span>
+        <span class="badge info">Best: 4.67M PT-v3.5 Gen 15B GRPO-it6 (50.0% 48g / 45.8% 72g vs #2)</span>
       </div>
     </header>
 
     <section class="kpis">
       <div class="card rec-card">
-        <div class="meta">Gen 13 Single-Model vs. #2 Hober (48g)</div>
-        <div class="kpi-val ok">21–0–27 (43.8%)</div>
-        <p>11–13 on 200–223 • 10–14 on 300–323 • P0 12/24, P1 9/24</p>
+        <div class="meta">Gen 15B vs. #2 Hober (48g / 72g)</div>
+        <div class="kpi-val ok">24–0–24 (50.0%)</div>
+        <p>13–11 on 200s (54.2%) • 11–13 on 300s (45.8%) • 33–39 (45.8% 72g)</p>
       </div>
       <div class="card highlight-card">
         <div class="meta">Unseen Ladder vs. Prior Champions (20g)</div>
-        <div class="kpi-val ok">18–2 / 20–0 / 20–0</div>
-        <p>90% vs Gen 12 PPO • Sweeps Gen 11, Gen 10 &amp; subham_v14 100%</p>
+        <div class="kpi-val ok">12–8 / 14–6 / 14–6</div>
+        <p>60% vs Gen 14 • 70% vs both Gen 13 • 80% vs Gen 12 • 4–0 subham_v14</p>
       </div>
       <div class="card">
-        <div class="meta">PT-v3.5 Soft-KD + Logit-TTA</div>
-        <div class="kpi-val pri">0.0525 cal KL</div>
-        <p>val_all 94.5% • l_f1 90.4% • Decoupled Logit-TTA +8.4%</p>
+        <div class="meta">Value &amp; Feature Parity Upgrades</div>
+        <div class="kpi-val pri">75.0% vsign</div>
+        <p>GRPO +18.4% vsign • fv=3 exact ships_for_capture ready (65 tests pass)</p>
       </div>
       <div class="card">
         <div class="meta">Single-Thread CPU Inference Latency</div>
-        <div class="kpi-val pri">53.9–63.0 ms/t</div>
-        <p>72.2–79.6 ms p95 • 15–18× under 1000 ms Kaggle cap</p>
+        <div class="kpi-val pri">58.8–69.0 ms/t</div>
+        <p>82.1–82.5 ms p95 • 14–17× under 1000 ms Kaggle cap</p>
       </div>
     </section>
 
     <nav class="tabs">
-      <button class="tab-btn active" data-tab="high">1. Gen 13 Comparison Battles &amp; Ladder</button>
+      <button class="tab-btn active" data-tab="high">1. Gen 15B Comparison Battles &amp; Ladder</button>
       <button class="tab-btn" data-tab="boss">2. Boss Scaling &amp; Forensics Fixes</button>
       <button class="tab-btn" data-tab="archive">3. Historical Archive (Gen 1–2 &amp; Heuristics)</button>
       <button class="tab-btn" data-tab="commands">4. Reproducible Gen 13 Commands</button>
@@ -235,18 +235,20 @@ pytest -v</pre>
 
   <script>
     const COMPARISON_BATTLES = [
-      { label: "vs. subham_v14 (4g, 1-thread)", wr: 100.0, rec: "4–0–0 (100.0%, 111.8t, 63.0ms)", tone: "fill-ok" },
-      { label: "vs. Gen 11 PPO Champion (20g unseen)", wr: 100.0, rec: "20–0–0 (100.0%, 131.7t)", tone: "fill-ok" },
-      { label: "vs. Gen 10 4M PPO (20g unseen)", wr: 100.0, rec: "20–0–0 (100.0%, 113.4t)", tone: "fill-ok" },
-      { label: "vs. Gen 12 PT-v2 PPO Champion (20g unseen)", wr: 90.0, rec: "18–0–2 (90.0%, 158.5t)", tone: "fill-ok" },
-      { label: "vs. #2 Hober Malloc (48g Full Suite)", wr: 43.8, rec: "21–0–27 (43.8%, P0 12/24, P1 9/24)", tone: "fill-warn" },
-      { label: "vs. #2 Hober Malloc (Seeds 200–223)", wr: 45.8, rec: "11–0–13 (45.8%)", tone: "fill-warn" },
-      { label: "vs. #2 Hober Malloc (Seeds 300–323)", wr: 41.7, rec: "10–0–14 (41.7%)", tone: "fill-warn" }
+      { label: "vs. subham_v14 (4g, 1-thread)", wr: 100.0, rec: "4–0–0 (100.0%, 77.2t, 69.0ms)", tone: "fill-ok" },
+      { label: "vs. Gen 12 PT-v2 PPO (20g unseen)", wr: 80.0, rec: "16–0–4 (80.0%, 167.4t)", tone: "fill-ok" },
+      { label: "vs. Gen 13 PT-v3.5 KD (20g unseen)", wr: 70.0, rec: "14–0–6 (70.0%, 177.2t)", tone: "fill-ok" },
+      { label: "vs. Gen 13 PT-v3 KD (20g unseen)", wr: 70.0, rec: "14–0–6 (70.0%, 177.1t)", tone: "fill-ok" },
+      { label: "vs. Gen 14 PT-v3.5 R7 KD (20g unseen)", wr: 60.0, rec: "12–0–8 (60.0%, 246.3t)", tone: "fill-ok" },
+      { label: "vs. #2 Hober Malloc (48g Boss Suite)", wr: 50.0, rec: "24–0–24 (50.0%: 200s 54.2%, 300s 45.8%)", tone: "fill-ok" },
+      { label: "vs. #2 Hober Malloc (72g Incl. 400–423)", wr: 45.8, rec: "33–0–39 (45.8%, 400s 37.5%)", tone: "fill-warn" }
     ];
     const KAGGLE_LADDER = [
       { name: "#1 Isaiah @ Tufa Labs (200M, B200s)", elo: 1865.1, tag: "Official Kaggle #1", ours: false, boss: true },
       { name: "#2 Hober Malloc (4.3M, 10B RL)", elo: 1800.1, tag: "Local Boss • Kaggle #2", ours: false, boss: true },
-      { name: "4.67M PT-v3.5 Gen 13 KD (Single Model!)", elo: 1796, tag: "Gen 13 • 43.8% vs #2 • 53.9–63.0 ms", ours: true, champ: true },
+      { name: "4.67M PT-v3.5 Gen 15B GRPO-it6 (Champ)", elo: 1798, tag: "Gen 15B • 50.0% 48g / 45.8% 72g vs #2 • 58.8–69.0 ms", ours: true, champ: true },
+      { name: "4.67M PT-v3.5 Gen 14 R7 KD", elo: 1797, tag: "Gen 14 • 54.2% unseen 400s / 45.8% 72g • 70% vs G13", ours: true },
+      { name: "4.67M PT-v3.5 Gen 13 KD", elo: 1796, tag: "Gen 13 • 43.8% 48g / 41.7% 72g • 53.9–63.0 ms", ours: true },
       { name: "4.31M PT-v2 Gen 12 PPO", elo: 1790, tag: "Gen 12 • 33.3% vs #2 • 18–2 vs Gen 11", ours: true },
       { name: "4.31M PT-v2 Gen 12 Soft-KD R3", elo: 1775, tag: "Gen 12 KD • 16.7% vs #2 • 0.098 KL", ours: true },
       { name: "4.31M PT-v1 Gen 11 PPO", elo: 1765, tag: "Gen 11 • 138.8t vs #2 • 33 ms", ours: true },
@@ -260,7 +262,9 @@ pytest -v</pre>
       { name: "subham_v14 (Top Heuristic Ceiling)", elo: 1224, tag: "Kaggle ~1,224 (4–0 Swept)", ours: false }
     ];
     const ABLATIONS = [
-      { name: "Gen 13: 4.67M PT-v3.5 KD (Champion)", method: "4× Conv1D + 7L GeGLU + launch_ctx_head + Decoupled Logit-TTA • cal_kl=0.0525", vsPrior: "18–0–2 vs Gen 12 (90.0%)", boss: "21–0–27 (43.8% 48g!)", ms: "53.9–63.0", hi: true },
+      { name: "Gen 15B: 4.67M PT-v3.5 GRPO-it6 (Champion)", method: "Same-seed K=4 Counterfactual GRPO (T=0.22, target-kl=2.5, vsign=75%)", vsPrior: "14–0–6 vs Gen 13 (70%), 12–0–8 vs Gen 14", boss: "24–0–24 (50.0% 48g / 45.8% 72g)", ms: "58.8–69.0", hi: true },
+      { name: "Gen 14: 4.67M PT-v3.5 R7 KD", method: "70% Wide-Map DAgger (281k) + blind_miss=2.0 • 14 epochs (val_tgt=94.3%)", vsPrior: "14–0–6 vs BOTH Gen 13 (70%)", boss: "33–0–39 (45.8% 72g, 54.2% 400s)", ms: "~55–65" },
+      { name: "Gen 13: 4.67M PT-v3.5 KD", method: "4× Conv1D + 7L GeGLU + launch_ctx_head + Decoupled Logit-TTA • cal_kl=0.0525", vsPrior: "18–0–2 vs Gen 12 (90.0%)", boss: "21–0–27 (43.8% 48g / 41.7% 72g)", ms: "53.9–63.0" },
       { name: "Gen 13: 4.60M PT-v3 KD", method: "4× Conv1D + 7L GeGLU + detach_value • Valid-Planet Packing", vsPrior: "18–0–2 vs PT-v3.5 (mirror)", boss: "17–0–31 (35.4% 48g)", ms: "~55", sub: true },
       { name: "Gen 13: 4.67M PT-v3.5 Low-T PPO (it15)", method: "35-iter Exact Factorized DML PPO (kl<=0.0074, akl<=0.0104)", vsPrior: "40% Peak Eval", boss: "15–0–33 (31.2% 48g)", ms: "53.9–63.0", sub: true },
       { name: "Gen 12: 4.31M PT-v2 PPO (w1_it60)", method: "14-ch Timeline + GeGLU + Factorized Head • 71.9k KD + 2,880g GPU PPO", vsPrior: "18–0–2 vs Gen 11 (90.0%)", boss: "8–0–16 (33.3% 24g, 175.9t)", ms: "33.3" },
@@ -281,7 +285,9 @@ pytest -v</pre>
       { stage: "Gen 13 PT-v3 R6 DAgger KD", method: "244.2k boards, 0.0593 val_kl (Prob-TTA)", g12: "8–0–16 (33.3%)", g24: "16–0–32 (33.3% 48g)", wr: 33.3, len: "167.9t (sim)" },
       { stage: "Gen 13 PT-v3 KD (4.60M)", method: "4× Conv1D + 7-Layer GeGLU + detach_value", g12: "7–0–17 (29.2%)", g24: "17–0–31 (35.4% 48g)", wr: 35.4, len: "—" },
       { stage: "Gen 13 PT-v3.5 PPO (it15)", method: "Exact Factorized Low-T PPO (35 iters, Logit-TTA)", g12: "5–0–19 (20.8%)", g24: "15–0–33 (31.2% 48g)", wr: 31.2, len: "—" },
-      { stage: "Gen 13 PT-v3.5 KD (4.67M Champ)", method: "target_cond_launch + Decoupled Logit-TTA (+8.4% 300s)", g12: "11–0–13 (45.8%)", g24: "21–0–27 (43.8% 48g!)", wr: 43.8, len: "164.5t (4g)" }
+      { stage: "Gen 13 PT-v3.5 KD (4.67M)", method: "target_cond_launch + Decoupled Logit-TTA (+8.4% 300s)", g12: "11–0–13 (45.8%)", g24: "21–0–27 (43.8% 48g / 41.7% 72g)", wr: 43.8, len: "164.5t (4g)" },
+      { stage: "Gen 14 PT-v3.5 R7 KD (4.67M)", method: "281k Wide-Map DAgger + blind_miss=2.0 (val_tgt=94.3%)", g12: "11–0–13 (45.8%)", g24: "33–0–39 (45.8% 72g, 54.2% 400s)", wr: 45.8, len: "186.7t" },
+      { stage: "Gen 15B PT-v3.5 GRPO-it6 (Champ)", method: "Same-seed K=4 Counterfactual GRPO + target-kl=2.5 (75% vsign)", g12: "13–0–11 (54.2%)", g24: "24–0–24 (50.0% 48g / 45.8% 72g!)", wr: 50.0, len: "185.0t" }
     ];
     const ELO_2P = [
       { name: "LightZero v3 (Gen 2)", elo: 2300.3, ci: [2044, 2980], wdl: "19-0-1", wr: 95.0, ours: true },

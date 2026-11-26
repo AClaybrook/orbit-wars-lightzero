@@ -331,3 +331,35 @@ This log tracks calibrated **Kaggle-equivalent Elo** estimates (anchored against
 
 - **Graphics & Replay Viewers Updated:** Embedded 5 compact Gen 13 `PT-v3.5` comparison replays (wins vs. `#2 Hober Malloc` from P0 & P1, unseen series win vs. `Gen 12 PPO`, and a loss forensics case) into `docs/gameplay_viewer.html` (33 matches total) and updated `docs/status_report.html` and `docs/boss_forensics.html`.
 - **Promotion Summary:** `checkpoints/planet_transformer_best.pt` promoted to `Gen 13 PT-v3.5 KD (4.67M)` (`21–0–27 / 43.8%` vs. `#2 Hober Malloc`, `18–0–2 / 90.0%` vs. Gen 12 PPO, `20–0–0` sweeps of Gen 11 & Gen 10 PPO, `4–0–0` vs. `subham_v14`, `53.91–63.04 ms/turn` 1-thread CPU, auto-enabled `decoupled_logit_tta=True`, recommended threshold `t=0.53`). Retained `planet_transformer_gen13_4m_ptv35_kd.pt`, `planet_transformer_gen13_4m_ptv3_kd.pt`, and `planet_transformer_gen13_ptv35_ppo.pt`.
+
+---
+
+### Generation 14 & 15B (2026-11-26): Wave 14 Wide-Map R7 KD (`54.2%` Unseen `400–423`) + Wave 15B Same-Seed GRPO (`24–0–24 / 50.0%` 48g Boss Suite, `14–0–6` Over Both Gen 13 Models!)
+
+- **Wave 14 — Wide-Map R7 DAgger + Blind-Miss Calibration (`planet_transformer_gen14_ptv35_r7_kd.pt`, `4.67M PT-v3.5`):**
+  - **Loss Forensics Motivation:** Audited `Gen 13 PT-v3.5` losses across `48g`: wins averaged `start_dist = 85.3` vs. losses `97.0` (`+11.7` wider), and `56.7%` (`173/305`) of critical divergence-window disagreements were blind early `false_hold` (`59.5%` with `p_launch < 0.40`).
+  - **Data & Training:** Collected `280` on-policy games (`70%` wide maps `start_dist >= 88`, `26,777` dense boards merged into `268,971` train + `12,000` unseen val), trained `14` epochs on RX 6950 XT DirectML (`0` fallbacks) with `--cliff-boost 1.6` + new `--blind-miss-boost 2.0`: `val_tgt = 94.3%`, `l_f1 = 90.8%` (`r7_val_tgt = 92.6%`, `r7_f1 = 87.5%`).
+  - **Benchmarks (`8× D4`, `t=0.53`):**
+    - **72g vs. `#2 Hober Malloc`:** **`33–0–39 (45.8%)`** vs. Gen 13 `30–0–42 (41.7%)` — **`200–223`: `11–0–13 (45.8%)`**, `300–323`: `9–0–15 (37.5%)`, unseen **`400–423`: `13–0–11 (54.2%)`** (vs. Gen 13's `9–0–15 / 37.5%`).
+    - **Eliminated `PT-v3` Mirror Counter:** **`14–0–6 (70.0%)` vs. `Gen 13 PT-v3.5 KD`**, **`14–0–6 (70.0%)` vs. `Gen 13 PT-v3 KD`** (reversing `2–0–18`), **`18–0–2 (90.0%)` vs. `Gen 12 PPO`**.
+- **Wave 15B — Same-Seed Counterfactual GRPO (`planet_transformer_gen15b_grpo.pt` -> Promoted to `checkpoints/planet_transformer_best.pt`):**
+  - Implemented DirectML-native `--target-kl-weight 2.5` (preserving target selection accuracy), `EnsemblePlanetTransformerAgent(decoupled_logit=True)`, and `--grpo-k 4` same-seed counterfactual trajectory groups (`T_l=0.22`, `T_t=0.15`, `80%` live `#2 Hober Malloc`, `0` fallbacks).
+  - Iter `6` simultaneously boosted unseen R7 `F1` (`85.6% → 85.7%`), `tgt` (`84.6% → 84.9%`), and **`vsign` (`56.6% → 75.0%`, `+18.4%`)**, whereas longer trajectory-level RL (`it10–30`) drifted on borderline Launch/Hold flips (`F1 → 75.1%`).
+  - **Verified `Gen 15B PT-v3.5 GRPO-it6` Results (`t=0.53`, `8× D4`, 1-Thread CPU):**
+
+| Matchup (`Gen 15B GRPO-it6` vs. Opponent) | Arena / Games | Score | Win Rate | Avg Len | 1-Thread Latency |
+| --- | --- | --- | ---: | ---: | ---: |
+| **`Gen 15B` vs. `#2 Hober Malloc` (48g Suite)** | 2P (`200–223` + `300–323`, 48g) | **`24–0–24`** (`200s=13/24, 300s=11/24`) | **`50.0%`** | `182.6t` | **`58.80 ms/t`** (`82.10 ms` p95) |
+| **`Gen 15B` vs. `#2 Hober Malloc` (72g Full)** | 2P (`200–223` + `300–323` + `400–423`, 72g) | **`33–0–39`** (`P0=20/36, P1=13/36`) | **`45.8%`** | `185.0t` | **`58.80 ms/t`** |
+| **`Gen 15B` vs. `Gen 14 PT-v3.5 R7 KD`** | 2P (`seeds 990–999`, 20g unseen) | **`12–0–8`** | **`60.0%`** | `246.3t` | `58.8–69.0 ms/t` |
+| **`Gen 15B` vs. `Gen 13 PT-v3.5 KD`** | 2P (`seeds 990–999`, 20g unseen) | **`14–0–6`** | **`70.0%`** | `177.2t` | `58.8–69.0 ms/t` |
+| **`Gen 15B` vs. `Gen 13 PT-v3 KD`** | 2P (`seeds 990–999`, 20g unseen) | **`14–0–6`** | **`70.0%`** | `177.1t` | `58.8–69.0 ms/t` |
+| **`Gen 15B` vs. `Gen 12 PPO`** | 2P (`seeds 990–999`, 20g unseen) | **`16–0–4`** | **`80.0%`** | `167.4t` | `58.8–69.0 ms/t` |
+| **`Gen 15B` vs. `subham_v14`** | 2P (`seeds 200–203`, 4g, 1-thread) | **`4–0–0`** | **`100.0%`** | `77.2t` | **`68.97 ms/t`** (`82.47 ms` p95) |
+
+- **Definitive Lookahead Search Ablation vs. `#2 Hober Malloc` (200s–223s / 24g):**
+  - Wave 14A (`Gen 13 PT-v3.5`, `H=8`): `9–0–15` (`37.5%`, `185 ms/t` mean, `661 ms` p95) vs. greedy `11–0–13` (`45.8%`).
+  - Stage 16A (`Gen 15B it6`, `vsign=75.0%`, `H=12`, replan `3,6,9`): `6–0–18` (`25.0%`, `310.5 ms/t` mean, `661.5 ms` p95) vs. greedy `13–0–11` (`54.2%`). Pure greedy 8× D4 inference is strictly stronger against `#2`.
+- **Stage 16B Feature Infrastructure Prepared (`65` Scoped Tests Passing):**
+  - Discovered `timeline_feats[:, :, 12]` approx `cap_need` differed from `#2`'s exact simultaneous-arrival `ships_for_capture` on `74.2%` (`233/314`) of live ticks; implemented exact `compute_ships_for_capture` + `feature_version=3` (`orbit_wars_bot/planet_transformer.py`, shared with `orbit_wars_bot/hober_sparring.py`) and `--target-kl-weight` in `scripts/distill_soft_kd.py`.
+- **Promotion Summary:** `checkpoints/planet_transformer_best.pt` promoted to **`Gen 15B PT-v3.5 GRPO-it6`** (`24–0–24 / 50.0%` on 48g Boss Suite, `33–0–39 / 45.8%` on 72g, `70.0%` vs. both `Gen 13` models, `60.0%` vs. `Gen 14 KD`, `4–0–0` vs. `subham_v14`, `58.80–68.97 ms/t`).
