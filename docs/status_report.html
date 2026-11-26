@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Orbit Wars AI — Gen 12 PT-v2 Progression &amp; Benchmark Report</title>
+  <title>Orbit Wars AI — Gen 13 PT-v3.5 Progression &amp; Benchmark Report</title>
   <style>
     :root {
       --bg: #0f172a; --card: #1e293b; --border: #334155; --text: #f1f5f9;
@@ -56,6 +56,10 @@
     pre { margin: 8px 0 0; padding: 12px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); overflow-x: auto; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     a.pill-link { color: var(--primary); text-decoration: none; font-weight: 600; }
     a.pill-link:hover { text-decoration: underline; }
+    .callout { margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); font-size: 12.5px; color: var(--muted); }
+    .callout strong { color: var(--text); }
+    details.history { margin-top: 12px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; background: var(--bg); }
+    details.history summary { cursor: pointer; font-size: 12.5px; font-weight: 600; color: var(--primary); }
   </style>
 </head>
 <body>
@@ -114,6 +118,9 @@
           <a href="gameplay_viewer.html" class="pill-link">▶ Replay all featured Gen 13 battles →</a>
         </div>
         <div id="battle-bars" style="margin-top:12px;"></div>
+        <div class="callout">
+          <strong>Bottom line:</strong> Promoted single-model <strong>Gen 13 PT-v3.5 KD (4.67M)</strong> hits <strong>43.8% (21–0–27)</strong> vs. Kaggle #2 Hober Malloc, beats Gen 12 PPO <strong>90.0% (18–0–2)</strong>, and sweeps Gen 11, Gen 10, and <code>subham_v14</code> 100%. <em>Note on mirror matchups:</em> against its sibling Gen 13 <code>PT-v3 KD</code> (<code>35.4%</code> vs. #2), <code>PT-v3.5</code> shows a non-transitive style counter (<code>2–0–18</code> / <code>10.0%</code> on seeds 990–999) despite leading <code>#2</code> by <code>+8.4%</code>.
+        </div>
       </div>
 
       <div class="card">
@@ -123,7 +130,7 @@
       </div>
 
       <div class="card">
-        <h2>Generation-by-Generation Head-to-Head &amp; Boss Progression (Gen 3 → Gen 13)</h2>
+        <h2>Recent Generations vs. #2 Hober Malloc (Gen 11 → Gen 13)</h2>
         <p>Every model benchmarked on exact Kaggle physics with 8× D4 test-time augmentation and single-thread CPU latency.</p>
         <div style="overflow-x:auto;">
           <table>
@@ -136,6 +143,20 @@
             <tbody id="ablation-tbody"></tbody>
           </table>
         </div>
+        <details class="history">
+          <summary>Show older historical progression (Gen 3 → Gen 10, 6 entries)</summary>
+          <div style="overflow-x:auto;">
+            <table>
+              <thead>
+                <tr>
+                  <th>Model Generation</th><th>Params / Method</th><th class="num">vs. Prior Gen (2P)</th>
+                  <th class="num">vs. #2 Hober (1800.1)</th><th class="num">Mean (ms)</th>
+                </tr>
+              </thead>
+              <tbody id="ablation-history-tbody"></tbody>
+            </table>
+          </div>
+        </details>
       </div>
     </section>
 
@@ -218,9 +239,9 @@ pytest -v</pre>
       { label: "vs. Gen 11 PPO Champion (20g unseen)", wr: 100.0, rec: "20–0–0 (100.0%, 131.7t)", tone: "fill-ok" },
       { label: "vs. Gen 10 4M PPO (20g unseen)", wr: 100.0, rec: "20–0–0 (100.0%, 113.4t)", tone: "fill-ok" },
       { label: "vs. Gen 12 PT-v2 PPO Champion (20g unseen)", wr: 90.0, rec: "18–0–2 (90.0%, 158.5t)", tone: "fill-ok" },
-      { label: "vs. Gen 13 PT-v3 KD (20g unseen mirror)", wr: 10.0, rec: "2–0–18 (10.0% mirror; +8.4% vs #2)", tone: "fill-pri" },
       { label: "vs. #2 Hober Malloc (48g Full Suite)", wr: 43.8, rec: "21–0–27 (43.8%, P0 12/24, P1 9/24)", tone: "fill-warn" },
-      { label: "vs. #2 Hober Malloc (200–223 / 300–323)", wr: 45.8, rec: "11–0–13 (45.8%) / 10–0–14 (41.7%)", tone: "fill-warn" }
+      { label: "vs. #2 Hober Malloc (Seeds 200–223)", wr: 45.8, rec: "11–0–13 (45.8%)", tone: "fill-warn" },
+      { label: "vs. #2 Hober Malloc (Seeds 300–323)", wr: 41.7, rec: "10–0–14 (41.7%)", tone: "fill-warn" }
     ];
     const KAGGLE_LADDER = [
       { name: "#1 Isaiah @ Tufa Labs (200M, B200s)", elo: 1865.1, tag: "Official Kaggle #1", ours: false, boss: true },
@@ -293,12 +314,15 @@ pytest -v</pre>
       }).join("");
     }
     function renderAblations() {
-      document.getElementById("ablation-tbody").innerHTML = ABLATIONS.map(r => `
+      const rowHtml = r => `
         <tr class="${r.hi ? "ours-row" : r.sub ? "sub-row" : ""}">
           <td>${r.name}</td><td style="color:var(--muted)">${r.method}</td>
           <td class="num mono ok">${r.vsPrior}</td>
           <td class="num mono ${r.hi ? "ok" : ""}">${r.boss}</td><td class="num mono">${r.ms}</td>
-        </tr>`).join("");
+        </tr>`;
+      document.getElementById("ablation-tbody").innerHTML = ABLATIONS.slice(0, 7).map(rowHtml).join("");
+      const hist = document.getElementById("ablation-history-tbody");
+      if (hist) hist.innerHTML = ABLATIONS.slice(7).map(rowHtml).join("");
     }
     function renderBossStudy() {
       document.getElementById("boss-bars").innerHTML = BOSS_PROGRESSION.map(r =>

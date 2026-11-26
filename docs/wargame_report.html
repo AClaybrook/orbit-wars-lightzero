@@ -6,9 +6,38 @@
   <title>Orbit Wars — 3v1 Coalition Wargaming Explorer</title>
   <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
   <style>
+    :root {
+      --background: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --foreground: #f1f5f9;
+      --muted-foreground: #94a3b8;
+      --primary: #38bdf8;
+      --primary-foreground: #082f49;
+      --success: #34d399;
+      --warning: #fbbf24;
+      --error: #f87171;
+      --canvas-bg: #0b1120;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --background: #f8fafc;
+        --card: #ffffff;
+        --border: #e2e8f0;
+        --foreground: #0f172a;
+        --muted-foreground: #475569;
+        --primary: #0284c7;
+        --primary-foreground: #ffffff;
+        --success: #059669;
+        --warning: #d97706;
+        --error: #dc2626;
+        --canvas-bg: #f1f5f9;
+      }
+    }
+    html, body { background: var(--background); color: var(--foreground); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     .tab-panel { display: none; }
     .tab-panel.active { display: block; }
-    canvas { touch-action: none; }
+    canvas { touch-action: none; background: var(--canvas-bg); }
     /* Crisp hover/focus '?' info bubble */
     .tip { position: relative; display: inline-flex; align-items: center; }
     .tip-btn {
@@ -54,10 +83,13 @@
       </div>
       <div class="flex flex-wrap gap-2 text-xs font-semibold">
         <a href="gameplay_viewer.html" class="px-3 py-1.5 rounded-full bg-[var(--card)] border border-[var(--border)] text-[var(--primary)] no-underline">
-          ▶ Watch 3v1 Replays
+          ▶ Watch Replays (33)
         </a>
         <a href="status_report.html" class="px-3 py-1.5 rounded-full bg-[var(--card)] border border-[var(--border)] text-[var(--muted-foreground)] no-underline">
-          Model Progression
+          ← Benchmark Report
+        </a>
+        <a href="boss_forensics.html" class="px-3 py-1.5 rounded-full bg-[var(--card)] border border-[var(--border)] text-[var(--muted-foreground)] no-underline">
+          Boss Forensics
         </a>
       </div>
     </header>
@@ -441,7 +473,14 @@
       [0, 0, 0, 0, 0]
     ];
 
-    const cssVar = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#888";
+    const CSS_FALLBACK = {
+      "--background": "#0f172a", "--card": "#1e293b", "--border": "#334155",
+      "--foreground": "#f1f5f9", "--muted-foreground": "#94a3b8",
+      "--primary": "#38bdf8", "--primary-foreground": "#082f49",
+      "--success": "#34d399", "--warning": "#fbbf24", "--error": "#f87171",
+      "--canvas-bg": "#0b1120"
+    };
+    const cssVar = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim() || CSS_FALLBACK[name] || "#94a3b8";
     function heatColor(p) {
       const c = Math.max(0, Math.min(1, p));
       if (c < 0.5) {
@@ -504,7 +543,7 @@
       if (!canvas) return;
       const ctx = canvas.getContext("2d");
       const W = canvas.width, H = canvas.height;
-      const fg = cssVar("--foreground"), muted = cssVar("--muted-foreground"), bg = cssVar("--background"), border = cssVar("--border");
+      const fg = cssVar("--foreground"), muted = cssVar("--muted-foreground"), bg = cssVar("--canvas-bg"), border = cssVar("--border");
       ctx.clearRect(0, 0, W, H); ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
 
       const bossElo = +document.getElementById("sl-boss-elo").value;
@@ -684,7 +723,7 @@
       const canvas = document.getElementById("canvas-coord-map");
       if (!canvas) return;
       const ctx = canvas.getContext("2d"), W = canvas.width, H = canvas.height;
-      const fg = cssVar("--foreground"), muted = cssVar("--muted-foreground"), bg = cssVar("--background");
+      const fg = cssVar("--foreground"), muted = cssVar("--muted-foreground"), bg = cssVar("--canvas-bg");
       ctx.clearRect(0, 0, W, H); ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
 
       const padL = 112, padR = 16, padT = 26, padB = 46;
@@ -735,7 +774,7 @@
       const canvas = document.getElementById("canvas-res-map");
       if (!canvas) return;
       const ctx = canvas.getContext("2d"), W = canvas.width, H = canvas.height;
-      const fg = cssVar("--foreground"), muted = cssVar("--muted-foreground"), bg = cssVar("--background");
+      const fg = cssVar("--foreground"), muted = cssVar("--muted-foreground"), bg = cssVar("--canvas-bg");
       ctx.clearRect(0, 0, W, H); ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
 
       const grid = currentResMode === "ff" ? RES_GRID_FF : RES_GRID_FFA;
@@ -853,6 +892,7 @@
       document.getElementById(id).addEventListener("input", updateCalculator)
     );
     window.addEventListener("themechange", drawAll);
+    if (window.matchMedia) window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", drawAll);
 
     updateCalculator();
     drawAll();
