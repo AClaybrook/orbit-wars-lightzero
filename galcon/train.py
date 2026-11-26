@@ -2538,6 +2538,7 @@ def _gen4_ei_worker(
     large_map_prob: float = 0.30,
     lua_opp3_str: str = "",
     filter_draw_policy: bool = False,
+    act_every: int = 2,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     torch.set_num_threads(1)
     return collect_gen4_multisend_ei_dataset(
@@ -2552,6 +2553,7 @@ def _gen4_ei_worker(
         large_map_prob=large_map_prob,
         filter_losing_policy=filter_losing_policy,
         filter_draw_policy=filter_draw_policy,
+        act_every=act_every,
         workers=1,
     )
 
@@ -2569,6 +2571,7 @@ def collect_gen4_multisend_ei_dataset(
     large_map_prob: float = 0.30,
     filter_losing_policy: bool = True,
     filter_draw_policy: bool = False,
+    act_every: int = 2,
     workers: int = 1,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """Collect winning/drawing multi-send trajectories from our Opponent-Adaptive Reactive Search.
@@ -2578,7 +2581,9 @@ def collect_gen4_multisend_ei_dataset(
     as the teacher to distill 2-model Ensemble Search directly into a single fast student.
     When ``filter_draw_policy=True``, boss stalemate draws still supervise the value & aux heads while
     masking passive draw trajectories from policy updates.
+    Set ``act_every=1`` to play full-speed 1-tick tournament cadence (recording alternating even/odd ticks).
     """
+    act_every = max(1, int(act_every))
     if workers > 1 and num_games >= 2:
         n_w = min(int(workers), int(num_games))
         base = num_games // n_w
@@ -2605,6 +2610,7 @@ def collect_gen4_multisend_ei_dataset(
                     large_map_prob,
                     lua3_str,
                     filter_draw_policy,
+                    act_every,
                 )
                 for idx, cnt in enumerate(shards)
             ]
@@ -2613,7 +2619,7 @@ def collect_gen4_multisend_ei_dataset(
         merged_r = _merge_datasets([r[1] for r in results])
         ens_tag = " [EnsembleTeacher]" if ckpt2_str else ""
         print(
-            f"[Galcon Gen4 Multi-Send EI{ens_tag} x{n_w} workers] Merged {len(merged_d.get('val_targets', []))} states "
+            f"[Galcon Gen4 Multi-Send EI{ens_tag} {act_every}t x{n_w} workers] Merged {len(merged_d.get('val_targets', []))} states "
             f"+ {len(merged_r.get('planet_feats', []))} redir states across {num_games} games in {time.time()-t_par:.1f}s",
             flush=True,
         )
@@ -2661,6 +2667,8 @@ def collect_gen4_multisend_ei_dataset(
             neural_value_weight=0.70,
             reactive_mid_ply=True,
             opponent_adaptive=True,
+            enable_def_stream=True,
+            enable_opening_def_guard=True,
             prior_bonus=0.010,
         )
         if isinstance(search_ag.model, GalconGen5Transformer):
@@ -2780,9 +2788,11 @@ def collect_gen4_multisend_ei_dataset(
             snaps_by_p: Dict[int, List[Tuple[int, np.ndarray, np.ndarray]]] = {1: [], 2: []}
 
             while not sim.done:
-                if sim.tick % 2 == 0:
+                if sim.tick % act_every == 0:
                     orders_map: Dict[int, List[Order]] = {}
                     search_pids = (1, 2) if is_selfplay else (our_pid,)
+                    # When playing full 1-tick speed, record alternating even/odd ticks (50/50 split) to stay lean
+                    rec_tick = (act_every >= 2) or (sim.tick % 2 == (g % 2))
                     for pid in search_pids:
                         enc = extract_galcon_features(sim, pid, feature_version=2)
                         so, ss = _snapshot_planet_state(sim, enc.planet_ids, pid)
@@ -2790,8 +2800,8 @@ def collect_gen4_multisend_ei_dataset(
                         best_plan, _, _, best_sc = search_ag.act_with_search_info(sim, pid)
                         orders_map[pid] = best_plan
 
-                        if np.any(enc.owned_mask):
-                            # Store canonical D4 planet features so Gen 4 trains directly in canonical frame
+                        if rec_tick and np.any(enc.owned_mask):
+                            # Store canonical D4 planet features so Gen 4/5 trains directly in canonical frame
                             enc_c = copy.copy(enc)
                             enc_c.planet_feats = canonicalize_galcon_d4(enc.planet_feats)
                             pad = pad_galcon_state(enc_c)
@@ -3065,46 +3075,48 @@ def train_gen4_multisend_supervised(
         val_idx, tr_idx = perm[:n_val], perm[n_val:]
     has_kd = "teacher_ms_prob" in data and kd_alpha > 0.0
 
-    def make_ds(idx):
-        tensors = [
-            torch.from_numpy(data["planet_feats"][idx]),
-            torch.from_numpy(data["timeline_feats"][idx]),
-            torch.from_numpy(data["edge_feats"][idx]),
-            torch.from_numpy(data["legal_edges"][idx]),
-            torch.from_numpy(data["owned_mask"][idx]),
-            torch.from_numpy(data["pad_mask"][idx]),
-            torch.from_numpy(data["ms_target"][idx]),
-            torch.from_numpy(data["ms_frac"][idx]),
-            torch.from_numpy(data["val_targets"][idx]),
-            torch.from_numpy(data["aux_owner"][idx]),
-            torch.from_numpy(data["aux_ships"][idx]),
-        ]
-        if has_kd:
-            tensors.append(torch.from_numpy(data["teacher_ms_prob"][idx]))
-        return TensorDataset(*tensors)
+    # Zero-copy TensorDataset + Subset avoids duplicating GBs of padded edge tensors in RAM
+    full_tensors = [
+        torch.from_numpy(data["planet_feats"]),
+        torch.from_numpy(data["timeline_feats"]),
+        torch.from_numpy(data["edge_feats"]),
+        torch.from_numpy(data["legal_edges"]),
+        torch.from_numpy(data["owned_mask"]),
+        torch.from_numpy(data["pad_mask"]),
+        torch.from_numpy(data["ms_target"]),
+        torch.from_numpy(data["ms_frac"]),
+        torch.from_numpy(data["val_targets"]),
+        torch.from_numpy(data["aux_owner"]),
+        torch.from_numpy(data["aux_ships"]),
+    ]
+    if has_kd:
+        full_tensors.append(torch.from_numpy(data["teacher_ms_prob"]))
+    full_ds = TensorDataset(*full_tensors)
 
     tr_lens = data["pad_mask"][tr_idx].sum(axis=1)
     val_lens = data["pad_mask"][val_idx].sum(axis=1)
     tr_loader = DataLoader(
-        make_ds(tr_idx),
+        torch.utils.data.Subset(full_ds, tr_idx.tolist()),
         batch_sampler=_LengthBucketBatchSampler(tr_lens, batch_size, shuffle=True, seed=seed),
     )
     val_loader = DataLoader(
-        make_ds(val_idx),
+        torch.utils.data.Subset(full_ds, val_idx.tolist()),
         batch_sampler=_LengthBucketBatchSampler(val_lens, batch_size, shuffle=False, seed=seed),
     )
 
     redir_loader = None
     if redir_data and len(redir_data.get("planet_feats", [])) >= 16:
+        n_r = len(redir_data["planet_feats"])
+        r_sl = slice(max(0, n_r - 4000), n_r)
         rds = TensorDataset(
-            torch.from_numpy(redir_data["planet_feats"]),
-            torch.from_numpy(redir_data["timeline_feats"]),
-            torch.from_numpy(redir_data["edge_feats"]),
-            torch.from_numpy(redir_data["pad_mask"]),
-            torch.from_numpy(redir_data["cur_dst_idx"]),
-            torch.from_numpy(redir_data["redir_feats"]),
-            torch.from_numpy(redir_data["redir_target"]),
-            torch.from_numpy(redir_data["redir_mask"]),
+            torch.from_numpy(redir_data["planet_feats"][r_sl]),
+            torch.from_numpy(redir_data["timeline_feats"][r_sl]),
+            torch.from_numpy(redir_data["edge_feats"][r_sl]),
+            torch.from_numpy(redir_data["pad_mask"][r_sl]),
+            torch.from_numpy(redir_data["cur_dst_idx"][r_sl]),
+            torch.from_numpy(redir_data["redir_feats"][r_sl]),
+            torch.from_numpy(redir_data["redir_target"][r_sl]),
+            torch.from_numpy(redir_data["redir_mask"][r_sl]),
         )
         redir_loader = DataLoader(rds, batch_size=32, shuffle=True)
 
@@ -4985,6 +4997,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--kd-alpha", type=float, default=0.30)
     parser.add_argument("--arch", choices=["gen4", "gen5"], default="gen4", help="Model architecture for gen4_ei supervised/KD training (gen4=1.29M, gen5=2.93M Edge-Gated WDL).")
     parser.add_argument("--filter-draws", action="store_true", help="Mask boss stalemate draws from EI policy loss while keeping value/aux supervision.")
+    parser.add_argument("--act-every", type=int, default=2, help="Action cadence during EI game collection (1=full-speed tournament cadence, 2=classic 2-tick).")
     parser.add_argument("--save-ei-npz", default="", help="Optional path to save newly collected Gen 4 Search-EI dataset (.npz) for fast replay/pooling.")
     parser.add_argument("--load-ei-npz", default="", help="Optional comma-separated .npz EI replay buffer paths to pool with newly collected games (or train directly if --search-games 0).")
     parser.add_argument("--eval-every", type=int, default=4)
@@ -5126,6 +5139,7 @@ def main(argv: list[str] | None = None) -> int:
                 ckpt_path2=resume_p2,
                 large_map_prob=args.large_map_prob,
                 filter_draw_policy=args.filter_draws,
+                act_every=args.act_every,
                 workers=args.workers,
             )
             if args.save_ei_npz and fresh_data:
@@ -5136,13 +5150,15 @@ def main(argv: list[str] | None = None) -> int:
                 )
             datasets_to_pool.append(fresh_data)
 
-        g4_data = _merge_datasets(datasets_to_pool)
+        g4_data = datasets_to_pool[0] if len(datasets_to_pool) == 1 else _merge_datasets(datasets_to_pool)
+        datasets_to_pool.clear()
         if not g4_data:
             raise ValueError("gen4_ei requires either --search-games > 0 or a non-empty --load-ei-npz buffer.")
         old_r = _load_redir_npz()
         merged_r = _merge_datasets([old_r, g4_redir]) if (old_r and g4_redir) else (g4_redir or old_r)
         if g4_redir:
             _save_redir_npz(merged_r)
+        del old_r, g4_redir
         train_gen4_multisend_supervised(
             g4_data,
             merged_r,

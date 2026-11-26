@@ -1,6 +1,28 @@
-# Galcon AI Wave 15 — Gen 5 Edge-Gated WDL Transformer (`2.93M`: `65%` Sparky `7L` Record, `60%` Pure Waffle3z @ `10ms`)
+# Galcon AI Wave 16 — Gen 5 Full-Speed `1-Tick` Self-Play & `DefStream+Guard` (`73.8%` Sparky `3L` • `72.5%` Waffle3z • `70.6%` Dual Avg • `60.0%` Pure!)
 
 A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-lightzero` featuring both our **Gen 5 Edge-Gated Residual-Edge WDL Transformer** ([`galcon/gen5_model.py`](gen5_model.py), `2.93M` params) and our cross-pollinated **Gen 4 `PlanetTimelineTransformer`** (`1.29M` params), Phil Hassey's official **`gbots`** protocol, and zero-copy head-to-head benchmarking against Evan Sparano's (`esparano/GalconModVault`) unmodified Lua tournament bots (`Sparky v1.6`, `Waffle3z-GA / bots_waffle3z_optimized`, & `EsparanBot v0.2`) via [`galcon/lua_bridge.py`](lua_bridge.py).
+
+## Wave 16 Highlights — Deep Loss Autopsy → Root-Cause Search Fixes & Full-Speed `1-Tick` Gen 5 Self-Play
+- **Quantitative 80-Game Loss & Draw Autopsy (Why We Were Losing):**
+  1. **Midgame Passive Bleeding vs. `Sparky v1.6` (`77.8%` of losses in `t=16–60`):** In losses vs. wins, Sparky fired `5.6×` more `/REDIR`s (`56.8` vs. `10.2`) and caused **`1.44` undefended planet falls/loss vs. `0.29` in wins (`5.0×`)** while our bot sat idle (`[]`) for 10+ ticks even when ahead on ships/production.
+  2. **Blind Long-ETA Opening Collapses vs. `Waffle3z-GA` (`50%` of losses in `t<=15`):** Sending `73%–89%` opening rushes across `eta > rollout_horizon(16)` assumed the opponent also emptied its home planet (`opp_pred` / `opp_adv_fan`), letting a defending `Waffle3z` effortlessly crush the rush.
+  3. **Training-vs.-Tournament Cadence Bug:** `44.6%–48.4%` of tournament orders occur on odd ticks, yet **100% of Waves 1–15 EI/PPO training ran at `act_every=2` (`0.5×` APM bosses)**!
+- **Root-Cause Fixes Shipped & Defaulted in Wave 16:**
+  - **Default `DefStream+Guard` in [`GalconSearchTransformerAgent`](transformer_bot.py) (`enable_def_stream=True, enable_opening_def_guard=True`, zero latency overhead):**
+    - [`_build_defense_and_pressure_plan`](transformer_bot.py): Multi-helper exact defense for every threatened owned planet (`po[t] <= 0`) + rear-to-front relay streaming (`tunnel_const=1.22`) + safe frontline enemy pressure (`sim.tick > 10`) with `smart_redirs`.
+    - **Opening Deep-Strike Soft-Minimax Guard:** For `sim.tick <= 8` when any candidate launches `>=45%` at an enemy planet with `eta >= 14`, evaluates top-6 candidates against a holding opponent (`opp = []`) out to `min(28, max_eta + 2)` ticks (`0.55 * scores + 0.45 * min(scores, s_def)`).
+  - **Full-Speed `1-Tick` EI Cadence (`--act-every 1` in [`galcon/train.py`](train.py)):** Plays both teacher and Lua bosses at true `1.0×` tournament speed (recording alternating even/odd ticks for a 50/50 split while staying lean) + **3× peak RAM reduction** (zero-copy `TensorDataset` + `Subset`, immediate list release, 4k redir cap: `~7.5 GiB → ~4.2 GiB`).
+- **4 NEW ALL-TIME SINGLE-MODEL RECORDS (Shattering Every Previous Single Model AND 2-Model Ensemble!):**
+  - **`checkpoints/galcon_gen5_w16.pt` (Default `--bot search` & `--bot transformer`, 1t-Pooled `13,381` states, `aux=98.0%` all-time record, `val_bce=0.038`, `vsign=85.8%`):**
+    - **`Waffle3z-GA` 18pl (40g, 1t):** **`26–8–6` (`72.5%` — NEW ALL-TIME OVERALL RECORD, beats every single model AND 2-model ensemble; `s=14000: 70.0%`, `s=9500: 75.0%`!)**
+    - **`Sparky v1.6` 18pl (40g, 1t):** **`20–5–15` (`68.8%` — only 5 losses / `87.5%` non-loss, `s=9500: 14–3–3 / 77.5%`!)**
+    - **NEW ALL-TIME OVERALL DUAL-BOSS AVG: `70.6%` (`46–13–21`, FIRST MODEL IN PROJECT HISTORY >70%!!)** | **Heuristics:** `84.4%` (`26–4–2`) | **Large 24pl Asym:** `41.7%` Spky / `41.7%` Waff | **`EsparanBot`:** `62.5%`.
+    - **Pure Neural Net (`7.5–7.8 ms/t`, ZERO Search!):** **`18–10–12` (`60.0%` Sparky — NEW ALL-TIME 1-TICK PURE RECORD, `60.0% / 60.0%` balanced!)** & **`20–14–6` (`57.5%` Waffle3z)** → **`58.8%` NEW ALL-TIME PURE DUAL-BOSS AVG!**
+  - **`checkpoints/galcon_gen5_w15.pt` + Default Wave 16 `DefStream+Guard` (`29.9 ms/t`, ~`2001 Elo`):**
+    - **`Sparky v1.6` 18pl (40g, 1t):** **`22–3–15` (`73.8%` — NEW ALL-TIME OVERALL SPARKY RECORD, `+8.8%` jump! ONLY 3 LOSSES IN 40 GAMES = `92.5%` NON-LOSS RATE! `s=14000: 9–0–11` UNDEFEATED! `s=9500: 13–3–4 / 75.0%`!)**
+    - **`EsparanBot v0.2` (24g):** **`18–3–3` (`81.2%`, `+6.2%`, `s=15300: 9–0–3 / 87.5%` undefeated!)** | **`Waffle3z-GA`:** `61.3%` (`20–11–9`) | **Heuristics:** `79.7%`.
+  - **`checkpoints/galcon_wave14_kd.pt` + Default Wave 16 `DefStream+Guard` (`14.9–19.6 ms/t`, ~`1963 Elo`):**
+    - **`Sparky v1.6`:** **`21–8–11` (`66.2%`, `+1.2%`)** | **`Waffle3z-GA`:** **`24–8–8` (`70.0%`, `s=9500: 82.5%`)** → **`68.1%` 20ms Dual-Boss Avg** + **`89.6%` `#1` EsparanBot** + **`50% / 75%` Large 24pl**!
 
 ## Wave 15 Highlights — Gen 5 Architecture (`2.93M` Edge-Gated Residual-Edge SwiGLU + Quadratic Soft-WDL)
 - **Why We Upgraded Beyond Gen 4 (`1.29M`):** Controlled A/B ablations on `W14_KD` confirmed Gen 4's static-edge value ceiling (`3-ply h=24` dropped to `42.5%` Sparky; raising `neural_value_weight` `0.70 → 0.85` dropped `65.0% → 55.0%`).

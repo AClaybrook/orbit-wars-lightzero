@@ -1223,4 +1223,68 @@ def test_wave15_gen5_edge_gated_wdl_architecture(tmp_path):
     loss.backward()
 
 
+def test_wave16_def_stream_opening_guard_and_1t_ei(tmp_path):
+    """Verify Wave 16 DefStream + Opening Defense Guard defaults, helper plans, and full-speed 1-tick EI collection."""
+    import numpy as np
+    from galcon.gen5_model import build_galcon_gen5_transformer
+    from galcon.sim import GalconSim, SendOrder
+    from galcon.train import collect_gen4_multisend_ei_dataset
+    from galcon.transformer_bot import (
+        GalconSearchTransformerAgent,
+        extract_galcon_features,
+    )
+
+    torch.manual_seed(16)
+    model = build_galcon_gen5_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128, edge_hidden=16)
+    ckpt = tmp_path / "gen5_w16_test.pt"
+    torch.save(
+        {
+            "model_config": model.config,
+            "model_state_dict": model.state_dict(),
+            "has_trained_redir": True,
+            "has_trained_multi_send": True,
+            "use_canonical_d4": True,
+        },
+        ckpt,
+    )
+
+    # 1. Defaults: enable_def_stream and enable_opening_def_guard are enabled by default in Wave 16
+    ag = GalconSearchTransformerAgent(ckpt, use_d4_canonical=True, use_d4_tta=False)
+    assert ag.enable_def_stream is True and ag.enable_opening_def_guard is True
+
+    # 2. _build_defense_and_pressure_plan generates exact defense send for a threatened owned planet
+    sim = GalconSim.create(seed=1601, num_planets=14, width=400.0, height=240.0, symmetric=True)
+    # Give player 1 two owned planets: one threatened by an incoming P2 fleet and one rear helper with surplus
+    my_home = next(p for p in sim.planets.values() if p.owner == 1)
+    opp_home = next(p for p in sim.planets.values() if p.owner == 2)
+    helper = next(p for p in sim.planets.values() if p.owner == 0)
+    helper.owner = 1
+    helper.ships = 60.0
+    my_home.ships = 10.0
+    opp_home.ships = 80.0
+    sim.step({2: [SendOrder(opp_home.id, my_home.id, 60)]})
+    enc = extract_galcon_features(sim, 1, feature_version=2)
+    plan_def = ag._build_defense_and_pressure_plan(sim, enc)
+    assert isinstance(plan_def, list)
+    assert any(isinstance(o, SendOrder) and o.dst_id == my_home.id for o in plan_def)
+
+    # 3. Opening deep-strike guard executes cleanly at tick <= 8 without errors
+    sim_open = GalconSim.create(seed=14002, num_planets=18, width=400.0, height=240.0, symmetric=True)
+    best, cands, scores, best_sc = ag.act_with_search_info(sim_open, 1)
+    assert isinstance(best, list) and len(cands) == len(scores) >= 2 and -1.0 <= best_sc <= 1.0
+
+    # 4. Full-speed 1-tick EI collection (act_every=1) records valid states across even/odd ticks
+    ei_data, _ = collect_gen4_multisend_ei_dataset(
+        ckpt,
+        num_games=1,
+        seed=1602,
+        act_every=1,
+        large_map_prob=0.0,
+        workers=1,
+    )
+    assert len(ei_data.get("val_targets", [])) >= 4
+    assert np.isfinite(ei_data["val_targets"]).all()
+
+
+
 
