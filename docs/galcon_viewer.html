@@ -243,7 +243,7 @@
         ctx.fillStyle = "#0b1120";
         ctx.font = "bold 10px ui-monospace, monospace";
         ctx.textAlign = "center"; ctx.textBaseline = "middle";
-        ctx.fillText(Math.round(ships), tx(fx), ty(fy));
+        ctx.fillText(Math.floor(ships), tx(fx), ty(fy));
       });
 
       m.planets.forEach((row, idx) => {
@@ -268,8 +268,8 @@
       const rc = f.rc || [0, 0];
       document.getElementById("p1Name").textContent = "Blue: " + m.players[0];
       document.getElementById("p2Name").textContent = "Red: " + m.players[1];
-      document.getElementById("p1Stats").textContent = `Ships: ${Math.round(f.s[0])} • Prod: ${Math.round(f.pr[0])}` + (rc[0] > 0 ? ` • /REDIR: ${rc[0]}` : "");
-      document.getElementById("p2Stats").textContent = `Ships: ${Math.round(f.s[1])} • Prod: ${Math.round(f.pr[1])}` + (rc[1] > 0 ? ` • /REDIR: ${rc[1]}` : "");
+      document.getElementById("p1Stats").textContent = `Ships: ${Math.floor(f.s[0])} • Prod: ${Math.round(f.pr[0])}` + (rc[0] > 0 ? ` • /REDIR: ${rc[0]}` : "");
+      document.getElementById("p2Stats").textContent = `Ships: ${Math.floor(f.s[1])} • Prod: ${Math.round(f.pr[1])}` + (rc[1] > 0 ? ` • /REDIR: ${rc[1]}` : "");
       document.getElementById("tickLabel").textContent = `Tick ${f.t} / ${m.ticks} (${(f.t * 0.25).toFixed(1)}s)`;
       const tot = Math.max(1, f.s[0] + f.s[1]);
       document.getElementById("advFill").style.width = `${Math.round(100 * f.s[0] / tot)}%`;

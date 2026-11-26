@@ -2892,6 +2892,56 @@ end
         bridge.close()
 
 
+def test_visualizer_always_floors_fractional_ships():
+    """Visualizer snapshots and HTML/JS labels must always show floor(ships) even for fractional ships."""
+    import math
+    from galcon.record_replays import _floor_tenths, record_galcon_match, render_galcon_viewer_html
+
+    # 1. Snapshot quantization must never round up across an integer boundary
+    for val in (0.0, 0.04, 0.5, 0.96, 0.9999, 4.95, 9.96, math.nextafter(10.0, 0.0), 10.0, 12.34, 99.99):
+        recorded = _floor_tenths(val)
+        assert math.floor(recorded) == math.floor(val), f"_floor_tenths({val!r}) -> {recorded!r} crossed integer boundary"
+        assert recorded <= val + 1e-12
+
+    # 2. Recorded replay frames keep fractional ships floored to tenths (never rounded up to next int)
+    def fractional_send_bot(sim: GalconSim, pid: int):
+        if sim.tick == 0:
+            # Force fractional ships on planet before sending 50% (leaving fractional fleet & planet ships)
+            src_id = 1 if pid == 1 else 2
+            dst_id = 2 if pid == 1 else 1
+            sim.planets[src_id].ships = 19.96
+            return [SendOrder(src_id, dst_id, 50)]
+        return []
+
+    match = record_galcon_match(
+        "Fractional ship floor test",
+        "P1",
+        fractional_send_bot,
+        "P2",
+        fractional_send_bot,
+        seed=42,
+        num_planets=6,
+        max_ticks=4,
+    )
+    # After tick 0 sends 50% of 19.96 (= 9.98), fleet has 9.98 ships -> must record <= 9.9 so floor == 9
+    tick1_fleets = match["frames"][1]["f"]
+    assert len(tick1_fleets) >= 2
+    for fl in tick1_fleets:
+        assert math.floor(fl[1]) == 9, f"Expected floored fleet ships == 9, got recorded {fl[1]}"
+
+    # 3. Both generated viewer HTML and checked-in docs/galcon_viewer.html use Math.floor for fleets, planets, and HUD
+    generated_html = render_galcon_viewer_html([match])
+    checked_in_html = (Path(__file__).resolve().parent.parent / "docs" / "galcon_viewer.html").read_text(encoding="utf-8")
+    for label, html in (("generated", generated_html), ("docs/galcon_viewer.html", checked_in_html)):
+        assert "ctx.fillText(Math.floor(ships), tx(fx), ty(fy));" in html, f"{label}: fleet label must use Math.floor"
+        assert "ctx.fillText(Math.floor(ships), tx(px), ty(py) - 2);" in html, f"{label}: planet label must use Math.floor"
+        assert "Ships: ${Math.floor(f.s[0])}" in html, f"{label}: P1 HUD ships must use Math.floor"
+        assert "Ships: ${Math.floor(f.s[1])}" in html, f"{label}: P2 HUD ships must use Math.floor"
+        assert "ctx.fillText(Math.round(ships)" not in html, f"{label}: found Math.round(ships) in canvas text"
+        assert "Ships: ${Math.round(f.s[" not in html, f"{label}: found Math.round(f.s[...]) in HUD"
+
+
+
 
 
 
