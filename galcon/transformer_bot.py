@@ -2328,7 +2328,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         n = len(enc.planet_ids)
         if n == 0 or not np.any(enc.owned_mask):
             return [], [], [], 0.0
-        eff_budget = max(self.time_budget_sec, 0.30) if n >= 22 else self.time_budget_sec
+        eff_budget = max(self.time_budget_sec, 0.45) if n >= 22 else self.time_budget_sec
         deadline = t0 + eff_budget
 
         redir_enc = (
@@ -2586,7 +2586,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         # Wave 8/9 map-adaptive lookahead: on Large (>=22pl) maps, extend rollout to 22 ticks and 3 reactive plies
         # (66.7% Large 24pl Asym / 50.0% Paired vs Sparky); on <22pl Std/Compact, pair 2-ply h=16 with
         # adversarial focus-fire/soft-minimax (+10% Mixed, +2.5% 18pl Std -> 65.0% @ ~50ms/tick).
-        eff_horizon = max(self.rollout_horizon, 22) if n >= 22 else self.rollout_horizon
+        eff_horizon = max(self.rollout_horizon, 28) if n >= 22 else self.rollout_horizon
         eff_plies = max(self.num_plies, 3) if (n >= 22 and self.reactive_mid_ply) else self.num_plies
         ply_steps = [
             max(1, int(round(eff_horizon * (k + 1) / eff_plies)))

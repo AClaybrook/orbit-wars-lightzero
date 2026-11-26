@@ -236,6 +236,10 @@ def _build_bot(
 
         if checkpoint:
             ckpt = checkpoint
+        elif bot_kind == "transformer" and Path("checkpoints/galcon_gen5_w21_pure.pt").is_file():
+            ckpt = "checkpoints/galcon_gen5_w21_pure.pt"
+        elif bot_kind in ("search", "ensemble", "transformer") and Path("checkpoints/galcon_gen5_w21.pt").is_file():
+            ckpt = "checkpoints/galcon_gen5_w21.pt"
         elif bot_kind == "transformer" and Path("checkpoints/galcon_gen5_w20_pure.pt").is_file():
             ckpt = "checkpoints/galcon_gen5_w20_pure.pt"
         elif bot_kind in ("search", "ensemble", "transformer") and Path("checkpoints/galcon_gen5_w20.pt").is_file():
@@ -261,6 +265,8 @@ def _build_bot(
         if bot_kind == "ensemble":
             if checkpoint2:
                 ckpt2 = checkpoint2
+            elif Path(ckpt).name == "galcon_gen5_w21.pt" and Path("checkpoints/galcon_gen5_w20.pt").is_file():
+                ckpt2 = "checkpoints/galcon_gen5_w20.pt"
             elif Path(ckpt).name == "galcon_gen5_w20.pt" and Path("checkpoints/galcon_gen5_w19.pt").is_file():
                 ckpt2 = "checkpoints/galcon_gen5_w19.pt"
             elif Path(ckpt).name == "galcon_gen5_w19.pt" and Path("checkpoints/galcon_gen5_w18.pt").is_file():

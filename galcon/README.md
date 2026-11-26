@@ -1,18 +1,29 @@
-# Galcon AI Wave 20 — Real Galcon 2 C++ RL Breakthrough (`74.4%` Elo-Weighted • `1892.1` True MLE Elo • `80.0%` Sparky • `1805.5 Elo` Pure!)
+# Galcon AI Wave 21 — Real Galcon 2 C++ Breakthrough (`78.1%` Elo-Weighted • `1946.6` True MLE Elo • `71.25%` Dual-Boss ZERO-SEARCH Pure!)
 
 A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-lightzero` featuring our **Gen 5 Edge-Gated Residual-Edge WDL Transformer** ([`galcon/gen5_model.py`](gen5_model.py), `2.93M` params + fused TorchScript [`FastGen5Infer`](gen5_model.py)), **`esparano`'s real Galcon 2 C++ multi-ship physics simulator** ([`galcon/sim_core.cpp`](sim_core.cpp)), Phil Hassey's official **`gbots`** protocol, and zero-copy head-to-head benchmarking against Evan Sparano's (`esparano/GalconModVault`) unmodified Lua tournament bots (`Sparky v1.6`, `Waffle3z-GA / bots_waffle3z_optimized`, & `EsparanBot v0.2`) via [`galcon/lua_bridge.py`](lua_bridge.py).
+
+## Wave 21 Highlights — Frozen-Trunk WDL Recalibration (`1946.6 Elo` Search!) & Clean Guard-v2 Pure Distillation (`71.25%` Dual-Boss Pure!)
+- **Engine & Efficiency Upgrades ([`galcon/train.py`](train.py), [`galcon/transformer_bot.py`](transformer_bot.py)):**
+  - **2× Faster PPO Rollouts & `val_56g`:** Wired cached fused TorchScript [`FastGen5Infer`](gen5_model.py) + exact-`N` planet-count micro-batching into `_run_gen4_ppo_episodes_batched`, `_run_gen4_val_wave_batched`, and `_fast_gen4_neural_act` (bit-exact `max_diff <= 2.86e-6`, cutting rollout time to `8–15s/iter`!).
+  - **Zero-Drift Fixed-Anchor Value Regularization & Asymmetric Large Maps:** Anchored `--freeze-value-head` PPO scalar value MSE to an immutable starting anchor (`fixed_val_anchor`), doubled asymmetric Large `22–28pl` training arenas (`15% → 30%`), always recorded critical opening ticks `0–6` in 1-tick EI, and extended Large-map (`>=22pl`) search horizon `22 → 28` & budget `0.30s → 0.45s`.
+- **New Real-C++ Search Champion ([`checkpoints/galcon_gen5_w21.pt`](../checkpoints/galcon_gen5_w21.pt), default `--bot search`):**
+  - Collected `9,699` fresh `1-tick` real-C++ Guard-v2 Search states (`160` games across `W20` + Large-heavy `W19`, bringing our 100% real-C++ pool to **`31,815` states**) and recalibrated ONLY the 4-query Attention-Pooling WDL head (`val_*`) on `Gen5_W20`'s frozen trunk (`val_ce: 0.5438 → 0.5238`, `vsign: 89.5% → 92.5%`, zero policy risk!).
+  - Vaulted **`+54.5 Elo` to `1946.6` True MLE Elo (`+188.5 Elo` since C++ reset!)**:
+    - **`Sparky v1.6` 18pl (40g, 1t):** **`32–8–0` (`80.0%`, `s9.5k: 17–3 / 85.0%`!)**
+    - **`Waffle3z-GA` 18pl (40g, 1t):** **`31–9–0` (`77.5%` — ALL-TIME OVERALL RECORD, `s14k: 17–3 / 85.0%`!)**
+    - **`EsparanBot v0.2` (24g, 2t):** **`17–7–0` (`70.8%`, `+16.6%` vs W20, `s15.3k: 10–2 / 83.3%`!)**
+    - **Elo-Weighted (50/40/10):** **`78.08%`** (`+3.66%` vs W20, **`+24.16%` vs W16!**) • **Dual-Boss Avg:** **`78.75%` (`63–17`)** • **Heuristics:** `84.4%`.
+- **New Zero-Search Pure Champion ([`checkpoints/galcon_gen5_w21_pure.pt`](../checkpoints/galcon_gen5_w21_pure.pt), default `--bot transformer`, `7.5 ms/tick`, ZERO Search!):**
+  - Caught & eliminated `--kd-alpha` pre-search prior contamination (`--kd-alpha 0.0` on our `9,699` Guard-v2 Search states → `val_bce=0.020`, `vloss=0.337`, `1851.3 Elo` Pure, `67.5%` Waffle3z / `95%` on `s14k`!), then ran 5 clean Fixed-Anchor Frozen-V PPO iterations:
+    - **`Sparky v1.6` 18pl (40g, 1t, ZERO SEARCH!):** **`30–10–0` (`75.0%` PURE, balanced `75%/75%`!)**
+    - **`Waffle3z-GA` 18pl (40g, 1t, ZERO SEARCH!):** **`27–13–0` (`67.5%` PURE, `+27.5%` vs W20_Pure, balanced `70%/65%`!)**
+    - **Dual-Boss Avg (80g, ZERO SEARCH!):** **`71.25%` (`57–23` — BEATS `Gen5_W19_Search` with ZERO search at `7.5 ms/tick`!)** • **Elo-Weighted:** **`69.08%` (`+8.50%` vs W20_Pure!)** • **Heuristics:** **`90.6%` (`29–3`)**.
 
 ## Wave 20 Highlights — 3-Stage Frozen-Value-Head `1-Tick` C++ PPO (`1892.1 Elo` Search & `1805.5 Elo` Pure!)
 - **Heavy Multi-Stage Frozen-Value-Head `1-Tick` C++ Mirror League PPO (21 Iters / 336 Full Paired-Seed Episodes):**
   - Ran 3 annealed stages (`20A: 7 iters lr=2.2e-5 kl=0.022`, `20B: 7 iters lr=1.5e-5 kl=0.025`, `20C: 7 iters lr=9.0e-6 kl=0.030`) directly from `Gen5_W19` with `--freeze-value-head --v-anchor-coef 0.50` on real Galcon 2 C++ physics + `3,495` 100% real-C++ redirect replay states.
-  - **Stage 20B (`checkpoints/galcon_gen5_w20.pt`, default `--bot search`):** Hit peak Search+Policy synergy (`val_56g comp = 63.3%` all-time record, `75.0%` Pure Sparky) — surging **`+40.8 Elo`** over `W19` to **`1892.1` True MLE Elo (`+134.0 Elo` since the real C++ physics reset!)**:
-    - **`Sparky v1.6` 18pl (40g, 1t):** **`32–8–0` (`80.0%` — ALL-TIME OVERALL SPARKY RECORD, perfectly balanced `s14k: 16–4 (80.0%)` & `s9.5k: 16–4 (80.0%)`!)**
-    - **`Waffle3z-GA` 18pl (40g, 1t):** **`29–11–0` (`72.5%` — `s14k: 15–5 (75.0%)`, `s9.5k: 14–6 (70.0%)`)**
-    - **Dual-Boss Avg (`Sparky + Waffle3z`, 80g):** **`76.25%` (`61–19–0`, ALL-TIME RECORD!)** | **Elo-Weighted (50/40/10):** **`74.42%` (`+6.96%` vs `W19`, `+20.50%` vs `W16`!)** | **Heuristics:** `84.4%` (`27–5`).
-  - **Stage 20C (`checkpoints/galcon_gen5_w20_pure.pt`, default `--bot transformer` Pure, `7.5 ms/t`, ZERO Search!):** First Pure neural net in project history to break **`1800+` Elo on real Galcon 2 C++ physics (`1805.5` True MLE Elo, `+40.2 Elo` vs `W19_Pure`, `+123.1 Elo` since C++ reset!)**:
-    - **`Sparky v1.6` 18pl (40g, 1t):** **`30–10–0` (`75.0%` PURE WITH ZERO SEARCH! Perfectly balanced `s14k: 15–5 (75.0%)` & `s9.5k: 15–5 (75.0%)`!)**
-    - **`EsparanBot v0.2` (24g, 2t):** **`17–7–0` (`70.8%`)** | **`Waffle3z-GA`:** `40.0%` (`s14k: 60.0%`) | **Elo-Weighted:** **`60.58%` (`+4.87%` vs `W19_Pure`)**.
-  - **Same-Lineage `50/50` Model Soup (`W20_B + W20_C`, `val_* max_diff=0.00`):** Scored **`71.25%` / `1883.7 Elo`** Search with a **`75.0%` Waffle3z record (`s14k: 18–2 / 90.0%`!)** and `93.8%` Heuristics (`W20_C_Search` went `32–0 / 100.0%` Heuristics), confirming a clean Search-vs-Pure PPO sweet spot after 28 cumulative frozen-value-head PPO iters — pointing directly to a **Wave 21 high-Elo (`1892 Elo`) C++ EI WDL value-head recalibration + Large 24pl refresh** to push past `1950–2000+ Elo`!
+  - **Stage 20B (`checkpoints/galcon_gen5_w20.pt`):** **`74.42%` Elo-Weighted / `1892.1` True MLE Elo Search** (`80.0%` Sparky, `72.5%` Waffle3z, `84.4%` Heuristics).
+  - **Stage 20C (`checkpoints/galcon_gen5_w20_pure.pt`):** **`60.58%` Elo-Weighted / `1805.5` True MLE Elo Pure** (`75.0%` Pure Sparky, `70.8%` EsparanBot).
 
 ## Wave 19 Highlights — Unified Single-Model Champion (`galcon_gen5_w19.pt`: `1851.3 Elo` Search & `1765.3 Elo` Pure!)
 - **Loss-Autopsy Search Upgrades ([`galcon/transformer_bot.py`](transformer_bot.py)):**
@@ -28,17 +39,19 @@ A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-ligh
 | `Gen5_W16_Pure` (old physics, `5ms`) | 50.0% | 20.0% | **75.0%** | 40.50% | 1682.4 | — | — |
 | `Gen5_W17_Pure` (old physics, `6ms`) | 47.5% | 30.0% | 58.3% | 41.58% | 1675.1 | — | — |
 | `Gen5_W18_Pure` (`galcon_gen5_w18_pure.pt`, `6ms`) | 58.8% | 40.0% | 62.5% | 51.62% | 1743.7 | — | — |
-| `Gen5_W19_Pure` (`galcon_gen5_w19.pt`, `7ms`) | 63.8% | **45.0%** | 58.3% | 55.71% | 1765.3 | — | — |
-| `Gen5_W20_B_Pure` (`galcon_gen5_w20.pt`, `7.5ms`) | 70.0% (`s14k: 85%`) | 40.0% | 70.8% | 58.08% | 1790.7 | — | — |
-| **`Gen5_W20_Pure` (`galcon_gen5_w20_pure.pt`, `7.5ms`)** | **75.0%** (`30–10`, `75/75`) | 40.0% (`s14k: 60%`) | 70.8% | **60.58%** (`+20.1%`!) | **1805.5** (`+123.1`!) | — | — |
+| `Gen5_W19_Pure` (`galcon_gen5_w19.pt`, `7ms`) | 63.8% | 45.0% | 58.3% | 55.71% | 1765.3 | — | — |
+| `Gen5_W20_Pure` (`galcon_gen5_w20_pure.pt`, `7.5ms`) | **75.0%** (`30–10`) | 40.0% | 70.8% | 60.58% | 1805.5 | 16.7% / — | — |
+| `Gen5_W21_PureDistill` (zero-search, `7.5ms`) | 67.5% (`27–13`) | **67.5%** (`s14k: 95%`!) | 62.5% | 67.00% | **1851.3** | 25.0% / 33.3% | 84.4% |
+| **`Gen5_W21_Pure` (`galcon_gen5_w21_pure.pt`, `7.5ms`)** | **75.0%** (`30–10`, `75/75`) | **67.5%** (`27–13`, `70/65`) | 45.8% | **69.08%** (`+28.6%`!) | 1843.4 (`71.25%` Dual!) | 16.7% / 33.3% | **90.6%** |
 | `Gen5_W16_Search` (old physics, `25–33ms`) | 67.5% (`25–11–4`) | 33.8% (`11–24–5`) | 66.7% | 53.92% | 1758.1 | 16.7% / 33.3% | 87.5% |
 | `Gen5_W17_Search` (old physics, `27–42ms`) | 50.0% (`17–17–6`) | 41.2% (`14–21–5`) | 75.0% | 49.00% | 1743.7 | 41.7% / 58.3% | 84.4% |
 | `Gen5_W18_R1_Search` (`7.7k` C++ EI, `31–53ms`) | 60.0% | 46.2% | 62.5% | 54.75% | 1765.3 | 33.3% / 50.0% | 81.2% |
 | `Gen5_W18_R2_Search` (`13.4k` C++ EI, `30–31ms`) | 53.8% | 53.8% | **83.3%** | 56.71% | 1805.5 | **50.0%** / 58.3% | 87.5% |
 | `Gen5_W18_Search` (`galcon_gen5_w18.pt`, `29–31ms`) | 66.2% (`24–11–5`) | 52.5% | 70.8% | 61.21% | 1816.7 | 41.7% / **66.7%** | 84.4% |
 | `Gen5_W19_Search` (`galcon_gen5_w19.pt`, `42ms`) | 66.2% (`26–13–1`) | 71.2% (`28–11–1`) | 58.3% | 67.46% | 1851.3 | **50.0%** / 50.0% | 84.4% |
-| `Gen5_W20_SoupBC_Search` (`50/50 B+C`, `50ms`) | 70.0% (`28–12–0`) | **75.0%** (`s14k: 90%`!) | 62.5% | 71.25% | 1883.7 | 33.3% / 41.7% | 93.8% |
-| **`Gen5_W20_Search` (`galcon_gen5_w20.pt`, `49ms`)** | **80.0%** (`32–8–0`, `80/80`) | **72.5%** (`29–11–0`) | 54.2% | **74.42%** (`+20.5%`!) | **1892.1** (`+134.0`!) | 8.3% / 33.3% | 84.4% |
+| `Gen5_W20_Search` (`galcon_gen5_w20.pt`, `49ms`) | **80.0%** (`32–8–0`) | 72.5% (`29–11–0`) | 54.2% | 74.42% | 1892.1 | 33.3% / 50.0% (`h=28`) | 84.4% |
+| `Gen5_W21_PureDistill_Search` (`47ms`) | 72.5% (`29–11–0`) | 65.0% (`26–14–0`) | 50.0% | 67.25% | 1835.7 | **50.0%** / **66.7%** | **90.6%** |
+| **`Gen5_W21_Search` (`galcon_gen5_w21.pt`, `49ms`)** | **80.0%** (`32–8`, `s9.5k: 85%`) | **77.5%** (`31–9`, `s14k: 85%`) | 70.8% | **78.08%** (`+24.2%`!) | **1946.6** (`+188.5`!) | 25.0% / 41.7% | 84.4% |
 
 ## Wave 18 Highlights — Real Galcon 2 C++ Physics Transition, `FastGen5Infer` Speedup & Frozen-Value-Head `1-Tick` PPO
 - **Real Galcon 2 C++ Physics Shift Autopsy:** Switching from simplified point-mass Python physics to real multi-ship Galcon 2 C++ physics (flock separation, planet-edge steering, gradual multi-tick arrivals, fractional ship packing) exposed a massive physics-shift gap against `Waffle3z-GA` (genetically evolved on real Galcon 2 physics): old-physics `Gen5_W16_Search` held `67.5%` vs `Sparky v1.6` but dropped `72.5% → 33.8%` vs `Waffle3z-GA` (`Gen5_W16_Pure` dropped to `20.0%`), repeatedly launching giant tick-0 home rushes that spread out over 6–10 ticks of gradual landing and lost `-68` to `-166` production by tick 20.
