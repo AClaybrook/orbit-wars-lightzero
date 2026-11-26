@@ -65,8 +65,8 @@ function ItemMT:fleet_send(perc, target)
     local p = math.floor(tonumber(perc) + 0.5)
     if p < 1 then return end
     if p > 100 then p = 100 end
-    local send_s = math.floor(self.ships_value * (p / 100.0) + 1e-9)
-    if send_s < 1 then return end
+    local send_s = math.min(self.ships_value, self.ships_value * (p / 100.0))
+    if send_s < 1.0 - 1e-9 then return end
     self.ships_value = math.max(0.0, self.ships_value - send_s)
     local ord_idx = #_orders + 1
     _orders[ord_idx] = string.format("S %d %d %d", self.n, target.n, p)

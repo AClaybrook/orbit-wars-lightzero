@@ -2989,3 +2989,37 @@ def test_wave17_gen5_1t_ppo_and_ensemble_contempt(tmp_path):
     ens = EnsembleGalconSearchAgent([ckpt, ckpt], use_d4_canonical=True, use_d4_tta=False)
     assert abs(ens.ensemble_agents[0].model.contempt - 0.30) < 1e-6
     assert abs(ens.ensemble_agents[1].model.contempt - 0.30) < 1e-6
+
+
+def test_lua_bridge_fractional_fleet_send_matches_sim(tmp_path):
+    """Verify Lua bridge ItemMT:fleet_send packs fractional ships (>= 1.0 - 1e-9) identically to GalconSim."""
+    import shutil
+    from galcon.lua_bridge import GalconLuaBotBridge
+
+    if not (shutil.which("lua5.3") or shutil.which("lua")):
+        pytest.skip("lua5.3 / lua interpreter not installed on PATH")
+
+    bot_src = """
+function bot_act(user)
+    local p1 = g2.item(1)
+    local p2 = g2.item(2)
+    -- 50% of 10.8 ships should send 5.4 and leave 5.4 (matching GalconSim fractional ship packing)
+    local fl = p1:fleet_send(50, p2)
+    assert(fl ~= nil and math.abs(fl.fleet_ships - 5.4) < 1e-6, "expected fractional fleet_ships=5.4")
+    assert(math.abs(p1.ships_value - 5.4) < 1e-6, "expected fractional remaining ships_value=5.4")
+end
+"""
+    bot_file = tmp_path / "test_frac_send_bot.lua"
+    bot_file.write_text(bot_src, encoding="utf-8")
+    sim = GalconSim(
+        [
+            Planet(id=1, owner=1, ships=10.8, x=60.0, y=160.0, production=100.0, radius=24.0),
+            Planet(id=2, owner=2, ships=50.0, x=320.0, y=160.0, production=100.0, radius=24.0),
+        ]
+    )
+    bridge = GalconLuaBotBridge(bot_file, loop_fn="bot_act")
+    try:
+        orders = bridge.act(sim, 1)
+        assert len(orders) == 1 and isinstance(orders[0], SendOrder) and orders[0].percent == 50
+    finally:
+        bridge.close()
