@@ -2563,7 +2563,7 @@ def collect_gen4_multisend_ei_dataset(
     *,
     num_games: int = 56,
     seed: int = 30000,
-    rollout_horizon: int = 16,
+    rollout_horizon: int = 20,
     lua_opp_path: Optional[str | Path] = None,
     lua_opp2_path: Optional[str | Path] = None,
     lua_opp3_path: Optional[str | Path] = None,
