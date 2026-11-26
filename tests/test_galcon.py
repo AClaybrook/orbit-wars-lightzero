@@ -3257,3 +3257,58 @@ def test_gen5_fast_infer_and_fused_root_exact_parity(tmp_path):
         torch.set_num_threads(prev_threads)
 
 
+def test_wave18_freeze_value_head_ppo(tmp_path):
+    """Verify freeze_value_head=True keeps all Gen5 WDL value-head weights bit-for-bit frozen during PPO."""
+    import torch
+    from galcon.gen5_model import build_galcon_gen5_transformer
+    from galcon.train import rl_mirror_league_ppo_gen4
+
+    torch.manual_seed(1801)
+    model = build_galcon_gen5_transformer(
+        d_model=48,
+        n_heads=4,
+        n_layers=1,
+        dim_ff=96,
+        edge_hidden=8,
+        num_val_queries=2,
+        dropout=0.0,
+    ).eval()
+    ckpt_in = tmp_path / "gen5_in.pt"
+    ckpt_out = tmp_path / "gen5_ppo_fv.pt"
+    init_sd = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    torch.save(
+        {
+            "model_config": model.config,
+            "model_state_dict": init_sd,
+            "has_trained_redir": True,
+            "has_trained_multi_send": True,
+            "use_canonical_d4": True,
+        },
+        ckpt_in,
+    )
+
+    rl_mirror_league_ppo_gen4(
+        ckpt_in,
+        ckpt_out,
+        iters=1,
+        pairs_per_iter=1,
+        lr=1.0e-3,
+        freeze_value_head=True,
+        v_anchor_coef=0.30,
+        act_every=2,
+        eval_every=99,
+        seed=1801,
+        train_threads=1,
+        workers=1,
+    )
+    final_ckpt = torch.load(ckpt_out.with_name(ckpt_out.stem + "_final.pt"), map_location="cpu", weights_only=False)
+    fin_sd = final_ckpt["model_state_dict"]
+    val_keys = [k for k in init_sd if k.startswith("val_") or "value_head" in k]
+    assert len(val_keys) >= 4
+    for k in val_keys:
+        assert torch.equal(init_sd[k], fin_sd[k]), f"Value-head param {k} mutated despite freeze_value_head=True"
+    ms_changed = any(not torch.equal(init_sd[k], fin_sd[k]) for k in init_sd if k.startswith("ms_"))
+    assert ms_changed, "Expected multi-send policy weights to update during frozen-value-head PPO"
+
+
+
