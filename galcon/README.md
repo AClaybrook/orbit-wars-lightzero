@@ -42,9 +42,59 @@ A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-ligh
 - **Continued Frozen-Value-Head `1-Tick` C++ PPO ([`checkpoints/galcon_gen5_w19.pt`](../checkpoints/galcon_gen5_w19.pt)):**
   - Continued 7 gentle iterations (`lr=2.2e-5`, `--freeze-value-head --v-anchor-coef 0.50`, `42%` Sparky / `38%` Waffle3z) directly on top of our sharpest `vloss=0.370` C++ WDL value head + `3,495` 100% real C++ redirs, pushing `val_56g` to `67.9%` (`comp = 63.1%`, `87.5%` / `7–1` vs `Gen5_W18`) → **`67.46%` Elo-Weighted / `1851.3` True MLE Elo Search** (`71.2%` Waffle3z, `66.2%` Sparky, `50.0% / 50.0%` Large 24pl) & **`55.71%` / `1765.3 Elo` Pure**.
 
-## Unified Real-C++ Cross-Bot Bradley-Terry Elo Leaderboard (1,056 Games · Joint BT MLE)
+## Unified Real-C++ Cross-Bot Bradley-Terry Elo Leaderboards (2,860 Games · Overall + Per-Map-Size)
 
-To put **all** model generations (`Gen 3` → `Wave 22`, Pure & Search), built-in heuristics (`Random`, `Classic`, `Macro`, `Rusher`, `Tactical`), unmodified Lua tournament bosses (`Sparky v1.6`, `Waffle3z-GA`, `EsparanBot v0.2`), and future external bots (`esparano/LightZero` checkpoints via `py:mod:factory`) on **one shared leaderboard**, [`galcon/elo_rating.py`](elo_rating.py) + [`galcon/tournament.py`](tournament.py) use **Evan Sparano's exact Bradley-Terry MLE solver** (`esparano/LightZero` `lzero/worker/elo_rating.py` — vectorized damped Newton-Raphson, played-edge prior `prior_draws=0.1`, `l2_reg=1e-4`, and analytical Laplace `±Std`) over paired seat-swapped `18pl` games on **Evan's real Galcon 2 C++ simulator** ([`galcon/sim_core.cpp`](sim_core.cpp), 7 Swiss/chain rounds × 16 games/pair, persisted atomically in [`docs/galcon_unified_ladder.json`](../docs/galcon_unified_ladder.json)).
+To put **all** model generations (`Gen 3` → `Wave 22`, Pure & Search), built-in heuristics (`Random`, `Classic`, `Macro`, `Rusher`, `Tactical`), unmodified Lua tournament bosses (`Sparky v1.6`, `Waffle3z-GA`, `EsparanBot v0.2`), and future external bots (`esparano/LightZero` checkpoints via `py:mod:factory`) on **one shared leaderboard system**, [`galcon/elo_rating.py`](elo_rating.py) + [`galcon/tournament.py`](tournament.py) use **Evan Sparano's exact Bradley-Terry MLE solver** (`esparano/LightZero` `lzero/worker/elo_rating.py` — vectorized damped Newton-Raphson, played-edge prior `prior_draws=0.1`, `l2_reg=1e-4`, and analytical Laplace `±Std`) on **Evan's real Galcon 2 C++ simulator** ([`galcon/sim_core.cpp`](sim_core.cpp)).
+
+Each map size has its own dedicated JSON ladder (`Compact 6pl`, `Standard 18pl`, `Large 24pl`), aggregated equal-weight into an **Overall Cross-Map Leaderboard**:
+
+### Overall Cross-Map Leaderboard (`Compact 6pl` + `Standard 18pl` + `Large 24pl` · 2,860 Total Games)
+
+| Rank | Bot | Overall Elo (`bot:classic=1200`) | ±Std | Compact 6pl | Standard 18pl | Large 24pl | Overall vs `bot:random` (0) | Sizes | Total Games | Score% |
+|---:|---|---:|---:|---:|---:|---:|---:|:---:|---:|---:|
+| 1 | `w22_search` | **1889.1** | ±46.6 | `1965.6` | `1925.2` | `1776.5` | `1297.9` | 3/3 | 296 | 63.3% |
+| 2 | `w20_search` | **1882.8** | ±45.5 | `1919.9` | `1927.6` | `1801.0` | `1291.6` | 3/3 | 340 | 62.9% |
+| 3 | `w19_search` | **1882.3** | ±45.8 | `1870.8` | `1909.7` | `1866.5` | `1291.1` | 3/3 | 340 | 60.6% |
+| 4 | `w18_search` | **1855.2** | ±45.3 | `1925.2` | `1852.7` | `1787.8` | `1264.0` | 3/3 | 340 | 57.8% |
+| 5 | `w14_search` | **1786.7** | ±44.9 | `1737.9` | `1830.3` | `1792.0` | `1195.6` | 3/3 | 340 | 45.9% |
+| 6 | `w21_pure` | **1782.4** | ±45.0 | `1910.7` | `1808.3` | `1628.1` | `1191.2` | 3/3 | 340 | 53.2% |
+| 7 | `w20_pure` | **1765.9** | ±44.7 | `1845.4` | `1804.3` | `1648.1` | `1174.8` | 3/3 | 340 | 48.4% |
+| 8 | `bot:sparky` | **1760.1** | ±43.1 | `1687.0` | `1768.1` | `1825.1` | `1168.9` | 3/3 | 340 | 55.9% |
+| 9 | `w18_pure` | **1718.0** | ±43.8 | `1727.2` | `1763.6` | `1663.1` | `1126.8` | 3/3 | 340 | 43.8% |
+| 10 | `bot:waffle` | **1701.2** | ±41.7 | `1636.9` | `1783.3` | `1683.5` | `1110.0` | 3/3 | 340 | 56.8% |
+| 11 | `gen3_pure` | **1514.1** | ±36.3 | `1445.6` | `1541.5` | `1555.1` | `922.9` | 3/3 | 340 | 56.5% |
+| 12 | `gen4_pure` | **1492.5** | ±36.7 | `1425.4` | `1531.4` | `1520.7` | `901.3` | 3/3 | 340 | 48.1% |
+| 13 | `bot:esparan` | **1396.7** | ±33.9 | `1189.7` | `1446.4` | `1553.9` | `805.5` | 3/3 | 324 | 57.4% |
+| 14 | `bot:classic` | **1200.0** | ±0.0 | `1200.0` | `1200.0` | `1200.0` | `608.9` | 3/3 | 328 | 38.0% |
+| 15 | `bot:macro` | **1192.7** | ±34.2 | `1007.8` | `1211.2` | `1358.9` | `601.6` | 3/3 | 260 | 46.9% |
+| 16 | `bot:rusher` | **1181.3** | ±33.3 | `1104.5` | `1147.2` | `1292.1` | `590.2` | 3/3 | 292 | 37.0% |
+| 17 | `bot:tactical` | **1168.3** | ±32.9 | `1036.7` | `1203.8` | `1264.3` | `577.2` | 3/3 | 308 | 39.4% |
+| 18 | `bot:random` | **590.0** | ±84.9 | `583.2` | `553.0` | `633.8` | `0.0` | 3/3 | 172 | 2.9% |
+
+### Compact 6pl (200×200 · Evan LightZero Geometry · 67 Pairs / 1,072 Games · [`galcon_ladder_compact6.json`](../docs/galcon_ladder_compact6.json))
+
+| Rank | Bot | Elo (`bot:classic=1200`) | ±Std | vs `bot:random` (0) | Games | W-D-L | Score% | Mean ms |
+|---:|---|---:|---:|---:|---:|:---:|---:|---:|
+| 1 | `w22_search` | **1965.6** | ±77.2 | `1381.8` | 112 | 65-17-30 | 65.6% | `16.47 ms` |
+| 2 | `w18_search` | **1925.2** | ±74.6 | `1341.4` | 128 | 76-7-45 | 62.1% | `15.68 ms` |
+| 3 | `w20_search` | **1919.9** | ±74.6 | `1336.0` | 128 | 74-9-45 | 61.3% | `15.49 ms` |
+| 4 | `w21_pure` | **1910.7** | ±74.4 | `1326.9` | 128 | 65-25-38 | 60.5% | `7.39 ms` |
+| 5 | `w19_search` | **1870.8** | ±74.8 | `1287.0` | 128 | 63-18-47 | 56.2% | `16.24 ms` |
+| 6 | `w20_pure` | **1845.4** | ±74.8 | `1261.5` | 128 | 62-11-55 | 52.7% | `7.13 ms` |
+| 7 | `w14_search` | **1737.9** | ±73.7 | `1154.0` | 128 | 44-2-82 | 35.2% | `10.26 ms` |
+| 8 | `w18_pure` | **1727.2** | ±74.1 | `1143.4` | 128 | 41-2-85 | 32.8% | `5.77 ms` |
+| 9 | `bot:sparky` | **1687.0** | ±64.3 | `1103.2` | 128 | 77-4-47 | 61.7% | `0.33 ms` |
+| 10 | `bot:waffle` | **1636.9** | ±62.0 | `1053.1` | 128 | 81-8-39 | 66.4% | `0.41 ms` |
+| 11 | `gen3_pure` | **1445.6** | ±54.3 | `861.8` | 128 | 69-5-54 | 55.9% | `4.13 ms` |
+| 12 | `gen4_pure` | **1425.4** | ±53.7 | `841.6` | 128 | 68-2-58 | 53.9% | `3.87 ms` |
+| 13 | `bot:classic` | **1200.0** | ±0.0 | `616.2` | 128 | 50-1-77 | 39.5% | `0.01 ms` |
+| 14 | `bot:esparan` | **1189.7** | ±48.9 | `605.9` | 128 | 48-2-78 | 38.3% | `0.55 ms` |
+| 15 | `bot:rusher` | **1104.5** | ±50.6 | `520.7` | 112 | 50-2-60 | 45.5% | `0.23 ms` |
+| 16 | `bot:tactical` | **1036.7** | ±51.9 | `453.0` | 128 | 41-3-84 | 33.2% | `0.49 ms` |
+| 17 | `bot:macro` | **1007.8** | ±56.1 | `424.1` | 80 | 36-0-44 | 45.0% | `0.30 ms` |
+| 18 | `bot:random` | **583.2** | ±110.3 | `0.0` | 48 | 3-0-45 | 6.2% | `0.01 ms` |
+
+### Standard 18pl (400×240 Symmetric · Classic 1v1 · 66 Pairs / 1,056 Games · [`galcon_unified_ladder.json`](../docs/galcon_unified_ladder.json))
 
 | Rank | Bot | Elo (`bot:classic=1200`) | ±Std | vs `bot:random` (0) | Games | W-D-L | Score% | Mean ms |
 |---:|---|---:|---:|---:|---:|:---:|---:|---:|
@@ -67,14 +117,44 @@ To put **all** model generations (`Gen 3` → `Wave 22`, Pure & Search), built-i
 | 17 | `bot:rusher` | **1147.2** | ±54.1 | `592.7` | 96 | 24-0-72 | 25.0% | `0.35 ms` |
 | 18 | `bot:random` | **553.0** | ±163.1 | `0.0` | 64 | 1-0-63 | 1.6% | `0.01 ms` |
 
+### Large 24pl (560×340 Asymmetric Macro · 61 Pairs / 732 Games · [`galcon_ladder_large24.json`](../docs/galcon_ladder_large24.json))
+
+| Rank | Bot | Elo (`bot:classic=1200`) | ±Std | vs `bot:random` (0) | Games | W-D-L | Score% | Mean ms |
+|---:|---|---:|---:|---:|---:|:---:|---:|---:|
+| 1 | `w19_search` | **1866.5** | ±87.0 | `1231.4` | 84 | 57-0-27 | 67.9% | `110.44 ms` |
+| 2 | `bot:sparky` | **1825.1** | ±85.1 | `1190.0` | 84 | 51-0-33 | 60.7% | `0.85 ms` |
+| 3 | `w20_search` | **1801.0** | ±85.9 | `1165.8` | 84 | 52-0-32 | 61.9% | `114.06 ms` |
+| 4 | `w14_search` | **1792.0** | ±84.3 | `1156.9` | 84 | 48-0-36 | 57.1% | `43.10 ms` |
+| 5 | `w18_search` | **1787.8** | ±85.6 | `1152.6` | 84 | 50-0-34 | 59.5% | `113.48 ms` |
+| 6 | `w22_search` | **1776.5** | ±86.7 | `1141.3` | 72 | 40-0-32 | 55.6% | `107.06 ms` |
+| 7 | `bot:waffle` | **1683.5** | ±81.4 | `1048.4` | 84 | 42-0-42 | 50.0% | `0.70 ms` |
+| 8 | `w18_pure` | **1663.1** | ±81.7 | `1028.0` | 84 | 42-0-42 | 50.0% | `9.80 ms` |
+| 9 | `w20_pure` | **1648.1** | ±83.3 | `1013.0` | 84 | 33-0-51 | 39.3% | `10.26 ms` |
+| 10 | `w21_pure` | **1628.1** | ±83.4 | `993.0` | 84 | 40-0-44 | 47.6% | `9.75 ms` |
+| 11 | `gen3_pure` | **1555.1** | ±73.4 | `920.0` | 84 | 50-0-34 | 59.5% | `5.71 ms` |
+| 12 | `bot:esparan` | **1553.9** | ±70.3 | `918.8` | 84 | 57-0-27 | 67.9% | `1.33 ms` |
+| 13 | `gen4_pure` | **1520.7** | ±74.6 | `885.6` | 84 | 38-0-46 | 45.2% | `5.66 ms` |
+| 14 | `bot:macro` | **1358.9** | ±67.7 | `723.8` | 84 | 39-0-45 | 46.4% | `0.60 ms` |
+| 15 | `bot:rusher` | **1292.1** | ±67.1 | `657.1` | 84 | 33-0-51 | 39.3% | `0.52 ms` |
+| 16 | `bot:tactical` | **1264.3** | ±65.3 | `629.2` | 84 | 33-0-51 | 39.3% | `1.06 ms` |
+| 17 | `bot:classic` | **1200.0** | ±0.0 | `564.9` | 72 | 26-0-46 | 36.1% | `0.01 ms` |
+| 18 | `bot:random` | **633.8** | ±161.5 | `0.0` | 60 | 1-0-59 | 1.7% | `0.01 ms` |
+
 ```bash
-# Re-anchor & print the unified leaderboard on either scale without replaying games:
-python3 -m galcon.tournament --report-only --state docs/galcon_unified_ladder.json \
+# Re-anchor & print any per-size leaderboard without replaying games:
+python3 -m galcon.tournament --report-only --state docs/galcon_ladder_compact6.json \
   --anchor bot:classic --anchor-elo 1200 --secondary-anchor bot:random --secondary-anchor-elo 0
 
-# Add a new bot/checkpoint cleanly via catch-up Swiss rounds (existing pairs are preserved):
-python3 -m galcon.tournament --resume --bots new_bot=search:checkpoints/new.pt \
-  --state docs/galcon_unified_ladder.json --games-per-pair 16 --rounds 7 --workers 14
+# Regenerate the Overall Cross-Map table across all 3 map sizes:
+python3 -m galcon.tournament --combine \
+  "Compact 6pl=docs/galcon_ladder_compact6.json" \
+  "Standard 18pl=docs/galcon_unified_ladder.json" \
+  "Large 24pl=docs/galcon_ladder_large24.json" \
+  --anchor bot:classic --anchor-elo 1200 --secondary-anchor bot:random --secondary-anchor-elo 0
+
+# Add a new bot/checkpoint cleanly via catch-up Swiss on any map size (--arena compact6|standard18|large24):
+python3 -m galcon.tournament --resume --arena compact6 --bots evan_sez=py:my_adapter:make_bot \
+  --state docs/galcon_ladder_compact6.json --games-per-pair 16 --rounds 7 --workers 14
 ```
 
 ## Real Galcon 2 C++ Physics Scoreboard (`50% Sparky v1.6 / 40% Waffle3z-GA / 10% EsparanBot v0.2` + 104g True MLE Elo)
