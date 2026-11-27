@@ -2719,7 +2719,9 @@ def collect_gen4_multisend_ei_dataset(
             neural_value_weight=0.70,
             reactive_mid_ply=True,
             opponent_adaptive=True,
-            prior_bonus=0.010,
+            enable_def_stream=True,
+            enable_opening_def_guard=True,
+            prior_bonus=0.040,
         )
     else:
         from galcon.gen5_model import GalconGen5Transformer
@@ -2738,9 +2740,7 @@ def collect_gen4_multisend_ei_dataset(
             prior_bonus=0.010,
         )
         if isinstance(search_ag.model, GalconGen5Transformer):
-            search_ag.neural_value_weight = 0.75
-            search_ag.enable_rescue_snipe = True
-            search_ag.enable_opp_direct_rush = True
+            search_ag.prior_bonus = 0.040
 
     pf_l, tf_l, ef_l, le_l, om_l, pm_l = [], [], [], [], [], []
     ms_tar_l, ms_fr_l, t_msp_l, vt_l, aux_o_l, aux_s_l = [], [], [], [], [], []
@@ -3009,6 +3009,7 @@ def _gen4_multisend_loss(
     pos_weight: float = 4.5,
     t_msp=None,
     kd_alpha: float = 0.0,
+    value_only: bool = False,
 ):
     if t_msp is not None:
         pf, tf, ef, le, om, pm, ms_tar, ms_fr, aux_own, aux_shp, t_msp = _trim_batch_n(
@@ -3026,6 +3027,30 @@ def _gen4_multisend_loss(
     else:
         ms_logits, ms_frac_pred, val, aux_pred = model.forward_multi_send(pf, tf, ef, pm, return_aux=True)
         wdl_logits = None
+
+    if wdl_logits is not None:
+        # Calibrated exact-mean-preserving quadratic soft-WDL targets:
+        # t_draw = 0.65 * (1 - |v|)^2, t_win = (1 - t_draw + v)/2, t_loss = (1 - t_draw - v)/2
+        # Guarantees t_win + t_draw + t_loss == 1 AND t_win - t_loss == v while avoiding bogus draw mass on wins.
+        vt_c = vtar.clamp(-1.0, 1.0)
+        t_draw = 0.65 * (1.0 - vt_c.abs()).pow(2)
+        t_win = (1.0 - t_draw + vt_c).mul(0.5).clamp(0.0, 1.0)
+        t_loss = (1.0 - t_draw - vt_c).mul(0.5).clamp(0.0, 1.0)
+        t_wdl = torch.stack([t_loss, t_draw, t_win], dim=-1)
+        wdl_ce = -(t_wdl * F.log_softmax(wdl_logits, dim=-1)).sum(dim=-1).mean()
+        v_loss = 0.65 * wdl_ce + 0.50 * F.mse_loss(val, vt_c)
+    else:
+        v_loss = F.mse_loss(val, vtar)
+    vsign = float(((val >= 0) == (vtar >= 0)).float().mean().item())
+    if value_only:
+        return v_loss, {
+            "bce": 0.0,
+            "v_loss": float(v_loss.item()),
+            "rec": 0.0,
+            "prec": 0.0,
+            "vsign": vsign,
+            "aux": 0.0,
+        }
 
     edge_valid = om.unsqueeze(-1) & le
     ev_f = edge_valid.float()
@@ -3059,20 +3084,6 @@ def _gen4_multisend_loss(
     else:
         frac_loss = ms_frac_pred.sum() * 0.0
 
-    if wdl_logits is not None:
-        # Calibrated exact-mean-preserving quadratic soft-WDL targets:
-        # t_draw = 0.65 * (1 - |v|)^2, t_win = (1 - t_draw + v)/2, t_loss = (1 - t_draw - v)/2
-        # Guarantees t_win + t_draw + t_loss == 1 AND t_win - t_loss == v while avoiding bogus draw mass on wins.
-        vt_c = vtar.clamp(-1.0, 1.0)
-        t_draw = 0.65 * (1.0 - vt_c.abs()).pow(2)
-        t_win = (1.0 - t_draw + vt_c).mul(0.5).clamp(0.0, 1.0)
-        t_loss = (1.0 - t_draw - vt_c).mul(0.5).clamp(0.0, 1.0)
-        t_wdl = torch.stack([t_loss, t_draw, t_win], dim=-1)
-        wdl_ce = -(t_wdl * F.log_softmax(wdl_logits, dim=-1)).sum(dim=-1).mean()
-        v_loss = 0.65 * wdl_ce + 0.50 * F.mse_loss(val, vt_c)
-    else:
-        v_loss = F.mse_loss(val, vtar)
-    vsign = float(((val >= 0) == (vtar >= 0)).float().mean().item())
     pm_f = pm.float()
     pm_sum = pm_f.sum()
     if float(pm_sum.item()) > 0.0:
@@ -3112,6 +3123,7 @@ def train_gen4_multisend_supervised(
     lr: float = 3.5e-4,
     kd_alpha: float = 0.30,
     arch: str = "gen4",
+    freeze_trunk: bool = False,
     seed: int = 42,
     label: str = "Gen4-MultiSend-EI",
     train_threads: int = 2,
@@ -3209,12 +3221,11 @@ def train_gen4_multisend_supervised(
             )
             model.load_state_dict(ckpt["model_state_dict"], strict=False)
             src_desc = f"Warm-started Gen5 from {resume_from.name}" if resume_from is not None else "Gen5"
-            param_groups = [{"params": list(model.parameters()), "lr": lr}]
         else:
             model = build_galcon_gen5_transformer(dropout=0.08)
             src_desc = f"Fresh Gen5 ({sum(p.numel() for p in model.parameters())/1e6:.2f}M params, drop=0.08)"
-            param_groups = [{"params": list(model.parameters()), "lr": lr}]
         model = model.to(train_dev)
+        param_groups = [{"params": list(model.parameters()), "lr": lr}]
         print(f"  [{label}] {src_desc} (device={dev_tag}{kd_tag}, block_val={len(val_idx)}/{n})", flush=True)
     else:
         assert ckpt is not None and resume_from is not None
@@ -3235,6 +3246,15 @@ def train_gen4_multisend_supervised(
         param_groups = [{"params": base_params, "lr": lr * 0.45}, {"params": ms_params, "lr": lr * 2.5}]
 
     ms_pos_weight = 2.2 if use_gen5 else 4.5
+    if freeze_trunk:
+        for pname, p in model.named_parameters():
+            if not (pname.startswith("val_") or "value_head" in pname):
+                p.requires_grad_(False)
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        param_groups = [{"params": trainable_params, "lr": lr}]
+        label = f"{label}[FreezeTrunk-WDL]"
+    else:
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
     opt = _build_optimizer(
         param_groups,
         lr=lr,
@@ -3247,8 +3267,8 @@ def train_gen4_multisend_supervised(
     t0 = time.time()
 
     for ep in range(1, epochs + 1):
-        model.train()
-        r_iter = iter(redir_loader) if redir_loader is not None else None
+        model.eval() if freeze_trunk else model.train()
+        r_iter = iter(redir_loader) if (redir_loader is not None and not freeze_trunk) else None
         for b_idx, batch in enumerate(tr_loader):
             bt = [t.to(train_dev) for t in batch]
             pf, tf, ef, le, om, pm, mst, msf, vt, ao, ashp = bt[:11]
@@ -3270,6 +3290,7 @@ def train_gen4_multisend_supervised(
                 pos_weight=ms_pos_weight,
                 t_msp=t_msp,
                 kd_alpha=(kd_alpha if has_kd else 0.0),
+                value_only=freeze_trunk,
             )
             if r_iter is not None and (b_idx % 4 == 0):
                 try:
@@ -3281,7 +3302,7 @@ def train_gen4_multisend_supervised(
                 rloss, _, _ = _redir_batch_loss(model, rpf, rtf, ref, rpm, rcur, rfeat, rtar, rmsk)
                 loss = loss + 0.30 * rloss
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0, foreach=not use_dml)
+            nn.utils.clip_grad_norm_(trainable_params, 1.0, foreach=not use_dml)
             opt.step()
         sched.step()
 
@@ -3308,11 +3329,12 @@ def train_gen4_multisend_supervised(
                     pos_weight=ms_pos_weight,
                     t_msp=t_msp,
                     kd_alpha=(kd_alpha if has_kd else 0.0),
+                    value_only=freeze_trunk,
                 )
                 vm.append(m)
         v_bce = float(np.mean([x["bce"] for x in vm]))
         v_vloss = float(np.mean([x["v_loss"] for x in vm]))
-        sel_metric = (v_bce + 0.15 * v_vloss) if use_gen5 else v_bce
+        sel_metric = v_vloss if freeze_trunk else ((v_bce + 0.15 * v_vloss) if use_gen5 else v_bce)
         if sel_metric < best_metric:
             best_metric = sel_metric
             torch.save(
@@ -5097,6 +5119,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--kl-coef", type=float, default=0.030)
     parser.add_argument("--v-anchor-coef", type=float, default=0.0)
     parser.add_argument("--freeze-value-head", action="store_true", help="Freeze WDL/scalar value head parameters and skip GAE value loss during PPO to preserve Search value calibration.")
+    parser.add_argument("--freeze-trunk", action="store_true", help="Freeze trunk/policy parameters and recalibrate ONLY WDL/scalar value head during gen4_ei.")
     parser.add_argument("--kd-alpha", type=float, default=0.30)
     parser.add_argument("--arch", choices=["gen4", "gen5"], default="gen4", help="Model architecture for gen4_ei supervised/KD training (gen4=1.29M, gen5=2.93M Edge-Gated WDL).")
     parser.add_argument("--filter-draws", action="store_true", help="Mask boss stalemate draws from EI policy loss while keeping value/aux supervision.")
@@ -5262,6 +5285,9 @@ def main(argv: list[str] | None = None) -> int:
         if g4_redir:
             _save_redir_npz(merged_r)
         del old_r, g4_redir
+        if args.epochs <= 0:
+            print("[Galcon-Gen4-EI] --epochs <= 0 -> skipping supervised training.", flush=True)
+            return 0
         train_gen4_multisend_supervised(
             g4_data,
             merged_r,
@@ -5271,6 +5297,7 @@ def main(argv: list[str] | None = None) -> int:
             lr=args.lr if args.lr > 0 else (4.5e-4 if args.arch == "gen5" else 3.5e-4),
             kd_alpha=args.kd_alpha,
             arch=args.arch,
+            freeze_trunk=args.freeze_trunk,
             seed=args.seed,
             train_threads=args.train_threads,
             device=args.device,

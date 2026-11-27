@@ -3311,4 +3311,149 @@ def test_wave18_freeze_value_head_ppo(tmp_path):
     assert ms_changed, "Expected multi-send policy weights to update during frozen-value-head PPO"
 
 
+def test_wave22_freeze_trunk_wdl_recal_and_large_tunnel_cands(tmp_path):
+    """Verify freeze_trunk=True updates only WDL value heads and Large 24pl search includes tunnel/focus-fire."""
+    import numpy as np
+    import torch
+    from galcon.gen5_model import build_galcon_gen5_transformer
+    from galcon.sim import GalconSim
+    from galcon.train import train_gen4_multisend_supervised
+    from galcon.transformer_bot import GALCON_EDGE_DIM_V2, GALCON_PLANET_DIM_V2, GALCON_TIMELINE_DIM, GalconSearchTransformerAgent
+
+    torch.manual_seed(2201)
+    model = build_galcon_gen5_transformer(
+        d_model=48,
+        n_heads=4,
+        n_layers=1,
+        dim_ff=96,
+        edge_hidden=8,
+        num_val_queries=2,
+        dropout=0.08,
+    ).eval()
+    ckpt_in = tmp_path / "gen5_recal_in.pt"
+    ckpt_out = tmp_path / "gen5_recal_out.pt"
+    init_sd = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    torch.save(
+        {
+            "model_config": model.config,
+            "model_state_dict": init_sd,
+            "has_trained_redir": True,
+            "has_trained_multi_send": True,
+            "use_canonical_d4": True,
+        },
+        ckpt_in,
+    )
+
+    b, n = 24, 18
+    rng = np.random.default_rng(2202)
+    le = np.ones((b, n, n), dtype=bool)
+    np.fill_diagonal(le[0], False)
+    for k in range(1, b):
+        le[k] = le[0]
+    om = np.zeros((b, n), dtype=bool)
+    om[:, :5] = True
+    pm = np.ones((b, n), dtype=bool)
+    synth = {
+        "planet_feats": rng.normal(0.0, 0.5, (b, n, GALCON_PLANET_DIM_V2)).astype(np.float32),
+        "timeline_feats": rng.normal(0.0, 0.5, (b, n, 20, GALCON_TIMELINE_DIM)).astype(np.float32),
+        "edge_feats": rng.normal(0.0, 0.5, (b, n, n, GALCON_EDGE_DIM_V2)).astype(np.float32),
+        "legal_edges": le,
+        "owned_mask": om,
+        "pad_mask": pm,
+        "ms_target": np.zeros((b, n, n), dtype=np.float32),
+        "ms_frac": np.zeros((b, n, n), dtype=np.float32),
+        "val_targets": rng.uniform(-1.0, 1.0, (b,)).astype(np.float32),
+        "aux_owner": rng.integers(0, 3, (b, n), dtype=np.int64),
+        "aux_ships": rng.uniform(0.0, 1.0, (b, n)).astype(np.float32),
+    }
+
+    train_gen4_multisend_supervised(
+        synth,
+        {},
+        resume_from=ckpt_in,
+        out_path=ckpt_out,
+        epochs=2,
+        batch_size=8,
+        lr=1.0e-2,
+        arch="gen5",
+        freeze_trunk=True,
+        seed=2203,
+        train_threads=1,
+        device="cpu",
+    )
+    out_sd = torch.load(ckpt_out, map_location="cpu", weights_only=False)["model_state_dict"]
+    for k in init_sd:
+        if k.startswith("val_") or "value_head" in k:
+            continue
+        assert torch.equal(init_sd[k], out_sd[k]), f"Trunk param {k} mutated despite freeze_trunk=True"
+    val_changed = any(not torch.equal(init_sd[k], out_sd[k]) for k in init_sd if k.startswith("val_") or "value_head" in k)
+    assert val_changed, "Expected WDL value-head weights to update when freeze_trunk=True"
+
+    # Large 24pl asymmetric map check with tunnel-feed + focus-fire search enabled
+    sim_lg = GalconSim.create(seed=18000, num_planets=24, width=560.0, height=340.0, symmetric=False, max_ticks=240)
+    for _ in range(14):
+        sim_lg.step({})
+    ag = GalconSearchTransformerAgent(ckpt_out, use_d4_canonical=True, use_d4_tta=False)
+    best_plan, cands, scores, _ = ag.act_with_search_info(sim_lg, 1)
+    assert len(cands) >= 1 and len(scores) == len(cands)
+    assert isinstance(best_plan, list)
+
+    # Tick-0 Opening Guard75 check (exercises _eval_opening_guard_against_opp + pure-hold min)
+    sim0 = GalconSim.create(seed=14003, num_planets=18, width=400.0, height=240.0, symmetric=True, max_ticks=200)
+    plan0, cands0, scores0, _ = ag.act_with_search_info(sim0, 1)
+    assert len(cands0) >= 1 and len(scores0) == len(cands0)
+    assert isinstance(plan0, list)
+
+
+def test_wave22_gen5_supervised_dml_updates_weights(tmp_path):
+    """Regression test: train_gen4_multisend_supervised updates weights after .to(dml)."""
+    import subprocess
+    import sys
+    import pytest
+    try:
+        import torch_directml
+    except Exception:
+        pytest.skip("torch_directml not installed")
+    if torch_directml.device_count() <= 0:
+        pytest.skip("No DirectML GPU available")
+
+    # Run in a fresh subprocess so PyTorch's autograd engine is not pre-initialized on CPU before torch_directml loads.
+    script = (
+        "import numpy as np, torch\n"
+        "from pathlib import Path\n"
+        "from galcon.gen5_model import build_galcon_gen5_transformer\n"
+        "from galcon.train import train_gen4_multisend_supervised\n"
+        "from galcon.transformer_bot import GALCON_EDGE_DIM_V2, GALCON_PLANET_DIM_V2, GALCON_TIMELINE_DIM\n"
+        "tmp = Path(" + repr(str(tmp_path)) + ")\n"
+        "torch.manual_seed(2204)\n"
+        "m = build_galcon_gen5_transformer(d_model=48, n_heads=4, n_layers=1, dim_ff=96, edge_hidden=8, num_val_queries=2, dropout=0.0).eval()\n"
+        "ckpt_in, ckpt_out = tmp / 'gen5_dml_in.pt', tmp / 'gen5_dml_out.pt'\n"
+        "init_sd = {k: v.detach().clone() for k, v in m.state_dict().items()}\n"
+        "torch.save({'model_config': m.config, 'model_state_dict': init_sd, 'has_trained_multi_send': True}, ckpt_in)\n"
+        "b, n = 24, 18\n"
+        "rng = np.random.default_rng(2205)\n"
+        "le = np.ones((b, n, n), dtype=bool)\n"
+        "np.fill_diagonal(le[0], False)\n"
+        "for k in range(1, b): le[k] = le[0]\n"
+        "om = np.zeros((b, n), dtype=bool); om[:, :5] = True\n"
+        "synth = {'planet_feats': rng.normal(0.0, 0.5, (b, n, GALCON_PLANET_DIM_V2)).astype(np.float32),"
+        " 'timeline_feats': rng.normal(0.0, 0.5, (b, n, 20, GALCON_TIMELINE_DIM)).astype(np.float32),"
+        " 'edge_feats': rng.normal(0.0, 0.5, (b, n, n, GALCON_EDGE_DIM_V2)).astype(np.float32),"
+        " 'legal_edges': le, 'owned_mask': om, 'pad_mask': np.ones((b, n), dtype=bool),"
+        " 'ms_target': (rng.random((b, n, n)) < 0.1).astype(np.float32) * om[:, :, None],"
+        " 'ms_frac': rng.uniform(0.2, 0.8, (b, n, n)).astype(np.float32),"
+        " 'val_targets': rng.uniform(-1.0, 1.0, (b,)).astype(np.float32),"
+        " 'aux_owner': rng.integers(0, 3, (b, n), dtype=np.int64),"
+        " 'aux_ships': rng.uniform(0.0, 1.0, (b, n)).astype(np.float32)}\n"
+        "train_gen4_multisend_supervised(synth, {}, resume_from=ckpt_in, out_path=ckpt_out, epochs=1, batch_size=8, lr=5e-3, arch='gen5', freeze_trunk=False, seed=2206, train_threads=1, device='dml')\n"
+        "out_sd = torch.load(ckpt_out, map_location='cpu', weights_only=False)['model_state_dict']\n"
+        "ms_diff = max(float((init_sd[k] - out_sd[k]).abs().max()) for k in init_sd if k.startswith('ms_'))\n"
+        "val_diff = max(float((init_sd[k] - out_sd[k]).abs().max()) for k in init_sd if k.startswith('val_'))\n"
+        "assert ms_diff > 0.0 and val_diff > 0.0, (ms_diff, val_diff)\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert proc.returncode == 0, f"DirectML subprocess failed:\n{proc.stdout}\n{proc.stderr}"
+
+
+
 
