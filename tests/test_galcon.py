@@ -3793,3 +3793,53 @@ def test_collect_gen4_ei_balanced_league_smoke(tmp_path):
 
 
 
+
+
+def test_wave24_gen4_ppo_league_opps_schedule_and_cli(tmp_path, capsys):
+    """--league-opps in gen4_ppo: league pairs carved from non-boss slots, never-pruned pool entries, CLI wiring, periodic snapshots."""
+    import random
+
+    from galcon.gen5_model import build_galcon_gen5_transformer
+    from galcon.train import _build_stratified_gen4_opp_schedule, main
+
+    base_kw = dict(has_lua1=True, has_lua2=True, has_lua3=True, pool_size=5, sparky_share=0.40, esparan_share=0.10, waffle_share=0.15)
+    base = _build_stratified_gen4_opp_schedule(16, rng=random.Random(7), **base_kw)
+    lg = _build_stratified_gen4_opp_schedule(16, rng=random.Random(7), league_idxs=[1, 2, 3], league_share=0.30, **base_kw)
+    assert len(lg) == len(base) == 16
+    for kind in ("boss", "boss2", "boss3"):
+        assert sum(k == kind for k, _ in lg) == sum(k == kind for k, _ in base) > 0
+    lg_pairs = [i for k, i in lg if k == "snap" and i in (1, 2, 3)]
+    assert len(lg_pairs) >= round(16 * 0.30)
+    assert {1, 2, 3} <= set(lg_pairs)
+    assert _build_stratified_gen4_opp_schedule(16, rng=random.Random(7), league_idxs=[1, 2, 3], league_share=0.0, **base_kw) == base
+
+    torch.manual_seed(2401)
+    ckpts = {}
+    for name in ("hero", "lg_a", "lg_b"):
+        m = build_galcon_gen5_transformer(d_model=32, n_heads=4, n_layers=1, dim_ff=64, edge_hidden=8, num_val_queries=2, dropout=0.0).eval()
+        ckpts[name] = tmp_path / f"{name}.pt"
+        torch.save(
+            {"model_config": m.config, "model_state_dict": m.state_dict(), "has_trained_redir": True, "has_trained_multi_send": True, "use_canonical_d4": True},
+            ckpts[name],
+        )
+    out = tmp_path / "w24_ppo.pt"
+    rc = main(
+        [
+            "--stage", "gen4_ppo", "--resume", str(ckpts["hero"]), "--gen2-anchor", "",
+            "--league-opps", f"{ckpts['lg_a']},{ckpts['lg_b']}", "--league-share", "1.0",
+            "--ppo-iters", "1", "--mirror-pairs", "2", "--freeze-value-head", "--act-every", "2",
+            "--large-map-prob", "0.35", "--compact-map-prob", "0.15", "--snapshot-every", "1",
+            "--eval-every", "99", "--redir-npz", str(tmp_path / "none.npz"), "--out", str(out),
+        ]
+    )
+    assert rc == 0
+    log = capsys.readouterr().out
+    assert "+League(lg_a+lg_b)" in log
+    assert "league[" in log and "lg_a=" in log and "lg_b=" in log
+    assert out.is_file() and out.with_name("w24_ppo_it01.pt").is_file() and out.with_name("w24_ppo_final.pt").is_file()
+
+    import pytest
+
+    with pytest.raises(FileNotFoundError):
+        main(["--stage", "gen4_ppo", "--resume", str(ckpts["hero"]), "--gen2-anchor", "", "--league-opps", str(tmp_path / "missing.pt"),
+              "--ppo-iters", "1", "--mirror-pairs", "1", "--redir-npz", str(tmp_path / "none.npz"), "--out", str(out)])
