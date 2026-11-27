@@ -130,6 +130,72 @@ def _get_worker_cached_snap(ckpt_str: str) -> object:
     _WORKER_SNAP_CACHE[ckpt_str] = m
     return m
 
+
+from galcon.gen5_model import GalconGen5Transformer, build_fast_gen5_infer
+
+
+def _get_fast_gen5_infer(model: object):
+    """Lazily compile and cache a fused TorchScript ``FastGen5Infer`` wrapper on CPU Gen 5 models."""
+    if not isinstance(model, GalconGen5Transformer):
+        return None
+    cached = getattr(model, "_fast_gen5_infer", None)
+    if cached is not None:
+        return cached
+    try:
+        p0 = next(model.parameters())
+        if p0.device.type != "cpu":
+            return None
+    except StopIteration:
+        return None
+    fast = build_fast_gen5_infer(model)
+    if fast is not None:
+        setattr(model, "_fast_gen5_infer", fast)
+    return fast
+
+
+def _forward_ms_grouped_fast(
+    model: object,
+    pf_list: Sequence[np.ndarray],
+    tf_list: Sequence[np.ndarray],
+    ef_list: Sequence[np.ndarray],
+    ns: Sequence[int],
+) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[float], List[torch.Tensor]]:
+    """Run batched ``forward_multi_send`` grouped by exact planet count ``N`` using ``FastGen5Infer`` when available.
+
+    Eliminates O(N^2) cross-size padding waste (e.g. 10-planet games padded to 26 planets) and
+    unlocks fused TorchScript GEMMs during PPO rollouts and batched validation.
+    """
+    k_b = len(ns)
+    ms_l_out: List[Optional[torch.Tensor]] = [None] * k_b
+    ms_f_out: List[Optional[torch.Tensor]] = [None] * k_b
+    val_out: List[float] = [0.0] * k_b
+    h_out: List[Optional[torch.Tensor]] = [None] * k_b
+
+    groups: Dict[int, List[int]] = {}
+    for bi, n in enumerate(ns):
+        groups.setdefault(int(n), []).append(bi)
+
+    fast = _get_fast_gen5_infer(model)
+    contempt = float(getattr(model, "contempt", 0.0))
+
+    with torch.no_grad():
+        for n, idxs in groups.items():
+            pf_t = torch.from_numpy(np.stack([pf_list[i] for i in idxs], axis=0))
+            tf_t = torch.from_numpy(np.stack([tf_list[i] for i in idxs], axis=0))
+            ef_t = torch.from_numpy(np.stack([ef_list[i] for i in idxs], axis=0))
+            if fast is not None:
+                ms_l, ms_f, vals, h = fast.eval_ms_with_hidden(pf_t, tf_t, ef_t, contempt)
+            else:
+                pm_t = torch.ones((len(idxs), n), dtype=torch.bool)
+                ms_l, ms_f, vals, h = model.forward_multi_send(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
+            for loc_i, orig_i in enumerate(idxs):
+                ms_l_out[orig_i] = ms_l[loc_i]
+                ms_f_out[orig_i] = ms_f[loc_i]
+                val_out[orig_i] = float(vals[loc_i].item())
+                h_out[orig_i] = h[loc_i : loc_i + 1]
+    return ms_l_out, ms_f_out, val_out, h_out  # type: ignore[return-value]
+
+
 from galcon.heuristic_bot import (
     GalconClassicBot,
     GalconMacroBot,
@@ -1933,10 +1999,10 @@ def _sample_gen3_map_config(rng: random.Random, large_prob: float = 0.30) -> Tup
     lp = max(0.0, min(0.80, float(large_prob)))
     u = rng.random()
     if u >= 1.0 - lp:
-        # Large gbots arena (22-28 even planets, 520x320 to 600x360, 85% symmetric)
+        # Large gbots arena (22-28 even planets, 520x320 to 600x360, 70% symmetric / 30% asymmetric)
         w = rng.choice([520.0, 560.0, 600.0])
         h = round(w * 0.60, 1)
-        return rng.randrange(22, 29, 2), w, h, (rng.random() < 0.85)
+        return rng.randrange(22, 29, 2), w, h, (rng.random() < 0.70)
     # Split remaining (1 - lp) roughly 35% compact / 65% classic 14-22 even planets
     rem_u = u / max(1e-6, 1.0 - lp)
     if rem_u < 0.35:
@@ -2792,8 +2858,8 @@ def collect_gen4_multisend_ei_dataset(
                 if sim.tick % act_every == 0:
                     orders_map: Dict[int, List[Order]] = {}
                     search_pids = (1, 2) if is_selfplay else (our_pid,)
-                    # When playing full 1-tick speed, record alternating even/odd ticks (50/50 split) to stay lean
-                    rec_tick = (act_every >= 2) or (sim.tick % 2 == (g % 2))
+                    # When playing full 1-tick speed, always record critical opening ticks (0-6) and alternate thereafter
+                    rec_tick = (act_every >= 2) or (sim.tick <= 6) or (sim.tick % 2 == (g % 2))
                     for pid in search_pids:
                         enc = extract_galcon_features(sim, pid, feature_version=2)
                         so, ss = _snapshot_planet_state(sim, enc.planet_ids, pid)
@@ -3292,7 +3358,13 @@ def _fast_gen4_neural_act(
         pm_t = torch.ones((1, n), dtype=torch.bool)
         orders: List[Order] = []
         if model.enable_multi_send:
-            ms_l, ms_f, _, h = model.forward_multi_send(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
+            fast = _get_fast_gen5_infer(model)
+            if fast is not None:
+                ms_l, ms_f, _, h = fast.eval_ms_with_hidden(
+                    pf_t, tf_t, ef_t, float(getattr(model, "contempt", 0.0))
+                )
+            else:
+                ms_l, ms_f, _, h = model.forward_multi_send(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
             le_t = torch.from_numpy(enc.legal_edges[None])
             ms_l = ms_l.masked_fill(~le_t, -1e9)
             ms_p = torch.sigmoid(ms_l[0]).numpy()
@@ -3658,28 +3730,15 @@ def _run_gen4_ppo_episodes_batched(
             encs_c.append(enc_c)
             ns.append(n)
 
-        k_b = len(even_act)
-        max_n = max(ns)
-        pf_dim = encs_c[0].planet_feats.shape[-1]
-        tf_tail = encs_c[0].timeline_feats.shape[1:]
-        ef_dim = encs_c[0].edge_feats.shape[-1]
-        pf_b = np.zeros((k_b, max_n, pf_dim), dtype=np.float32)
-        tf_b = np.zeros((k_b, max_n, *tf_tail), dtype=np.float32)
-        ef_b = np.zeros((k_b, max_n, max_n, ef_dim), dtype=np.float32)
-        pm_b = np.zeros((k_b, max_n), dtype=bool)
-        for bi, (enc_c, n) in enumerate(zip(encs_c, ns)):
-            pf_b[bi, :n] = enc_c.planet_feats
-            tf_b[bi, :n] = enc_c.timeline_feats
-            ef_b[bi, :n, :n] = enc_c.edge_feats
-            pm_b[bi, :n] = True
+        ms_l_list, ms_f_list, val_list, h_emb_list = _forward_ms_grouped_fast(
+            policy,
+            [ec.planet_feats for ec in encs_c],
+            [ec.timeline_feats for ec in encs_c],
+            [ec.edge_feats for ec in encs_c],
+            ns,
+        )
 
         with torch.no_grad():
-            pf_t = torch.from_numpy(pf_b)
-            tf_t = torch.from_numpy(tf_b)
-            ef_t = torch.from_numpy(ef_b)
-            pm_t = torch.from_numpy(pm_b)
-            ms_l_b, ms_f_b, val_b, h_emb_b = policy.forward_multi_send(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
-
             for bi, idx in enumerate(even_act):
                 sim = sims[idx]
                 ours_pid = ours_pids[idx]
@@ -3691,7 +3750,7 @@ def _run_gen4_ppo_episodes_batched(
                 le_t = torch.from_numpy(enc.legal_edges)
                 om_t = torch.from_numpy(enc.owned_mask)
                 edge_m = om_t.unsqueeze(-1) & le_t
-                ms_l0 = ms_l_b[bi, :n, :n].masked_fill(~edge_m, -1e9)
+                ms_l0 = ms_l_list[bi].masked_fill(~edge_m, -1e9)
                 b_dist = torch.distributions.Bernoulli(logits=ms_l0)
                 a_edge = b_dist.sample() * edge_m.float()
                 ms_probs_np = torch.sigmoid(ms_l0).numpy()
@@ -3706,12 +3765,12 @@ def _run_gen4_ppo_episodes_batched(
                 a_edge = torch.from_numpy(a_np)
                 lp_bern = (b_dist.log_prob(a_edge) * edge_m.float()).sum()
 
-                f_mu = ms_f_b[bi, :n, :n].clamp(0.06, 0.98)
+                f_mu = ms_f_list[bi].clamp(0.06, 0.98)
                 f_dist = torch.distributions.Normal(f_mu, frac_std)
                 f_samp = f_dist.sample().clamp(0.06, 1.0)
                 lp_frac = (f_dist.log_prob(f_samp) * a_edge).sum()
                 total_lp = float((lp_bern + 0.20 * lp_frac).item())
-                v_pred = float(val_b[bi].item())
+                v_pred = float(val_list[bi])
 
                 o_ours: List[Order] = []
                 f_np = f_samp.numpy()
@@ -3741,7 +3800,7 @@ def _run_gen4_ppo_episodes_batched(
                     renc = extract_galcon_redir_features(sim, enc)
                     if renc.fleet_ids:
                         rlogits = policy.predict_redir_logits(
-                            h_emb_b[bi : bi + 1, :n],
+                            h_emb_list[bi],
                             torch.from_numpy(renc.cur_dst_idx[None]),
                             torch.from_numpy(renc.redir_feats[None]),
                             torch.ones((1, n), dtype=torch.bool),
@@ -4205,35 +4264,22 @@ def _run_gen4_val_wave_batched(
             pfs.append(canonicalize_galcon_d4(enc.planet_feats))
             ns.append(len(enc.planet_ids))
 
-        k_b = len(even_act)
-        max_n = max(ns)
-        pf_dim = pfs[0].shape[-1]
-        tf_tail = encs[0].timeline_feats.shape[1:]
-        ef_dim = encs[0].edge_feats.shape[-1]
-        pf_b = np.zeros((k_b, max_n, pf_dim), dtype=np.float32)
-        tf_b = np.zeros((k_b, max_n, *tf_tail), dtype=np.float32)
-        ef_b = np.zeros((k_b, max_n, max_n, ef_dim), dtype=np.float32)
-        pm_b = np.zeros((k_b, max_n), dtype=bool)
-        for bi, (pf_c, enc, n) in enumerate(zip(pfs, encs, ns)):
-            pf_b[bi, :n] = pf_c
-            tf_b[bi, :n] = enc.timeline_feats
-            ef_b[bi, :n, :n] = enc.edge_feats
-            pm_b[bi, :n] = True
+        ms_l_list, ms_f_list, _, h_list = _forward_ms_grouped_fast(
+            model_eval,
+            pfs,
+            [enc.timeline_feats for enc in encs],
+            [enc.edge_feats for enc in encs],
+            ns,
+        )
 
         with torch.no_grad():
-            pf_t = torch.from_numpy(pf_b)
-            tf_t = torch.from_numpy(tf_b)
-            ef_t = torch.from_numpy(ef_b)
-            pm_t = torch.from_numpy(pm_b)
-            ms_l_b, ms_f_b, _, h_b = model_eval.forward_multi_send(pf_t, tf_t, ef_t, pm_t, return_hidden=True)
             for bi, idx in enumerate(even_act):
                 enc = encs[bi]
-                n = ns[bi]
                 le_t = torch.from_numpy(enc.legal_edges)
-                ms_p = torch.sigmoid(ms_l_b[bi, :n, :n].masked_fill(~le_t, -1e9)).numpy()
-                ms_f = ms_f_b[bi, :n, :n].numpy()
+                ms_p = torch.sigmoid(ms_l_list[bi].masked_fill(~le_t, -1e9)).numpy()
+                ms_f = ms_f_list[bi].numpy()
                 oa = _decode_gen4_ms_orders_fast(
-                    sims[idx], enc, ms_p, ms_f, h_b[bi : bi + 1, :n], model_eval
+                    sims[idx], enc, ms_p, ms_f, h_list[bi], model_eval
                 )
                 ob = opp_objs[idx]
                 ob_act = _fast_gen4_neural_act(ob, sims[idx], b_pids[idx]) if opp_is_nn[idx] else ob.act(sims[idx], b_pids[idx])
@@ -4377,6 +4423,10 @@ def rl_mirror_league_ppo_gen4(
     ema_teacher = copy.deepcopy(cpu_policy).to(train_dev).eval()
     for p in ema_teacher.parameters():
         p.requires_grad_(False)
+    fixed_val_anchor = copy.deepcopy(cpu_policy).to(train_dev).eval() if freeze_value_head else None
+    if fixed_val_anchor is not None:
+        for p in fixed_val_anchor.parameters():
+            p.requires_grad_(False)
 
     snapshot_pool: List[GalconPlanetTransformer] = []
     if anchor_ckpt_path is not None and anchor_ckpt_path.is_file():
@@ -4747,6 +4797,8 @@ def rl_mirror_league_ppo_gen4(
             full_n_ds = int(ds.tensors[0].shape[1])
             e_p_all = torch.full((n_ds, full_n_ds, full_n_ds), 1e-5, dtype=torch.float32)
             e_v_all = torch.zeros((n_ds,), dtype=torch.float32)
+            f_wdl_all = torch.full((n_ds, 3), 1.0 / 3.0, dtype=torch.float32)
+            is_gen5_pre = hasattr(policy, "decode_wdl_from_hidden")
             with torch.no_grad():
                 pre_sampler = _LengthBucketBatchSampler(ds_lens, 128, shuffle=False, seed=seed + it)
                 for b_indices in pre_sampler:
@@ -4758,8 +4810,18 @@ def rl_mirror_league_ppo_gen4(
                     ep_c = torch.sigmoid(eml_c.masked_fill(~em_c, -1e9)).clamp(1e-5, 1.0 - 1e-5).cpu()
                     tn = t_pf.shape[1]
                     e_p_all[idx_t, :tn, :tn] = ep_c
-                    e_v_all[idx_t] = ev_c.cpu()
-            ds_with_ema = TensorDataset(*ds.tensors, e_p_all, e_v_all)
+                    if fixed_val_anchor is not None:
+                        if is_gen5_pre:
+                            _, _, fv_c, fwdl_c = fixed_val_anchor.forward_multi_send(
+                                t_pf, t_tf, t_ef, t_pm, return_wdl=True
+                            )
+                            f_wdl_all[idx_t] = F.softmax(fwdl_c, dim=-1).cpu()
+                        else:
+                            _, _, fv_c = fixed_val_anchor.forward_multi_send(t_pf, t_tf, t_ef, t_pm)
+                        e_v_all[idx_t] = fv_c.cpu()
+                    else:
+                        e_v_all[idx_t] = ev_c.cpu()
+            ds_with_ema = TensorDataset(*ds.tensors, e_p_all, e_v_all, f_wdl_all)
 
             policy.train()
             loader = DataLoader(
@@ -4771,7 +4833,7 @@ def rl_mirror_league_ppo_gen4(
 
             for _ in range(2):
                 for b_idx, batch in enumerate(loader):
-                    pf, tf, ef, le, om, pm, acts, f_acts, old_lp, adv, ret, aux_o, aux_s, e_p, e_val = (
+                    pf, tf, ef, le, om, pm, acts, f_acts, old_lp, adv, ret, aux_o, aux_s, e_p, e_val, f_wdl = (
                         t.to(train_dev) for t in batch
                     )
                     pf, tf, ef, le, om, pm, acts, f_acts, aux_o, aux_s, e_p = _trim_batch_n(
@@ -4859,6 +4921,7 @@ def rl_mirror_league_ppo_gen4(
 
             cpu_sd = _cpu_state_dict(policy)
             cpu_policy.load_state_dict(cpu_sd)
+            setattr(cpu_policy, "_fast_gen5_infer", None)
             upd_sec = time.time() - t_upd
 
             if it % 3 == 0:
