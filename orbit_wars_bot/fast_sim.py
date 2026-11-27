@@ -15,6 +15,12 @@ import random
 import zlib
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from orbit_wars_bot.fast_sim_cpp import (
+    HAS_ORBIT_SIM_CPP,
+    CppFastOrbitSim,
+    step_fast_sim_cpp,
+    step_n_fast_sim_cpp,
+)
 from orbit_wars_bot.physics import (
     BOARD_SIZE,
     CENTER,
@@ -295,6 +301,7 @@ class FastOrbitSim:
         "done",
         "rewards",
         "_orbit_meta",
+        "use_cpp",
     )
 
     def __init__(
@@ -315,6 +322,7 @@ class FastOrbitSim:
         done: bool = False,
         rewards: Optional[List[int]] = None,
         _orbit_meta: Optional[Dict[int, Optional[Tuple[float, float]]]] = None,
+        use_cpp: Optional[bool] = None,
     ) -> None:
         self.planets = planets
         self.initial_planets = initial_planets
@@ -335,6 +343,7 @@ class FastOrbitSim:
             self._orbit_meta = _orbit_meta
         else:
             self._orbit_meta = self._compute_orbit_meta(initial_planets, comet_planet_ids)
+        self.use_cpp = bool(HAS_ORBIT_SIM_CPP) if use_cpp is None else bool(use_cpp and HAS_ORBIT_SIM_CPP)
 
     @staticmethod
     def _compute_orbit_meta(
@@ -366,6 +375,7 @@ class FastOrbitSim:
         max_steps: int = DEFAULT_EPISODE_STEPS,
         ship_speed: float = DEFAULT_SHIP_SPEED,
         comet_speed: float = DEFAULT_COMET_SPEED,
+        use_cpp: Optional[bool] = None,
     ) -> "FastOrbitSim":
         """Create a fresh Orbit Wars game mirroring ``orbit_wars.interpreter`` init."""
         if seed is None:
@@ -404,6 +414,7 @@ class FastOrbitSim:
             comet_speed=comet_speed,
             episode_seed=seed,
             done=False,
+            use_cpp=use_cpp,
         )
 
     @classmethod
@@ -414,6 +425,7 @@ class FastOrbitSim:
         *,
         num_agents: Optional[int] = None,
         episode_seed: Optional[int] = None,
+        use_cpp: Optional[bool] = None,
     ) -> "FastOrbitSim":
         """Reconstruct a ``FastOrbitSim`` from a Kaggle ``obs`` and optional ``config``."""
         planets = [list(p) for p in _get_field(obs, "planets", [])]
@@ -463,9 +475,10 @@ class FastOrbitSim:
             comet_speed=comet_speed,
             episode_seed=episode_seed,
             done=False,
+            use_cpp=use_cpp,
         )
 
-    def clone(self) -> "FastOrbitSim":
+    def clone(self, use_cpp: Optional[bool] = None) -> "FastOrbitSim":
         """Create a fast independent copy suitable for MCTS rollouts."""
         return FastOrbitSim(
             planets=[p[:] for p in self.planets],
@@ -491,7 +504,26 @@ class FastOrbitSim:
             done=self.done,
             rewards=self.rewards[:],
             _orbit_meta=self._orbit_meta,
+            use_cpp=self.use_cpp if use_cpp is None else use_cpp,
         )
+
+    def to_cpp(self) -> CppFastOrbitSim:
+        """Export into a resident zero-marshal ``CppFastOrbitSim`` instance."""
+        return CppFastOrbitSim.from_fast_sim(self)
+
+    def step_n(self, n_ticks: int) -> bool:
+        """Advance up to ``n_ticks`` empty-action ticks (accelerated via C++17 when available)."""
+        n_ticks = int(n_ticks)
+        if n_ticks <= 0 or self.done:
+            return self.done
+        if self.use_cpp and HAS_ORBIT_SIM_CPP:
+            return step_n_fast_sim_cpp(self, n_ticks)
+        empty: List[List[Any]] = [[] for _ in range(self.num_agents)]
+        for _ in range(n_ticks):
+            if self.done:
+                break
+            self._step_python(empty)
+        return self.done
 
     def step(self, actions: Sequence[Optional[Sequence[Sequence[Any]]]]) -> bool:
         """Advance the simulation by one exact Orbit Wars tick.
@@ -503,6 +535,14 @@ class FastOrbitSim:
         Returns:
             ``self.done`` (True if the game terminated on this tick).
         """
+        if self.done:
+            return True
+        if self.use_cpp and HAS_ORBIT_SIM_CPP:
+            return step_fast_sim_cpp(self, actions)
+        return self._step_python(actions)
+
+    def _step_python(self, actions: Sequence[Optional[Sequence[Sequence[Any]]]]) -> bool:
+        """Pure-Python fallback & reference implementation for one Orbit Wars tick."""
         if self.done:
             return True
 
