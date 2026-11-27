@@ -18,6 +18,7 @@ import hashlib
 import importlib
 import json
 import logging
+import math
 import multiprocessing as mp
 import os
 import sys
@@ -206,24 +207,19 @@ def _arena_params(arena: str, pair_seed_idx: int) -> Dict[str, Any]:
             "act_every": 1,
             "max_ticks": 200,
         }
+    if arena == "large24":
+        return {
+            "num_planets": 24,
+            "width": 560.0,
+            "height": 340.0,
+            "symmetric": False,
+            "act_every": 1,
+            "max_ticks": 240,
+        }
     if arena == "mixed":
         if pair_seed_idx % 4 == 3:
-            return {
-                "num_planets": 24,
-                "width": 560.0,
-                "height": 340.0,
-                "symmetric": False,
-                "act_every": 1,
-                "max_ticks": 240,
-            }
-        return {
-            "num_planets": 18,
-            "width": 400.0,
-            "height": 240.0,
-            "symmetric": True,
-            "act_every": 1,
-            "max_ticks": 200,
-        }
+            return _arena_params("large24", pair_seed_idx)
+        return _arena_params("standard18", pair_seed_idx)
     if arena == "compact6":
         return {
             "num_planets": 6,
@@ -581,7 +577,227 @@ def _execute_pairs(
     print("\n" + ladder.format_leaderboard(secondary_anchor=secondary_anchor, secondary_anchor_elo=secondary_anchor_elo), flush=True)
 
 
-def run_tournament(args: argparse.Namespace) -> EloLadder:
+def _parse_combine_spec(spec: str) -> Tuple[Optional[str], Path]:
+    raw = str(spec).strip()
+    p_direct = Path(raw)
+    if p_direct.is_file() or "=" not in raw:
+        return None, p_direct
+    label, path_str = raw.split("=", 1)
+    return label.strip(), Path(path_str.strip())
+
+
+def combine_ladders(
+    specs: Sequence[str],
+    *,
+    anchor_id: str,
+    anchor_elo: float,
+    secondary_anchor: Optional[str] = None,
+    secondary_anchor_elo: float = 0.0,
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """Load multiple per-size tournament JSONs and aggregate an equal-weight Overall leaderboard."""
+    labels: List[str] = []
+    ladders: Dict[str, EloLadder] = {}
+    sec_estimates: Dict[str, Optional[Dict[str, Any]]] = {}
+    player_order: List[str] = []
+    seen_players: Set[str] = set()
+
+    for spec in specs:
+        explicit_label, path = _parse_combine_spec(spec)
+        if not path.is_file():
+            raise FileNotFoundError(f"Tournament state file not found for --combine: {path}")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        ladder = EloLadder.from_dict(raw["ladder"])
+        if anchor_id in ladder.players:
+            ladder.reanchor(anchor_id, anchor_elo)
+
+        label = explicit_label or str(raw.get("meta", {}).get("arena") or path.stem)
+        if label in ladders:
+            raise ValueError(f"Duplicate --combine label {label!r}; pass explicit LABEL=PATH")
+        labels.append(label)
+        ladders[label] = ladder
+        sec_estimates[label] = (
+            ladder._secondary_estimates(secondary_anchor, secondary_anchor_elo)
+            if secondary_anchor and secondary_anchor in ladder.players
+            else None
+        )
+        for pid in raw.get("ordered_player_ids", list(ladder.players.keys())):
+            if pid not in seen_players:
+                seen_players.add(pid)
+                player_order.append(pid)
+        for pid in ladder.players:
+            if pid not in seen_players:
+                seen_players.add(pid)
+                player_order.append(pid)
+
+    rows: List[Dict[str, Any]] = []
+    for pid in player_order:
+        per_elo: Dict[str, Optional[float]] = {}
+        per_std: Dict[str, Optional[float]] = {}
+        per_games: Dict[str, int] = {}
+        played_elos: List[float] = []
+        played_stds: List[float] = []
+        played_alt_elos: List[float] = []
+        tot_g = tot_w = tot_d = tot_l = 0
+
+        for label in labels:
+            lad = ladders[label]
+            est = lad.estimates.get(pid)
+            if est is not None and est.games > 0:
+                per_elo[label] = float(est.elo)
+                per_std[label] = float(est.elo_std)
+                per_games[label] = int(est.games)
+                played_elos.append(float(est.elo))
+                played_stds.append(float(est.elo_std))
+                sec_map = sec_estimates[label]
+                if sec_map is not None and pid in sec_map:
+                    played_alt_elos.append(float(sec_map[pid].elo))
+                tot_g += int(est.games)
+                tot_w += int(est.wins)
+                tot_d += int(est.draws)
+                tot_l += int(est.losses)
+            else:
+                per_elo[label] = None
+                per_std[label] = None
+                per_games[label] = 0
+
+        sizes_played = len(played_elos)
+        if sizes_played == 0:
+            continue
+        overall_elo = sum(played_elos) / sizes_played
+        if all(math.isfinite(s) for s in played_stds):
+            overall_std = math.sqrt(sum(s * s for s in played_stds)) / sizes_played
+        else:
+            overall_std = float("inf")
+        overall_alt = (
+            sum(played_alt_elos) / len(played_alt_elos)
+            if len(played_alt_elos) == sizes_played and sizes_played > 0
+            else None
+        )
+        score_rate = (tot_w + 0.5 * tot_d) / tot_g if tot_g > 0 else 0.0
+
+        rows.append(
+            {
+                "player_id": pid,
+                "per_size_elo": per_elo,
+                "per_size_std": per_std,
+                "per_size_games": per_games,
+                "sizes_played": sizes_played,
+                "overall_elo": overall_elo,
+                "overall_std": overall_std,
+                "overall_alt_elo": overall_alt,
+                "total_games": tot_g,
+                "total_wins": tot_w,
+                "total_draws": tot_d,
+                "total_losses": tot_l,
+                "score_rate": score_rate,
+            }
+        )
+
+    rows.sort(key=lambda r: (r["sizes_played"] < len(labels), -r["overall_elo"], r["player_id"]))
+    return labels, rows
+
+
+def format_combined_ascii(
+    rows: Sequence[Dict[str, Any]],
+    labels: Sequence[str],
+    anchor_id: str,
+    anchor_elo: float,
+    secondary_anchor: Optional[str] = None,
+    secondary_anchor_elo: float = 0.0,
+) -> str:
+    del anchor_id, anchor_elo, secondary_anchor_elo
+    has_sec = secondary_anchor is not None and any(r["overall_alt_elo"] is not None for r in rows)
+    widths = {lbl: max(8, len(lbl)) for lbl in labels}
+    size_hdr = "".join(f"  {lbl:>{widths[lbl]}}" for lbl in labels)
+    sec_hdr = f"  {'AltElo':>8}" if has_sec else ""
+    hdr = f"{'Rank':>4}  {'Bot':<16}  {'Overall':>8}  {'±Std':>6}{size_hdr}{sec_hdr}  {'Sizes':>5}  {'Games':>5}  {'Score%':>6}"
+    lines = [hdr, "-" * len(hdr)]
+    for rank, r in enumerate(rows, start=1):
+        std_s = f"{r['overall_std']:6.1f}" if math.isfinite(r["overall_std"]) else "   inf"
+        size_vals = "".join(
+            f"  {r['per_size_elo'][lbl]:{widths[lbl]}.1f}"
+            if r["per_size_elo"][lbl] is not None
+            else f"  {'-':>{widths[lbl]}}"
+            for lbl in labels
+        )
+        sec_val = (
+            f"  {r['overall_alt_elo']:8.1f}"
+            if (has_sec and r["overall_alt_elo"] is not None)
+            else (f"  {'-':>8}" if has_sec else "")
+        )
+        lines.append(
+            f"{rank:>4}  {r['player_id']:<16}  {r['overall_elo']:>8.1f}  {std_s}{size_vals}{sec_val}  "
+            f"{r['sizes_played']:>2}/{len(labels):<2}  {r['total_games']:>5}  {100.0 * r['score_rate']:>5.1f}%"
+        )
+    return "\n".join(lines)
+
+
+def format_combined_markdown(
+    rows: Sequence[Dict[str, Any]],
+    labels: Sequence[str],
+    anchor_id: str,
+    anchor_elo: float,
+    secondary_anchor: Optional[str] = None,
+    secondary_anchor_elo: float = 0.0,
+) -> str:
+    has_sec = secondary_anchor is not None and any(r["overall_alt_elo"] is not None for r in rows)
+    size_cols = "".join(f" {lbl} |" for lbl in labels)
+    size_seps = "---:|" * len(labels)
+    sec_col = f" Overall vs `{secondary_anchor}` ({secondary_anchor_elo:.0f}) |" if has_sec else ""
+    sec_sep = "---:|" if has_sec else ""
+    lines = [
+        f"| Rank | Bot | Overall Elo (`{anchor_id}={anchor_elo:.0f}`) | ±Std |{size_cols}{sec_col} Sizes | Total Games | Score% |",
+        f"|---:|---|---:|---:|{size_seps}{sec_sep}:---:|---:|---:|",
+    ]
+    for rank, r in enumerate(rows, start=1):
+        std_s = f"±{r['overall_std']:.1f}" if math.isfinite(r["overall_std"]) else "±inf"
+        size_vals = "".join(
+            f" `{r['per_size_elo'][lbl]:.1f}` |" if r["per_size_elo"][lbl] is not None else " — |"
+            for lbl in labels
+        )
+        sec_val = (
+            f" `{r['overall_alt_elo']:.1f}` |"
+            if (has_sec and r["overall_alt_elo"] is not None)
+            else (" — |" if has_sec else "")
+        )
+        lines.append(
+            f"| {rank} | `{r['player_id']}` | **{r['overall_elo']:.1f}** | {std_s} |{size_vals}{sec_val} "
+            f"{r['sizes_played']}/{len(labels)} | {r['total_games']} | {100.0 * r['score_rate']:.1f}% |"
+        )
+    return "\n".join(lines)
+
+
+def run_tournament(args: argparse.Namespace) -> Optional[EloLadder]:
+    if getattr(args, "combine", None):
+        labels, rows = combine_ladders(
+            args.combine,
+            anchor_id=args.anchor,
+            anchor_elo=args.anchor_elo,
+            secondary_anchor=args.secondary_anchor,
+            secondary_anchor_elo=args.secondary_anchor_elo,
+        )
+        print(
+            format_combined_ascii(
+                rows,
+                labels,
+                anchor_id=args.anchor,
+                anchor_elo=args.anchor_elo,
+                secondary_anchor=args.secondary_anchor,
+                secondary_anchor_elo=args.secondary_anchor_elo,
+            )
+        )
+        if args.markdown_out:
+            md = format_combined_markdown(
+                rows,
+                labels,
+                anchor_id=args.anchor,
+                anchor_elo=args.anchor_elo,
+                secondary_anchor=args.secondary_anchor,
+                secondary_anchor_elo=args.secondary_anchor_elo,
+            )
+            Path(args.markdown_out).write_text(md + "\n", encoding="utf-8")
+        return None
+
     state_path = Path(args.state)
     games_per_pair = max(2, int(args.games_per_pair))
     if games_per_pair % 2 != 0:
@@ -859,7 +1075,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--arena",
-        choices=("standard18", "mixed", "compact6"),
+        choices=("compact6", "standard18", "large24", "mixed"),
         default="standard18",
         help="Real-C++ map arena preset.",
     )
@@ -892,6 +1108,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--resume", action="store_true", help="Resume or extend an existing --state JSON.")
     p.add_argument("--report-only", action="store_true", help="Re-fit and print leaderboard from --state.")
+    p.add_argument(
+        "--combine",
+        nargs="+",
+        default=[],
+        help="Combine multiple per-size state JSONs (LABEL=PATH or PATH) into an Overall leaderboard.",
+    )
     p.add_argument("--markdown-out", default=None, help="Optional path to write Markdown leaderboard table.")
     return p
 

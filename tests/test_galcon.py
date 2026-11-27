@@ -3619,6 +3619,95 @@ def test_tournament_cli_end_to_end_and_resume(tmp_path, capsys):
     assert "| Rank |" in md_text and "`bot:random`" in md_text
 
 
+def test_tournament_large24_and_combine_ladders(tmp_path, capsys):
+    """Verify large24 arena params and multi-size --combine Overall leaderboard aggregation."""
+    from galcon.tournament import _arena_params, combine_ladders, main as tournament_main
+
+    ap_lg = _arena_params("large24", 0)
+    assert ap_lg == {
+        "num_planets": 24,
+        "width": 560.0,
+        "height": 340.0,
+        "symmetric": False,
+        "act_every": 1,
+        "max_ticks": 240,
+    }
+
+    p1 = tmp_path / "compact6.json"
+    p2 = tmp_path / "standard18.json"
+    md_path = tmp_path / "overall.md"
+
+    for arena_name, st_path in (("compact6", p1), ("standard18", p2)):
+        tournament_main([
+            "--bots",
+            "bot:random=heuristic:random",
+            "bot:classic=heuristic:classic",
+            "bot:rusher=heuristic:rusher",
+            "--state", str(st_path),
+            "--mode", "ladder",
+            "--arena", arena_name,
+            "--games-per-pair", "2",
+            "--rounds", "2",
+            "--workers", "1",
+            "--anchor", "bot:classic",
+            "--anchor-elo", "1200",
+            "--secondary-anchor", "bot:random",
+            "--secondary-anchor-elo", "0",
+        ])
+
+    # Partial-coverage 4th bot in Compact 6pl only
+    tournament_main([
+        "--resume",
+        "--bots",
+        "bot:macro=heuristic:macro",
+        "--state", str(p1),
+        "--mode", "ladder",
+        "--arena", "compact6",
+        "--games-per-pair", "2",
+        "--rounds", "2",
+        "--workers", "1",
+        "--anchor", "bot:classic",
+        "--anchor-elo", "1200",
+    ])
+
+    labels, rows = combine_ladders(
+        [f"Compact 6pl={p1}", f"Standard 18pl={p2}"],
+        anchor_id="bot:classic",
+        anchor_elo=1200.0,
+        secondary_anchor="bot:random",
+        secondary_anchor_elo=0.0,
+    )
+    assert labels == ["Compact 6pl", "Standard 18pl"]
+    assert [r["player_id"] for r in rows][-1] == "bot:macro"
+    by_id = {r["player_id"]: r for r in rows}
+    assert set(by_id) == {"bot:random", "bot:classic", "bot:rusher", "bot:macro"}
+    assert abs(by_id["bot:classic"]["overall_elo"] - 1200.0) < 1e-8
+    assert by_id["bot:macro"]["sizes_played"] == 1
+    assert by_id["bot:macro"]["per_size_elo"]["Standard 18pl"] is None
+    assert abs(
+        by_id["bot:rusher"]["overall_elo"]
+        - 0.5 * (by_id["bot:rusher"]["per_size_elo"]["Compact 6pl"] + by_id["bot:rusher"]["per_size_elo"]["Standard 18pl"])
+    ) < 1e-8
+
+    capsys.readouterr()
+    tournament_main([
+        "--combine",
+        f"Compact 6pl={p1}",
+        f"Standard 18pl={p2}",
+        "--anchor", "bot:classic",
+        "--anchor-elo", "1200",
+        "--secondary-anchor", "bot:random",
+        "--secondary-anchor-elo", "0",
+        "--markdown-out", str(md_path),
+    ])
+    out = capsys.readouterr().out
+    assert "Compact 6pl" in out and "Standard 18pl" in out
+    md_text = md_path.read_text(encoding="utf-8")
+    assert "Compact 6pl |" in md_text and "Standard 18pl |" in md_text
+    assert "| `bot:macro` |" in md_text and "| — |" in md_text
+
+
+
 
 
 
