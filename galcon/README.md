@@ -1,6 +1,23 @@
-# Galcon AI Wave 22 — Search Guard75 + Large-Map Upgrade (`80.00%` Elo-Weighted • `1961.6` True MLE Elo • `85.0%` Sparky!)
+# Galcon AI Wave 24 — 3-Size Guard75 League EI + On-Policy `--ppo-temp` Breakthrough (`78.33%` 3-Size Search • `93.8%` Compact • `1946.6 Elo` Zero-Search Pure!)
 
 A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-lightzero` featuring our **Gen 5 Edge-Gated Residual-Edge WDL Transformer** ([`galcon/gen5_model.py`](gen5_model.py), `2.93M` params + fused TorchScript [`FastGen5Infer`](gen5_model.py)), **`esparano`'s real Galcon 2 C++ multi-ship physics simulator** ([`galcon/sim_core.cpp`](sim_core.cpp)), Phil Hassey's official **`gbots`** protocol, and zero-copy head-to-head benchmarking against Evan Sparano's (`esparano/GalconModVault`) unmodified Lua tournament bots (`Sparky v1.6`, `Waffle3z-GA / bots_waffle3z_optimized`, & `EsparanBot v0.2`) via [`galcon/lua_bridge.py`](lua_bridge.py).
+
+## Wave 24 Highlights — Unbiased `--pos-weight 1.0`, Exact On-Policy `--ppo-temp`, 3-Size Guard75 League EI (`78.33%` 3-Size Search & `1946.6 Elo` Zero-Search Pure!)
+- **Training Pipeline Upgrades ([`galcon/train.py`](train.py)):**
+  - **Unbiased Multi-Send Supervision (`--pos-weight`, `--opening-pol-weight`):** Eliminated `pos_weight=2.2` logit inflation that caused early tick `0–10` over-firing (`prec 48.7% → 70.1%`, cutting Large-map early-rush losses in half) and up-weighted critical opening ticks `0–12` (`sim.tick <= 12` 100% 1-tick EI coverage).
+  - **Exact On-Policy Bernoulli Temperature (`--ppo-temp`, e.g. `0.55`):** Scales multi-edge logits `ms_l / T` identically in both PPO rollouts and PPO log-prob updates while keeping unscaled EMA KL — suppressing ~270-edge tail sampling noise `30×` and turning 1-tick Multi-Size League PPO from regression into monotonic `+8.6%` / `+96.8 Elo` gains.
+- **New 3-Size Search Champion ([`checkpoints/galcon_gen5_w24.pt`](../checkpoints/galcon_gen5_w24.pt), default `--bot search`, `45.6 ms/tick`):**
+  - Collected `15,935` fresh 1-tick balanced 3-size Guard75 Neural-League EI states (`Compact 1,943 | Std 6,126 | Large 7,866`, bringing our 100% real-C++ corpus to **`66,193` states**), trained `W24_Unified_e2` on `44,077` 1-tick states (`vloss=0.365, vsign=87.7%, prec=63.5%`), recalibrated `W19`'s WDL value head across all `66,193` states (`val_ce: 0.5531 → 0.5248, vsign: 88.7% → 91.3%`), and formed a zero-latency 3-way Model Soup (`0.40 W21 + 0.30 W19_VCal66k + 0.30 W24_Unified_e2`).
+  - **Jumped `+11.81%` in 3-Size Boss Avg (`66.52% → 78.33%`) over `W21_Search`:**
+    - **Compact 6pl (`32g 1t`):** **`93.8%`** (`Sparky 96.9% [15–0–1]`, `Waffle3z 90.6% [14–1–1]` — BOTH >90%, `+6.3%` vs W21!)
+    - **Standard 18pl (`104g`):** **`78.75%`** Dual-Boss (`Sparky 80.0% [s14k 85.0%]`, `Waffle3z 77.5% [s9.5k 80.0%]`, `EsparanBot 58.3%`, `1918.5 Elo`)
+    - **Large 24pl (`24g / 48g 2t`):** **`62.5%`** canonical 24g (`Sparky 50.0% [6–6]`, `Waffle3z 75.0% [9–3]`, **`+29.2%`** vs W21's `33.3%`!) • **`47.9%`** on full 48g (`Sparky 37.5%`, `Waffle3z 58.3%`)
+    - **Heuristics (`32g 2t`):** **`96.9%` (`31–1–0`)**
+- **New Zero-Search Pure Champion ([`checkpoints/galcon_gen5_w24_pure.pt`](../checkpoints/galcon_gen5_w24_pure.pt), default `--bot transformer`, `7.5 ms/tick`, ZERO Search!):**
+  - Combined unbiased `--pos-weight 1.0 --opening-pol-weight 2.5` supervision, exact logit bias calibration, and `--ppo-temp 0.55` Multi-Size 1-tick League PPO (`--boss-draw-penalty -0.45`), beating `W21_Pure` on **EVERY map size with ZERO regression** and matching `W21_Search`'s Standard 18pl Elo at **7.5 ms/tick**:
+    - **Standard 18pl (`104g`, ZERO SEARCH!):** **`1946.6` True MLE Elo (`+103.2 Elo` vs W21_Pure!)** — **`82.5%` Waffle3z (`33–7–0`, `s14k 90.0%`!)**, **`79.2%` EsparanBot (`19–5–0`, `+33.4%`!)**, **`70.0%` Sparky (`24–8–8`)**, `76.25%` Dual-Boss
+    - **Compact 6pl (`32g 1t`):** **`56.2%`** (`+7.8%` vs W21_Pure, `68.8%` Sparky) • **Large 24pl (`24g 2t`):** **`33.3%`** (`+8.3%` vs W21_Pure, `41.7%` Waffle3z) • **Heuristics:** **`90.6%`**
+    - **3-Size Boss Avg:** **`55.28%` (`+7.05%` vs W21_Pure's `48.23%`)**
 
 ## Wave 22 Highlights — Guard75 Search Upgrade (`1961.6` MLE Elo), DirectML Optimizer Fix & EI Teacher Parity
 - **Search Engine Upgrades ([`galcon/transformer_bot.py`](transformer_bot.py), pushed `W21` to `80.00%` Elo-Weighted / `1961.6` True MLE Elo on our 160-game real-C++ suite!):**

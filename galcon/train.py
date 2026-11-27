@@ -2946,8 +2946,8 @@ def collect_gen4_multisend_ei_dataset(
                 if sim.tick % act_every == 0:
                     orders_map: Dict[int, List[Order]] = {}
                     search_pids = (1, 2) if (is_selfplay or is_dual_search) else (our_pid,)
-                    # When playing full 1-tick speed, always record critical opening ticks (0-6) and alternate thereafter
-                    rec_tick = (act_every >= 2) or (sim.tick <= 6) or (sim.tick % 2 == (g % 2))
+                    # When playing full 1-tick speed, always record critical opening ticks (0-12) and alternate thereafter
+                    rec_tick = (act_every >= 2) or (sim.tick <= 12) or (sim.tick % 2 == (g % 2))
                     for pid in search_pids:
                         ag = search_ag if (is_selfplay or pid == our_pid or league_opp is None) else league_opp
                         enc = extract_galcon_features(sim, pid, feature_version=2)
@@ -3111,6 +3111,7 @@ def _gen4_multisend_loss(
     t_msp=None,
     kd_alpha: float = 0.0,
     value_only: bool = False,
+    opening_pol_weight: float = 1.0,
 ):
     if t_msp is not None:
         pf, tf, ef, le, om, pm, ms_tar, ms_fr, aux_own, aux_shp, t_msp = _trim_batch_n(
@@ -3155,14 +3156,23 @@ def _gen4_multisend_loss(
 
     edge_valid = om.unsqueeze(-1) & le
     ev_f = edge_valid.float()
-    ev_sum = ev_f.sum()
+    if opening_pol_weight > 1.0:
+        open_w = torch.where(
+            pf[:, 0, 17] <= 0.065,
+            torch.tensor(float(opening_pol_weight), device=pf.device, dtype=pf.dtype),
+            torch.tensor(1.0, device=pf.device, dtype=pf.dtype),
+        )[:, None, None]
+        ev_w = ev_f * open_w
+    else:
+        ev_w = ev_f
+    ev_sum = ev_w.sum()
     if float(ev_sum.item()) > 0.0:
         pw = torch.tensor(pos_weight, device=ms_logits.device, dtype=ms_logits.dtype)
         bce_all = _stable_bce_with_logits(ms_logits, ms_tar, pos_weight=pw)
-        ms_bce = (bce_all * ev_f).sum() / ev_sum.clamp_min(1.0)
+        ms_bce = (bce_all * ev_w).sum() / ev_sum.clamp_min(1.0)
         if t_msp is not None and kd_alpha > 0.0:
             soft_all = _stable_bce_with_logits(ms_logits, t_msp.clamp(1e-4, 1.0 - 1e-4))
-            soft_bce = (soft_all * ev_f).sum() / ev_sum.clamp_min(1.0)
+            soft_bce = (soft_all * ev_w).sum() / ev_sum.clamp_min(1.0)
             pol_loss = (1.0 - kd_alpha) * ms_bce + kd_alpha * soft_bce
         else:
             pol_loss = ms_bce
@@ -3223,6 +3233,8 @@ def train_gen4_multisend_supervised(
     batch_size: int = 96,
     lr: float = 3.5e-4,
     kd_alpha: float = 0.30,
+    opening_pol_weight: float = 1.0,
+    pos_weight: float = 0.0,
     arch: str = "gen4",
     freeze_trunk: bool = False,
     seed: int = 42,
@@ -3346,7 +3358,7 @@ def train_gen4_multisend_supervised(
         base_params = [p for k, p in model.named_parameters() if not k.startswith("ms_")]
         param_groups = [{"params": base_params, "lr": lr * 0.45}, {"params": ms_params, "lr": lr * 2.5}]
 
-    ms_pos_weight = 2.2 if use_gen5 else 4.5
+    ms_pos_weight = float(pos_weight) if pos_weight > 0.0 else (2.2 if use_gen5 else 4.5)
     if freeze_trunk:
         for pname, p in model.named_parameters():
             if not (pname.startswith("val_") or "value_head" in pname):
@@ -3392,6 +3404,7 @@ def train_gen4_multisend_supervised(
                 t_msp=t_msp,
                 kd_alpha=(kd_alpha if has_kd else 0.0),
                 value_only=freeze_trunk,
+                opening_pol_weight=opening_pol_weight,
             )
             if r_iter is not None and (b_idx % 4 == 0):
                 try:
@@ -3601,9 +3614,11 @@ def _run_gen4_ppo_episode(
     boss_draw_penalty: float,
     max_sends_per_planet: int,
     act_every: int = 2,
+    rollout_temp: float = 1.0,
 ):
     """Run one Gen 4/5 multi-send PPO rollout episode and compute GAE advantages/returns."""
     act_every = max(1, int(act_every))
+    inv_temp = 1.0 / max(0.15, float(rollout_temp))
     opp_pid = 2 if ours_pid == 1 else 1
     sim = GalconSim.create(
         seed=map_seed, num_planets=n_pl, width=w, height=h, max_ticks=_galcon_max_ticks_for_planets(n_pl), symmetric=sym
@@ -3631,7 +3646,7 @@ def _run_gen4_ppo_episode(
                 om_t = torch.from_numpy(enc.owned_mask)
                 edge_m = om_t.unsqueeze(-1) & le_t
 
-                ms_l0 = ms_l[0].masked_fill(~edge_m, -1e9)
+                ms_l0 = (ms_l[0] * inv_temp).masked_fill(~edge_m, -1e9)
                 b_dist = torch.distributions.Bernoulli(logits=ms_l0)
                 a_edge = b_dist.sample() * edge_m.float()
                 ms_probs_np = torch.sigmoid(ms_l0).numpy()
@@ -3781,6 +3796,7 @@ def _run_gen4_ppo_episodes_batched(
     boss_draw_penalty: float,
     max_sends_per_planet: int,
     act_every: int = 2,
+    rollout_temp: float = 1.0,
 ):
     """Run multiple Gen 4/5 PPO rollout episodes in lockstep with batched policy inference.
 
@@ -3788,6 +3804,7 @@ def _run_gen4_ppo_episodes_batched(
     No two elements in the same batch should share a stateful ``GalconLuaBotBridge`` instance.
     """
     act_every = max(1, int(act_every))
+    inv_temp = 1.0 / max(0.15, float(rollout_temp))
     m = len(ep_specs)
     if m == 0:
         return []
@@ -3799,6 +3816,7 @@ def _run_gen4_ppo_episodes_batched(
                 is_boss=s0[8], gamma=gamma, gae_lam=gae_lam, frac_std=frac_std,
                 draw_penalty=draw_penalty, boss_draw_penalty=boss_draw_penalty,
                 max_sends_per_planet=max_sends_per_planet, act_every=act_every,
+                rollout_temp=rollout_temp,
             )
         ]
 
@@ -3873,7 +3891,7 @@ def _run_gen4_ppo_episodes_batched(
                 le_t = torch.from_numpy(enc.legal_edges)
                 om_t = torch.from_numpy(enc.owned_mask)
                 edge_m = om_t.unsqueeze(-1) & le_t
-                ms_l0 = ms_l_list[bi].masked_fill(~edge_m, -1e9)
+                ms_l0 = (ms_l_list[bi] * inv_temp).masked_fill(~edge_m, -1e9)
                 b_dist = torch.distributions.Bernoulli(logits=ms_l0)
                 a_edge = b_dist.sample() * edge_m.float()
                 ms_probs_np = torch.sigmoid(ms_l0).numpy()
@@ -4001,6 +4019,7 @@ def _gen4_ppo_rollout_worker(args_tuple):
         max_sends_per_planet,
         worker_seed,
         act_every,
+        rollout_temp,
     ) = args_tuple
     torch.set_num_threads(1)
     torch.manual_seed(worker_seed)
@@ -4101,6 +4120,7 @@ def _gen4_ppo_rollout_worker(args_tuple):
             boss_draw_penalty=boss_draw_penalty,
             max_sends_per_planet=max_sends_per_planet,
             act_every=act_every,
+            rollout_temp=rollout_temp,
         )
         for (p_idx, side_idx), ep_out in zip(wave_refs, outs):
             pair_results[p_idx][side_idx] = ep_out
@@ -4537,6 +4557,7 @@ def rl_mirror_league_ppo_gen4(
     compact_map_prob: float = 0.0,
     max_sends_per_planet: int = 6,
     act_every: int = 2,
+    rollout_temp: float = 1.0,
     eval_every: int = 4,
     seed: int = 34000,
     train_threads: int = 2,
@@ -4846,6 +4867,7 @@ def rl_mirror_league_ppo_gen4(
                         max_sends_per_planet,
                         seed + it * 10000 + w_i,
                         act_every,
+                        rollout_temp,
                     )
                     for w_i, sh in enumerate(shards)
                     if sh
@@ -4922,12 +4944,14 @@ def rl_mirror_league_ppo_gen4(
                         is_boss=is_boss, gamma=gamma, gae_lam=gae_lam, frac_std=frac_std,
                         draw_penalty=draw_penalty, boss_draw_penalty=boss_draw_penalty,
                         max_sends_per_planet=max_sends_per_planet, act_every=act_every,
+                        rollout_temp=rollout_temp,
                     )
                     ep_b = _run_gen4_ppo_episode(
                         cpu_policy, map_seed, n_pl, w, h, sym, 2, opp_snap, opp_bot,
                         is_boss=is_boss, gamma=gamma, gae_lam=gae_lam, frac_std=frac_std,
                         draw_penalty=draw_penalty, boss_draw_penalty=boss_draw_penalty,
                         max_sends_per_planet=max_sends_per_planet, act_every=act_every,
+                        rollout_temp=rollout_temp,
                     )
                     total_eps += 2
                     won_a, won_b = ep_a[5], ep_b[5]
@@ -5037,8 +5061,10 @@ def rl_mirror_league_ppo_gen4(
                     edge_m = om.unsqueeze(-1) & le
                     edge_f = edge_m.float()
                     edge_sum = edge_f.sum().clamp_min(1.0)
+                    inv_temp = 1.0 / max(0.15, float(rollout_temp))
+                    ms_l_t = (ms_l * inv_temp).masked_fill(~edge_m, -1e9)
                     ms_l = ms_l.masked_fill(~edge_m, -1e9)
-                    bern_lp, ent = _bernoulli_log_prob_and_entropy(ms_l, acts)
+                    bern_lp, ent = _bernoulli_log_prob_and_entropy(ms_l_t, acts)
                     new_lp_bern = (bern_lp * edge_f).sum(dim=(-1, -2))
 
                     f_mu = ms_f.clamp(0.06, 0.98)
@@ -5306,6 +5332,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--freeze-value-head", action="store_true", help="Freeze WDL/scalar value head parameters and skip GAE value loss during PPO to preserve Search value calibration.")
     parser.add_argument("--freeze-trunk", action="store_true", help="Freeze trunk/policy parameters and recalibrate ONLY WDL/scalar value head during gen4_ei.")
     parser.add_argument("--kd-alpha", type=float, default=0.30)
+    parser.add_argument("--opening-pol-weight", type=float, default=1.0, help="Extra policy BCE weight on critical opening ticks (0-12) during gen4_ei.")
+    parser.add_argument("--pos-weight", type=float, default=0.0, help="Positive class weight for multi-send BCE in gen4_ei (0=arch default: 2.2 gen5, 4.5 gen4; 1.0=unbiased).")
+    parser.add_argument("--ppo-temp", type=float, default=1.0, help="Exact on-policy Bernoulli logit temperature during gen4_ppo rollouts and updates (e.g. 0.55 suppresses tail send noise).")
     parser.add_argument("--arch", choices=["gen4", "gen5"], default="gen4", help="Model architecture for gen4_ei supervised/KD training (gen4=1.29M, gen5=2.93M Edge-Gated WDL).")
     parser.add_argument("--filter-draws", action="store_true", help="Mask boss stalemate draws from EI policy loss while keeping value/aux supervision.")
     parser.add_argument("--act-every", type=int, default=2, help="Action cadence during EI game collection (1=full-speed tournament cadence, 2=classic 2-tick).")
@@ -5484,6 +5513,8 @@ def main(argv: list[str] | None = None) -> int:
             epochs=args.epochs,
             lr=args.lr if args.lr > 0 else (4.5e-4 if args.arch == "gen5" else 3.5e-4),
             kd_alpha=args.kd_alpha,
+            opening_pol_weight=args.opening_pol_weight,
+            pos_weight=args.pos_weight,
             arch=args.arch,
             freeze_trunk=args.freeze_trunk,
             seed=args.seed,
@@ -5517,6 +5548,7 @@ def main(argv: list[str] | None = None) -> int:
             large_map_prob=args.large_map_prob,
             compact_map_prob=args.compact_map_prob,
             act_every=args.act_every,
+            rollout_temp=args.ppo_temp,
             eval_every=max(1, args.eval_every),
             seed=args.seed,
             train_threads=args.train_threads,
