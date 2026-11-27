@@ -416,3 +416,46 @@ def test_gen9_midgame_ppo_step_weighting():
     )
     assert np.isfinite(upd["loss"])
     assert upd["kl"] >= 0.0
+
+
+def test_ensemble_mixed_feature_versions(tmp_path: Path):
+    from orbit_wars_bot.fast_sim import FastOrbitSim
+    from orbit_wars_bot.planet_transformer import EnsemblePlanetTransformerAgent, extract_planet_features
+
+    m_v2 = PlanetTimelineTransformer(
+        d_model=32, n_heads=2, n_layers=1, dim_ff=64, timeline_dim=14, arch_version=3, target_cond_launch=True, feature_version=2
+    )
+    m_v3 = PlanetTimelineTransformer(
+        d_model=32, n_heads=2, n_layers=1, dim_ff=64, timeline_dim=14, arch_version=3, target_cond_launch=True, feature_version=3
+    )
+    p2 = tmp_path / "m_v2.pt"
+    p3 = tmp_path / "m_v3.pt"
+    torch.save({"model_config": dict(m_v2.config), "model_state_dict": m_v2.state_dict()}, p2)
+    torch.save({"model_config": dict(m_v3.config), "model_state_dict": m_v3.state_dict()}, p3)
+
+    ens = EnsemblePlanetTransformerAgent(
+        [p2, p3], weights=[0.5, 0.5], use_rot_tta=False, use_d4_tta=False, force_all_in=True, decoupled_logit=True
+    )
+    seen_fvs: List[Tuple[int, np.ndarray]] = []
+    orig_v2_fn = ens.agents[0].predict_probs_and_value
+    orig_v3_fn = ens.agents[1].predict_probs_and_value
+
+    def _wrap(orig_fn, expected_fv: int):
+        def _inner(enc, **kw):
+            seen_fvs.append((expected_fv, enc.timeline_feats[:, :, 12].copy()))
+            return orig_fn(enc, **kw)
+        return _inner
+
+    ens.agents[0].predict_probs_and_value = _wrap(orig_v2_fn, 2)  # type: ignore[method-assign]
+    ens.agents[1].predict_probs_and_value = _wrap(orig_v3_fn, 3)  # type: ignore[method-assign]
+
+    sim = FastOrbitSim.from_seed(seed=200, num_agents=2, max_steps=100)
+    obs = sim.to_observation(player=0)
+    moves = ens.act(obs)
+    assert isinstance(moves, list)
+    assert len(seen_fvs) == 2
+
+    exp_v2 = extract_planet_features(obs, feature_version=2).timeline_feats[:, :, 12]
+    exp_v3 = extract_planet_features(obs, feature_version=3).timeline_feats[:, :, 12]
+    assert np.allclose(seen_fvs[0][1], exp_v2)
+    assert np.allclose(seen_fvs[1][1], exp_v3)
