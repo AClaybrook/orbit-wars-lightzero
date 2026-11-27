@@ -2343,6 +2343,7 @@ def create_planet_transformer_agent(
     return _kaggle_agent
 
 
+
 def create_search_planet_transformer_agent(
     checkpoint_path: str | Path,
     *,
@@ -2413,3 +2414,11 @@ def create_ensemble_planet_transformer_agent(
         return agent_obj.act(obs, config)
 
     return _kaggle_agent
+
+
+def __getattr__(name: str) -> Any:
+    if name in ("OrbitSearchAgent", "create_orbit_search_agent", "evaluate_settled_shared_physics"):
+        from orbit_wars_bot import orbit_search as _os_mod
+
+        return getattr(_os_mod, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

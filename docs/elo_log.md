@@ -363,3 +363,19 @@ This log tracks calibrated **Kaggle-equivalent Elo** estimates (anchored against
 - **Stage 16B Feature Infrastructure Prepared (`65` Scoped Tests Passing):**
   - Discovered `timeline_feats[:, :, 12]` approx `cap_need` differed from `#2`'s exact simultaneous-arrival `ships_for_capture` on `74.2%` (`233/314`) of live ticks; implemented exact `compute_ships_for_capture` + `feature_version=3` (`orbit_wars_bot/planet_transformer.py`, shared with `orbit_wars_bot/hober_sparring.py`) and `--target-kl-weight` in `scripts/distill_soft_kd.py`.
 - **Promotion Summary:** `checkpoints/planet_transformer_best.pt` promoted to **`Gen 15B PT-v3.5 GRPO-it6`** (`24–0–24 / 50.0%` on 48g Boss Suite, `33–0–39 / 45.8%` on 72g, `70.0%` vs. both `Gen 13` models, `60.0%` vs. `Gen 14 KD`, `4–0–0` vs. `subham_v14`, `58.80–68.97 ms/t`).
+
+---
+
+### Step 2.2 — C++17 `OrbitSearchAgent` Ablation & Latency Verification (2026-11-27)
+
+- **Architecture (`orbit_wars_bot/orbit_search.py`):** Uncertainty-gated 2-ply neural lookahead over `CppFastOrbitSim` (`H=10`, mid-ply neural replan at `t=4`, `K <= 3`, `evaluate_settled_shared_physics`, Stage-2 rotational leaf refinement, asymmetric override gate). Wired `orbit_search` into `scripts/evaluate.py` and added unit + latency tests in `tests/test_orbit_search.py`.
+- **24g Ablation vs. `#2 Hober Malloc` (`seeds 200–223`, 6 parallel workers, `Gen 15B` Pure baseline = `13–0–11 / 54.2%`, `AvgLen=187.3`, `103.7 ms` mean / `155.4 ms` p95 under 6-worker load):**
+  - `cfg_bal` (`nn_w=0.55, prior=0.05, margin=0.06, cliff=0.14`): `7–0–17 (29.2%)` | `Trig=72.4% Over=2.3%` | `168.0 ms` mean / `303.8 ms` p95 (`369.4 ms` max)
+  - `cfg_tac` (`nn_w=0.30, prior=0.06, margin=0.08, cliff=0.12`): `7–0–17 (29.2%)` | `Trig=71.3% Over=2.1%` | `165.2 ms` mean / `301.1 ms` p95 (`402.5 ms` max)
+  - `cfg_settled` (`nn_w=0.00, prior=0.05, margin=0.08, cliff=0.14`): `9–0–15 (37.5%)` | `Trig=72.6% Over=2.1%` | `141.2 ms` mean / `240.3 ms` p95 (`361.7 ms` max)
+  - `cfg_nn` (`nn_w=0.80, prior=0.06, margin=0.08, cliff=0.14`): `10–0–14 (41.7%)` | `Trig=74.7% Over=1.8%` | `170.1 ms` mean / `309.9 ms` p95 (`359.4 ms` max)
+  - `cfg_tight` (locked defaults: `nn_w=0.80, prior=0.06, margin=0.10, cliff=0.07, alt_ratio=0.45, max_candidates=3, budget=0.21s`): `8–0–16 (33.3%)` | `Trig=65.8% Over=0.4%` | `130.9 ms` mean / `241.0 ms` p95 (`339.0 ms` max)
+- **Solo 1-Thread Verification (`scripts/evaluate.py`, `orbit_search_t53:checkpoints/planet_transformer_best.pt`):**
+  - **2P vs. `#2 Hober Malloc` (`seeds 200–207`, 8g):** `4–0–4 (50.0%)`, `AvgRank=1.50`, `AvgLen=205.6t`, **`130.76 ms` mean**, **`214.31 ms` p95** (`253.17 ms` max, cleanly `< 300 ms` gate).
+  - **4P FFA vs. `3× subham_v14` (`seeds 400–407`, 8g):** **`8–0–0 (100.0%)`**, `AvgRank=1.00`, `AvgLen=123.0t`, **`151.18 ms` mean**, **`233.04 ms` p95** (`301.46 ms` max).
+- **Takeaway:** Fast C++17 search cuts Stage 16A p95 latency from `661.5 ms` down to **`214.31 ms`**, but `Gen 15B` Pure (`50.0%` 48g Boss, `58.80 ms/t`) remains the active default until Gen 17 upgrades `feature_version=3` and recalibrates the value head.

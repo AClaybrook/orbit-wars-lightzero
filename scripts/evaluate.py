@@ -228,6 +228,17 @@ def resolve_agent(spec: str, checkpoint: str | None = None, sims: int = 20, time
             rollout_horizon=10,
             time_budget_sec=min(0.35, time_budget),
         )
+    matched_orbit_search, thr_os, arg_os = _parse_threshold_spec("orbit_search", spec)
+    if matched_orbit_search:
+        from orbit_wars_bot.orbit_search import create_orbit_search_agent
+
+        ckpt_path = arg_os or checkpoint or str(REPO_ROOT / "checkpoints" / "planet_transformer_best.pt")
+        eff_thr = 0.53 if "_t" not in spec.split(":", 1)[0] else thr_os
+        return create_orbit_search_agent(
+            checkpoint_path=ckpt_path,
+            launch_threshold=eff_thr,
+            time_budget_sec=min(0.21, time_budget),
+        )
     if spec in ("planet_transformer_search", "pt_search") or spec.startswith("planet_transformer_search:") or spec.startswith("pt_search:"):
         from orbit_wars_bot.planet_transformer import create_search_planet_transformer_agent
 
