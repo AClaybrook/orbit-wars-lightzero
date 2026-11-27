@@ -42,6 +42,41 @@ A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-ligh
 - **Continued Frozen-Value-Head `1-Tick` C++ PPO ([`checkpoints/galcon_gen5_w19.pt`](../checkpoints/galcon_gen5_w19.pt)):**
   - Continued 7 gentle iterations (`lr=2.2e-5`, `--freeze-value-head --v-anchor-coef 0.50`, `42%` Sparky / `38%` Waffle3z) directly on top of our sharpest `vloss=0.370` C++ WDL value head + `3,495` 100% real C++ redirs, pushing `val_56g` to `67.9%` (`comp = 63.1%`, `87.5%` / `7–1` vs `Gen5_W18`) → **`67.46%` Elo-Weighted / `1851.3` True MLE Elo Search** (`71.2%` Waffle3z, `66.2%` Sparky, `50.0% / 50.0%` Large 24pl) & **`55.71%` / `1765.3 Elo` Pure**.
 
+## Unified Real-C++ Cross-Bot Bradley-Terry Elo Leaderboard (1,056 Games · Joint BT MLE)
+
+To put **all** model generations (`Gen 3` → `Wave 22`, Pure & Search), built-in heuristics (`Random`, `Classic`, `Macro`, `Rusher`, `Tactical`), unmodified Lua tournament bosses (`Sparky v1.6`, `Waffle3z-GA`, `EsparanBot v0.2`), and future external bots (`esparano/LightZero` checkpoints via `py:mod:factory`) on **one shared leaderboard**, [`galcon/elo_rating.py`](elo_rating.py) + [`galcon/tournament.py`](tournament.py) use **Evan Sparano's exact Bradley-Terry MLE solver** (`esparano/LightZero` `lzero/worker/elo_rating.py` — vectorized damped Newton-Raphson, played-edge prior `prior_draws=0.1`, `l2_reg=1e-4`, and analytical Laplace `±Std`) over paired seat-swapped `18pl` games on **Evan's real Galcon 2 C++ simulator** ([`galcon/sim_core.cpp`](sim_core.cpp), 7 Swiss/chain rounds × 16 games/pair, persisted atomically in [`docs/galcon_unified_ladder.json`](../docs/galcon_unified_ladder.json)).
+
+| Rank | Bot | Elo (`bot:classic=1200`) | ±Std | vs `bot:random` (0) | Games | W-D-L | Score% | Mean ms |
+|---:|---|---:|---:|---:|---:|:---:|---:|---:|
+| 1 | `w20_search` | **1927.6** | ±75.4 | `1373.0` | 128 | 78-11-39 | 65.2% | `46.17 ms` |
+| 2 | `w22_search` | **1925.2** | ±78.0 | `1370.6` | 112 | 67-14-31 | 66.1% | `44.12 ms` |
+| 3 | `w19_search` | **1909.7** | ±75.3 | `1355.1` | 128 | 73-8-47 | 60.2% | `46.91 ms` |
+| 4 | `w18_search` | **1852.7** | ±74.8 | `1298.1` | 128 | 64-6-58 | 52.3% | `41.84 ms` |
+| 5 | `w14_search` | **1830.3** | ±74.8 | `1275.7` | 128 | 60-6-62 | 49.2% | `20.73 ms` |
+| 6 | `w21_pure` | **1808.3** | ±75.7 | `1253.6` | 128 | 56-15-57 | 49.6% | `9.98 ms` |
+| 7 | `w20_pure` | **1804.3** | ±73.6 | `1249.7` | 128 | 61-6-61 | 50.0% | `10.04 ms` |
+| 8 | `bot:waffle` | **1783.3** | ±71.9 | `1228.7` | 128 | 64-4-60 | 51.6% | `0.62 ms` |
+| 9 | `bot:sparky` | **1768.1** | ±73.3 | `1213.5` | 128 | 55-10-63 | 46.9% | `0.61 ms` |
+| 10 | `w18_pure` | **1763.6** | ±71.5 | `1209.0` | 128 | 64-2-62 | 50.8% | `8.84 ms` |
+| 11 | `gen3_pure` | **1541.5** | ±59.2 | `986.9` | 128 | 70-1-57 | 55.1% | `5.45 ms` |
+| 12 | `gen4_pure` | **1531.4** | ±60.5 | `976.8` | 128 | 56-1-71 | 44.1% | `5.25 ms` |
+| 13 | `bot:esparan` | **1446.4** | ±55.0 | `891.9` | 112 | 80-0-32 | 71.4% | `0.92 ms` |
+| 14 | `bot:macro` | **1211.2** | ±52.8 | `656.7` | 96 | 47-0-49 | 49.0% | `0.45 ms` |
+| 15 | `bot:tactical` | **1203.8** | ±52.9 | `649.3` | 96 | 46-0-50 | 47.9% | `0.82 ms` |
+| 16 | `bot:classic` | **1200.0** | ±0.0 | `645.5` | 128 | 48-0-80 | 37.5% | `0.01 ms` |
+| 17 | `bot:rusher` | **1147.2** | ±54.1 | `592.7` | 96 | 24-0-72 | 25.0% | `0.35 ms` |
+| 18 | `bot:random` | **553.0** | ±163.1 | `0.0` | 64 | 1-0-63 | 1.6% | `0.01 ms` |
+
+```bash
+# Re-anchor & print the unified leaderboard on either scale without replaying games:
+python3 -m galcon.tournament --report-only --state docs/galcon_unified_ladder.json \
+  --anchor bot:classic --anchor-elo 1200 --secondary-anchor bot:random --secondary-anchor-elo 0
+
+# Add a new bot/checkpoint cleanly via catch-up Swiss rounds (existing pairs are preserved):
+python3 -m galcon.tournament --resume --bots new_bot=search:checkpoints/new.pt \
+  --state docs/galcon_unified_ladder.json --games-per-pair 16 --rounds 7 --workers 14
+```
+
 ## Real Galcon 2 C++ Physics Scoreboard (`50% Sparky v1.6 / 40% Waffle3z-GA / 10% EsparanBot v0.2` + 104g True MLE Elo)
 
 | Model (Real C++ Galcon 2 Physics) | 18pl Sparky (40g 1t) | 18pl Waffle3z (40g 1t) | 18pl Esparan (24g 2t) | **Elo-Wtd (50/40/10)** | **104g MLE Elo** | Large 24pl (Sp/Wf) | Heur (32g) |

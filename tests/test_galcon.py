@@ -3455,5 +3455,170 @@ def test_wave22_gen5_supervised_dml_updates_weights(tmp_path):
     assert proc.returncode == 0, f"DirectML subprocess failed:\n{proc.stdout}\n{proc.stderr}"
 
 
+def test_unified_elo_math_and_reanchor():
+    """Verify exact Bradley-Terry MLE, sweep finiteness, Laplace std, and re-anchoring."""
+    import math
+    from galcon.elo_rating import MatchRecord, fit_bradley_terry_elo
+
+    # Exact 75% win rate (30-10) -> +400 * log10(3) = +190.8485... Elo with zero prior
+    m_75 = [MatchRecord(player_a="B", player_b="A", wins_a=30, draws=0, losses_a=10)]
+    est = fit_bradley_terry_elo(["A", "B"], m_75, anchor_id="A", anchor_elo=1200.0, prior_draws=0.0, l2_reg=0.0)
+    assert abs(est["A"].elo - 1200.0) < 1e-8
+    expected_diff = 400.0 * math.log10(3.0)
+    assert abs((est["B"].elo - est["A"].elo) - expected_diff) < 1e-6
+    assert abs(round(est["B"].elo - est["A"].elo, 2) - 190.85) < 1e-6
+    assert 0.0 < est["B"].elo_std < 500.0 and math.isfinite(est["B"].elo_std)
+
+    # 10-0 sweep stays finite under default prior_draws=0.1, l2_reg=1e-4
+    sweep = [MatchRecord(player_a="B", player_b="A", wins_a=10, draws=0, losses_a=0)]
+    est_sw = fit_bradley_terry_elo(["A", "B"], sweep, anchor_id="A", anchor_elo=0.0, prior_draws=0.1, l2_reg=1e-4)
+    assert math.isfinite(est_sw["B"].elo) and est_sw["B"].elo > 400.0
+    assert math.isfinite(est_sw["B"].elo_std) and est_sw["B"].elo_std > 0.0
+
+    # Zero-reg multi-player re-anchor shifts every Elo by an exact constant
+    chain = [
+        MatchRecord(player_a="B", player_b="A", wins_a=14, draws=2, losses_a=4),
+        MatchRecord(player_a="C", player_b="B", wins_a=12, draws=2, losses_a=6),
+    ]
+    e_a = fit_bradley_terry_elo(["A", "B", "C"], chain, anchor_id="B", anchor_elo=1200.0, prior_draws=0.1, l2_reg=0.0)
+    e_r = fit_bradley_terry_elo(["A", "B", "C"], chain, anchor_id="A", anchor_elo=0.0, prior_draws=0.1, l2_reg=0.0)
+    assert abs((e_a["C"].elo - e_a["A"].elo) - (e_r["C"].elo - e_r["A"].elo)) < 1e-6
+    assert abs((e_a["B"].elo - e_a["A"].elo) - e_r["B"].elo) < 1e-6
+
+
+def test_unified_elo_ladder_selection_promotion_pruning_and_roundtrip():
+    """Test EloLadder opponent selection, promotion gates, interior pruning, and JSON serialization."""
+    from galcon.elo_rating import EloLadder, PlayerEntry
+
+    ladder = EloLadder(anchor_id="bot:classic", anchor_elo=1200.0, max_ladder_size=3, opponents_per_eval=3)
+    for idx, (pid, wins) in enumerate([("ckpt_1", 12), ("ckpt_2", 14), ("ckpt_3", 15), ("ckpt_4", 16)], start=1):
+        ladder.register_player(PlayerEntry(player_id=pid, kind="checkpoint", train_iter=idx * 100))
+        prev = "bot:classic" if idx == 1 else f"ckpt_{idx - 1}"
+        ladder.record_match(pid, prev, wins_a=wins, draws=0, losses_a=20 - wins)
+    ladder.fit_ratings()
+
+    assert ladder.get_champion().player_id == "ckpt_4"
+    opps = ladder.select_opponents("ckpt_5", max_opponents=3)
+    opp_ids = {o.player_id for o in opps}
+    assert "ckpt_4" in opp_ids and len(opps) == 3
+
+    # Promotion thresholds: first checkpoint, elo margin (+50), and win rate (>= 55%)
+    empty_ladder = EloLadder(anchor_id="bot:classic", anchor_elo=1200.0)
+    ok_first, reason_first = empty_ladder.should_promote("c0", None)
+    assert ok_first and reason_first == "first_checkpoint_seed"
+
+    ladder.register_player(PlayerEntry(player_id="ckpt_new", kind="checkpoint", train_iter=500))
+    ladder.record_match("ckpt_new", "ckpt_4", wins_a=12, draws=0, losses_a=8)
+    ladder.fit_ratings()
+    ok_prom, reason_prom = ladder.should_promote("ckpt_new", score_vs_champion=0.60)
+    assert ok_prom and ("beat_champion" in reason_prom or "elo_margin" in reason_prom)
+
+    # Interior pruning drops tightly packed middle rungs while keeping weakest, strongest, and full match history
+    pruned = ladder.prune_if_needed(protected_ids={"ckpt_new"})
+    assert len(pruned) >= 1
+    active_ckpts = [p.player_id for p in ladder.active_checkpoint_rungs()]
+    assert len(active_ckpts) <= 3
+    assert "ckpt_1" in active_ckpts and "ckpt_new" in active_ckpts
+    n_matches_before = len(ladder.matches)
+
+    restored = EloLadder.from_dict(ladder.to_dict())
+    assert len(restored.matches) == n_matches_before
+    assert abs(restored.get_elo("ckpt_new") - ladder.get_elo("ckpt_new")) < 1e-6
+
+    restored.reanchor("ckpt_1", 500.0)
+    assert abs(restored.get_elo("ckpt_1") - 500.0) < 1e-8
+
+
+def test_pass_and_random_bots():
+    """Verify GalconPassBot passes cleanly and GalconRandomBot is deterministic and legal."""
+    from galcon.heuristic_bot import GalconPassBot, GalconRandomBot
+
+    sim = GalconSim.create(seed=101, num_planets=10, width=280.0, height=180.0, symmetric=True, use_cpp=True)
+    pbot = GalconPassBot()
+    assert pbot.act(sim, 1) == []
+
+    r1 = GalconRandomBot(seed=7)
+    r2 = GalconRandomBot(seed=7)
+    o1 = r1.act(sim, 1)
+    o2 = r2.act(sim, 1)
+    assert len(o1) == 1 and o1 == o2
+    order = o1[0]
+    assert isinstance(order, SendOrder)
+    assert sim.planets[order.src_id].owner == 1
+    assert order.src_id != order.dst_id
+    assert order.percent == 50
+
+
+def test_tournament_cli_end_to_end_and_resume(tmp_path, capsys):
+    """Run mini 3-bot tournament in tmp_path, --resume with 4th bot, and --report-only re-anchor."""
+    import json
+    from galcon.tournament import main as tournament_main
+
+    state_path = tmp_path / "tourney.json"
+    md_path = tmp_path / "tourney.md"
+
+    tournament_main([
+        "--bots",
+        "bot:random=heuristic:random",
+        "bot:classic=heuristic:classic",
+        "bot:rusher=heuristic:rusher",
+        "--state", str(state_path),
+        "--mode", "ladder",
+        "--arena", "compact6",
+        "--games-per-pair", "2",
+        "--rounds", "2",
+        "--workers", "1",
+        "--anchor", "bot:classic",
+        "--anchor-elo", "1200",
+        "--secondary-anchor", "bot:random",
+        "--secondary-anchor-elo", "0",
+    ])
+    assert state_path.is_file()
+    st1 = json.loads(state_path.read_text(encoding="utf-8"))
+    matches_1 = st1["ladder"]["matches"]
+    assert len(matches_1) == 3  # 2 chain pairs + 1 Swiss pair covers all 3 pairs of 3 bots
+    seen_pairs_1 = {tuple(sorted((m["player_a"], m["player_b"]))) for m in matches_1}
+    assert len(seen_pairs_1) == len(matches_1)
+    assert all((m["wins_a"] + m["draws"] + m["losses_a"]) == 2 for m in matches_1)
+
+    # Resume and add bot:macro; existing 3 pairs must not be re-played
+    tournament_main([
+        "--resume",
+        "--bots",
+        "bot:macro=heuristic:macro",
+        "--state", str(state_path),
+        "--mode", "ladder",
+        "--arena", "compact6",
+        "--games-per-pair", "2",
+        "--rounds", "2",
+        "--workers", "1",
+        "--anchor", "bot:classic",
+        "--anchor-elo", "1200",
+    ])
+    st2 = json.loads(state_path.read_text(encoding="utf-8"))
+    matches_2 = st2["ladder"]["matches"]
+    assert len(matches_2) > len(matches_1)
+    seen_pairs_2 = {tuple(sorted((m["player_a"], m["player_b"]))) for m in matches_2}
+    assert len(seen_pairs_2) == len(matches_2)
+    assert any("bot:macro" in (m["player_a"], m["player_b"]) for m in matches_2[len(matches_1):])
+
+    # Instant --report-only re-anchor to bot:random=0.0 without running games
+    capsys.readouterr()
+    tournament_main([
+        "--report-only",
+        "--state", str(state_path),
+        "--anchor", "bot:random",
+        "--anchor-elo", "0",
+        "--secondary-anchor", "bot:classic",
+        "--secondary-anchor-elo", "1200",
+        "--markdown-out", str(md_path),
+    ])
+    out = capsys.readouterr().out
+    assert "bot:random" in out and "bot:macro" in out
+    md_text = md_path.read_text(encoding="utf-8")
+    assert "| Rank |" in md_text and "`bot:random`" in md_text
+
+
+
 
 
