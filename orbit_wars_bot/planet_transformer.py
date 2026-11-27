@@ -28,6 +28,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from orbit_wars_bot.fast_sim_cpp import (
+    HAS_ORBIT_SIM_CPP,
+    build_shared_planet_physics_cpp,
+    solve_intercept_cpp,
+)
 from orbit_wars_bot.physics import (
     BOARD_SIZE,
     CENTER,
@@ -46,6 +51,8 @@ from orbit_wars_bot.physics import (
     simulate_planet_future,
     solve_intercept,
 )
+
+_ORIG_SOLVE_INTERCEPT = solve_intercept
 
 MAX_PLANETS = 44
 TIMELINE_HORIZON = 20
@@ -83,6 +90,9 @@ class EncodedPlanetState:
     player: int
     arrivals: Dict[int, List[Any]] = field(default_factory=dict)
     futures: List[Tuple[Tuple[int, int], ...]] = field(default_factory=list)
+    tr_x: Optional[np.ndarray] = None
+    tr_y: Optional[np.ndarray] = None
+    planet_radii: Optional[np.ndarray] = None
 
 
 def _enemy_slot_map(
@@ -118,12 +128,26 @@ def _enemy_slot_map(
 def build_shared_planet_physics(
     obs: Any,
     max_speed: float = DEFAULT_SHIP_SPEED,
+    *,
+    use_cpp: Optional[bool] = None,
+    include_py_tracks: bool = True,
 ) -> Dict[str, Any]:
     """Compute player-agnostic orbital tracks, fleet arrivals, futures, and route geometry once per tick.
 
-    Can be shared across all players on the same simulation tick in multi-player self-play
-    rollouts for a ~6.5x speedup over scalar per-player extraction with bit-exact parity.
+    Uses the auto-compiled C++17 accelerator when available (exact bit-for-bit parity with
+    the Python/NumPy reference), sharing outputs across all players on the same tick.
     """
+    use_native = bool(HAS_ORBIT_SIM_CPP) if use_cpp is None else bool(use_cpp and HAS_ORBIT_SIM_CPP)
+    if use_native:
+        return build_shared_planet_physics_cpp(obs, max_speed=max_speed, include_py_tracks=include_py_tracks)
+    return _build_shared_planet_physics_python(obs, max_speed=max_speed)
+
+
+def _build_shared_planet_physics_python(
+    obs: Any,
+    max_speed: float = DEFAULT_SHIP_SPEED,
+) -> Dict[str, Any]:
+    """Pure-Python/NumPy reference implementation of ``build_shared_planet_physics``."""
     step = int(_obs_get(obs, "step", 0))
     ang_vel = float(_obs_get(obs, "angular_velocity", 0.0))
     planets = [list(p) for p in (_obs_get(obs, "planets", []) or [])][:MAX_PLANETS]
@@ -505,6 +529,9 @@ def extract_planet_features(
         player=player,
         arrivals=arrivals,
         futures=shared["futures"],
+        tr_x=shared.get("tr_x"),
+        tr_y=shared.get("tr_y"),
+        planet_radii=shared.get("pr"),
     )
 
 
@@ -1448,19 +1475,38 @@ class PlanetTransformerAgent:
                     f = float(mean_fracs[i, best_j])
                     send_ships = avail if f >= 0.88 else max(1, min(avail, int(round(avail * f))))
 
-                sol = solve_intercept(
-                    src_row,
-                    dst_row,
-                    send_ships,
-                    enc.planet_rows,
-                    enc.current_step,
-                    enc.angular_velocity,
-                    enc.initial_by_id,
-                    comet_lookup=enc.comet_lookup,
-                    tracks=enc.tracks,
-                    max_eta=MAX_ROUTE_ETA + 4,
-                    max_speed=max_speed,
+                use_fast_cpp_intercept = (
+                    HAS_ORBIT_SIM_CPP
+                    and enc.tr_x is not None
+                    and enc.tr_y is not None
+                    and enc.planet_radii is not None
+                    and solve_intercept is _ORIG_SOLVE_INTERCEPT
                 )
+                if use_fast_cpp_intercept:
+                    sol = solve_intercept_cpp(
+                        i,
+                        best_j,
+                        send_ships,
+                        enc.tr_x,
+                        enc.tr_y,
+                        enc.planet_radii,
+                        max_eta=MAX_ROUTE_ETA + 4,
+                        max_speed=max_speed,
+                    )
+                else:
+                    sol = solve_intercept(
+                        src_row,
+                        dst_row,
+                        send_ships,
+                        enc.planet_rows,
+                        enc.current_step,
+                        enc.angular_velocity,
+                        enc.initial_by_id,
+                        comet_lookup=enc.comet_lookup,
+                        tracks=enc.tracks,
+                        max_eta=MAX_ROUTE_ETA + 4,
+                        max_speed=max_speed,
+                    )
                 if sol is None:
                     continue
 
@@ -1483,19 +1529,31 @@ class PlanetTransformerAgent:
                             margin = 5 if int(dst_row[6]) >= 4 else 3
                             capped = max(1, int(fut_sh) + 1 + margin)
                             if capped + 8 <= send_ships:
-                                sol_cap = solve_intercept(
-                                    src_row,
-                                    dst_row,
-                                    capped,
-                                    enc.planet_rows,
-                                    enc.current_step,
-                                    enc.angular_velocity,
-                                    enc.initial_by_id,
-                                    comet_lookup=enc.comet_lookup,
-                                    tracks=enc.tracks,
-                                    max_eta=MAX_ROUTE_ETA + 4,
-                                    max_speed=max_speed,
-                                )
+                                if use_fast_cpp_intercept:
+                                    sol_cap = solve_intercept_cpp(
+                                        i,
+                                        best_j,
+                                        capped,
+                                        enc.tr_x,
+                                        enc.tr_y,
+                                        enc.planet_radii,
+                                        max_eta=MAX_ROUTE_ETA + 4,
+                                        max_speed=max_speed,
+                                    )
+                                else:
+                                    sol_cap = solve_intercept(
+                                        src_row,
+                                        dst_row,
+                                        capped,
+                                        enc.planet_rows,
+                                        enc.current_step,
+                                        enc.angular_velocity,
+                                        enc.initial_by_id,
+                                        comet_lookup=enc.comet_lookup,
+                                        tracks=enc.tracks,
+                                        max_eta=MAX_ROUTE_ETA + 4,
+                                        max_speed=max_speed,
+                                    )
                                 if sol_cap is not None and sol_cap.eta <= sol.eta + 2:
                                     send_ships = capped
                                     sol = sol_cap
