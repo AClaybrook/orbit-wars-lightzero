@@ -398,3 +398,23 @@ This log tracks calibrated **Kaggle-equivalent Elo** estimates (anchored against
   - **`OrbitSearchAgent` on `Gen17-grpo_it4` (`200–223`, `24g`):** **`10–0–14 (41.7%)`** (improved **`+4.2 pp`** over `Gen17-grpo_it4` Pure `9/24 = 37.5%`).
   - **Solo 1-Thread Checks (`Gen17-grpo_it4 @0.53`):** `8–0–0 (100.0%)` 4P FFA vs. `3× subham_v14` (`400–407`, `62.79 ms` mean / `80.70 ms` p95 / `138.46 ms` max); `3–0–1 (75.0%)` 2P vs. `#2 Hober Malloc` (`200–203`, `58.40 ms` mean / `73.79 ms` p95 / `100.80 ms` max).
 - **Root-Cause Takeaway:** `checkpoints/planet_transformer_best.pt` stays at `Gen 15B` (`42.7%` 96g vs `Gen 17` `32.3%`). Heavy single-corpus Hober-mirror repetition (`tr_kl 0.030` vs `v3_kl 0.082`) + high `value_weight=0.75` + dropping `3,500+`-map `r5–r7` diversity caused `Gen17-KD` to drop `50.0% -> 29.2%` Boss48 (even though GRPO lifted `+10.4 pp` back to `39.6%` and beat `Gen 15B` `60.0%` in mirrors). Full-diversity `r5–r9` 2-stage KD follows in Gen 18.
+
+---
+
+## Generation 18 — Full-Diversity `r5–r9` 2-Stage `fv=3` & Mixed-`fv` Ensemble Fix (2026-11-27)
+
+- **Code Change (`orbit_wars_bot/planet_transformer.py`):**
+  - Updated `EnsemblePlanetTransformerAgent.predict_probs_and_value(..., enc_by_fv=None)` and `act` to share a single `build_shared_planet_physics` pass across ensemble members while routing each member its own `feature_version` encoding (fixing silent feature mismatches when ensembling `fv=3` Gen 18 checkpoints with `fv=2` `Gen 15B`).
+  - Covered by `test_ensemble_mixed_feature_versions` in `tests/test_planet_transformer.py` (`73 passed in 27.80s` across all 8 Orbit Wars test files).
+- **DirectML Training (`--device dml --batch-size 256`, `val_w=0.35`, `9,000`-board pure `fv=3` val):**
+  - **Stage 1 (`8` epochs, `~170k`/ep `r5–r9`, `2356.7s / 39.3 min`):** `v3_kl: 0.0979 -> 0.0748`, `l_f1=88.2%`, `tgt=94.2%`, `aux=96.6%`, `vsign=72.3%`.
+  - **Stage 2 (`6` epochs, `143,431` pure `fv=3` boards, `1512.2s / 25.2 min`, `Gen18-s2_kd`):** `v3_kl=0.0757`, `l_f1=88.2%`, `tgt=94.2%`, `aux=96.6%`, `vsign=72.6%`.
+  - **Balanced C++ GRPO (`8` iterations, `--workers 6 --hober-share 0.75`, `2322.0s / 38.7 min`):** `vl: 0.097 -> 0.040`, `kl=0.0108`, `aux=96.5%`, `4x`-rot `#2` eval reached `50.0%` at `it4`, `it6`, and `it8`.
+- **Kaggle Gate vs. `#2 Hober Malloc` & Mirrors:**
+  - **`48g` Boss Suite (`200–223` + `300–323`, `@0.53`):** `Gen18-s1` `17–0–31 (35.4%)`; **`Gen18-s2_kd` `21–0–27 (43.8%)`** (`b200=9/24, b300=12/24`; `@0.51`: `19–0–29 / 39.6%`; `@0.55`: `14–0–34 / 29.2%`); `Gen18-grpo_best` `20–0–28 (41.7%)` (`b200=11/24, b300=9/24`); `Gen18-grpo_it6` `18–0–30 (37.5%)`; `Gen18-grpo_it4` `15–0–33 (31.2%)`.
+  - **`48g` Unseen Holdout (`400–447`, `@0.53`):** `Gen18-s2_kd` `14–0–34 (29.2%)` (`b400=9/24, b424=5/24`) → `96g` combined `35/96 (36.5%)` vs. `Gen 15B` Pure `41/96 (42.7%)`.
+  - **Mixed-`fv` Decoupled Ensembles (`Gen18-s2_kd (fv=3) + Gen15B (fv=2)` `@0.53`):** `ens_50_50` Boss48 = `16–0–32 (33.3%)`, **`Hold48 = 18–0–30 (37.5%)`** (`b400=8/24, b424=10/24`, beating both `Gen 15B` `35.4%` and `Gen18-s2_kd` `29.2%`), `96g` = `34/96 (35.4%)`; `ens_55_45` Boss48 = `16–0–32 (33.3%)`.
+  - **`20g` Unseen Mirrors (`990–999`, `Gen18-s2_kd @0.53`):** `14–0–6 (70.0%)` vs. `Gen 15B`, `14–0–6 (70.0%)` vs. `Gen 13 PT-v3.5`, `20–0–0 (100.0%)` vs. `Gen 12 PPO`.
+  - **`Gen18-OrbitSearch@0.53` (`200–223`, `24g`):** `7–0–17 (29.2%)`.
+  - **Solo 1-Thread Checks (`Gen18-s2_kd @0.53`):** `6–0–2 (75.0%)` 4P FFA vs. `3× subham_v14` (`400–407`, `AvgRank=1.25`, `AvgLen=262.9t`, `64.44 ms` mean / `80.04 ms` p95 / `114.14 ms` max); `4–0–0 (100.0%)` 2P vs. `#2 Hober Malloc` (`200–203`, `AvgLen=230.8t`, `56.04 ms` mean / `68.38 ms` p95 / `123.12 ms` max).
+- **Promotion Decision:** Keep `checkpoints/planet_transformer_best.pt` on `Gen 15B` (`41/96 = 42.7%` vs. `#2 Hober Malloc`, `100%` 4P FFA). Gen 18 `fv=3` beat `Gen 15B` `70.0%` in mirrors and reached `43.8%` on `Boss48`, while `Gen 15B` retains the `96g` generalization edge (`42.7%` vs. `36.5%`). Key unpromoted Gen 17/18 snapshots are archived in conversation scratch.

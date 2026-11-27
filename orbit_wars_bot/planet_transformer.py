@@ -2251,6 +2251,7 @@ class EnsemblePlanetTransformerAgent:
         self,
         enc: EncodedPlanetState,
         *,
+        enc_by_fv: Optional[Dict[int, EncodedPlanetState]] = None,
         use_rot_tta: Optional[bool] = None,
         use_d4_tta: Optional[bool] = None,
     ) -> Tuple[np.ndarray, np.ndarray, float]:
@@ -2265,7 +2266,8 @@ class EnsemblePlanetTransformerAgent:
             launch_logit_acc = np.zeros((n, 1), dtype=np.float64)
             log_tgt_acc = np.zeros((n, n), dtype=np.float64)
             for agent, w in zip(self.agents, self.weights):
-                p, f, v = agent.predict_probs_and_value(enc, use_rot_tta=use_rot_tta, use_d4_tta=use_d4_tta)
+                agent_enc = enc_by_fv.get(agent.feature_version, enc) if enc_by_fv is not None else enc
+                p, f, v = agent.predict_probs_and_value(agent_enc, use_rot_tta=use_rot_tta, use_d4_tta=use_d4_tta)
                 p_hold_k = np.clip(p[:, :1].astype(np.float64), 1e-6, 1.0 - 1e-6)
                 p_launch_k = 1.0 - p_hold_k
                 launch_logit_acc += w * (np.log(p_launch_k) - np.log(p_hold_k))
@@ -2288,7 +2290,8 @@ class EnsemblePlanetTransformerAgent:
             return probs, fracs_acc.astype(np.float32), float(val_acc)
         probs_acc = np.zeros((n, n + 1), dtype=np.float64)
         for agent, w in zip(self.agents, self.weights):
-            p, f, v = agent.predict_probs_and_value(enc, use_rot_tta=use_rot_tta, use_d4_tta=use_d4_tta)
+            agent_enc = enc_by_fv.get(agent.feature_version, enc) if enc_by_fv is not None else enc
+            p, f, v = agent.predict_probs_and_value(agent_enc, use_rot_tta=use_rot_tta, use_d4_tta=use_d4_tta)
             probs_acc += w * p
             fracs_acc += w * f
             val_acc += w * v
@@ -2297,13 +2300,19 @@ class EnsemblePlanetTransformerAgent:
     @torch.no_grad()
     def act(self, obs: Any, config: Any = None) -> List[List[float]]:
         max_speed = float(_obs_get(config, "shipSpeed", DEFAULT_SHIP_SPEED)) if config else DEFAULT_SHIP_SPEED
-        enc = extract_planet_features(obs, max_speed=max_speed, feature_version=self.feature_version)
-        n = len(enc.planet_ids)
-        if n == 0 or not np.any(enc.owned_mask):
+        shared = build_shared_planet_physics(obs, max_speed=max_speed)
+        enc_by_fv: Dict[int, EncodedPlanetState] = {}
+        for fv in sorted({a.feature_version for a in self.agents}):
+            enc_by_fv[fv] = extract_planet_features(
+                obs, max_speed=max_speed, feature_version=fv, shared_physics=shared
+            )
+        base_enc = enc_by_fv[self.agents[0].feature_version]
+        n = len(base_enc.planet_ids)
+        if n == 0 or not np.any(base_enc.owned_mask):
             return []
-        probs, mean_fracs, _ = self.predict_probs_and_value(enc)
+        probs, mean_fracs, _ = self.predict_probs_and_value(base_enc, enc_by_fv=enc_by_fv)
         return self.agents[0]._decode_plan(
-            enc,
+            base_enc,
             probs,
             mean_fracs,
             launch_threshold=self.launch_threshold,
