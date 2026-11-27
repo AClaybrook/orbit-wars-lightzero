@@ -4189,11 +4189,16 @@ def _build_stratified_gen4_opp_schedule(
     esparan_share: float = 0.17,
     has_lua3: bool = False,
     waffle_share: float = 0.15,
+    league_idxs: Sequence[int] = (),
+    league_share: float = 0.0,
 ) -> List[Tuple[str, int]]:
     """Allocate deterministic, low-variance opponent pairs per PPO iteration.
 
     Prevents RNG starvation where Sparky v1.6 could drop to 1/12 pairs in an iteration
     while keeping Waffle3z-GA, EsparanBot v0.2, snapshot self-play, and heuristics balanced.
+    With ``league_idxs`` (snapshot-pool indices of fixed ``--league-opps`` checkpoints) and
+    ``league_share > 0``, ~``league_share * pairs_per_iter`` non-boss pairs (self-play snapshots
+    first, then heuristics) are reassigned round-robin to those league opponents. Boss counts are untouched.
     """
     n = max(1, int(pairs_per_iter))
     heur_cycle = ["tactical", "macro", "rusher", "classic"]
@@ -4251,6 +4256,15 @@ def _build_stratified_gen4_opp_schedule(
         n_heur = max(0, n - n_snap)
         sched.extend([_pick_snap() for _ in range(n_snap)])
         sched.extend([(heur_cycle[i % len(heur_cycle)], -1) for i in range(n_heur)])
+
+    lg = [int(i) for i in league_idxs]
+    if lg and league_share > 0.0:
+        n_lg = max(1, int(round(n * float(league_share))))
+        slots = [i for i, (k, _) in enumerate(sched) if k == "snap"]
+        slots += [i for i, (k, _) in enumerate(sched) if k not in ("snap", "boss", "boss2", "boss3")]
+        off = rng.randrange(len(lg))
+        for j, si in enumerate(slots[:n_lg]):
+            sched[si] = ("snap", lg[(off + j) % len(lg)])
 
     rng.shuffle(sched)
     return sched
@@ -4542,12 +4556,19 @@ def rl_mirror_league_ppo_gen4(
     train_threads: int = 2,
     workers: int = 1,
     device: str = "cpu",
+    league_opp_ckpts: Optional[Sequence[Path]] = None,
+    league_share: float = 0.25,
+    snapshot_every: int = 0,
 ) -> Path:
     """Gen 4/6 Native Multi-Send Paired-Seed Mirror League PPO in 1x Canonical D4 space.
 
     Samples independent Bernoulli multi-edge actions + continuous send fractions directly on
     canonicalized coordinates, optimizing joint Bernoulli+Normal PPO with Moving EMA Teacher KL,
     GRPO paired-seed variance reduction, large 22-28 planet asymmetric arenas, and native ``/REDIR``.
+
+    ``league_opp_ckpts`` adds fixed neural checkpoints (e.g. prior Search champions, played by their
+    1-tick pure multi-send prior) to the snapshot pool; they are never pruned and receive ~``league_share``
+    of pairs each iteration. ``snapshot_every > 0`` additionally saves ``<out>_itNN.pt`` every N iterations.
     """
     torch.set_num_threads(1)
     torch.manual_seed(seed)
@@ -4595,11 +4616,23 @@ def rl_mirror_league_ppo_gen4(
         for p in a_m2.parameters():
             p.requires_grad_(False)
         snapshot_pool.append(a_m2)
+    missing_lg = [str(p) for p in (league_opp_ckpts or ()) if not Path(p).is_file()]
+    if missing_lg:
+        raise FileNotFoundError(f"--league-opps checkpoint(s) not found: {', '.join(missing_lg)}")
+    league_paths = [Path(p) for p in (league_opp_ckpts or ())]
+    league_start = len(snapshot_pool)
+    for lp in league_paths:
+        l_m = _load_gen4_policy_from_ckpt(lp, allow_non_ms=True).eval()
+        for p in l_m.parameters():
+            p.requires_grad_(False)
+        snapshot_pool.append(l_m)
     snapshot_pool.append(copy.deepcopy(cpu_policy).eval())
     for p in snapshot_pool[-1].parameters():
         p.requires_grad_(False)
 
     snap_ids: List[str] = [f"snap_{idx}" for idx in range(len(snapshot_pool))]
+    league_ids: Set[str] = {snap_ids[league_start + k] for k in range(len(league_paths))}
+    league_names: Dict[str, str] = {snap_ids[league_start + k]: lp.stem for k, lp in enumerate(league_paths)}
     snap_id_seq = len(snapshot_pool)
     pool_ladder = EloLadder(anchor_id=snap_ids[0], anchor_elo=1800.0, max_ladder_size=10)
     for sid in snap_ids:
@@ -4790,6 +4823,8 @@ def rl_mirror_league_ppo_gen4(
             if ok
         ]
         boss_tag = f"+LuaBoss({'+'.join(boss_names)})" if boss_names else ""
+        if league_ids:
+            boss_tag += f"+League({'+'.join(league_names[sid] for sid in sorted(league_ids, key=snap_ids.index))})"
         par_tag = f" x{min(int(workers), int(pairs_per_iter))}w" if use_parallel else ""
         dev_tag = " dml" if use_dml else (f" {train_dev}" if train_dev.type != "cpu" else "")
         print(
@@ -4812,6 +4847,8 @@ def rl_mirror_league_ppo_gen4(
                 sparky_share=sparky_share,
                 esparan_share=esparan_share,
                 waffle_share=waffle_share,
+                league_idxs=[i for i, sid in enumerate(snap_ids) if sid in league_ids],
+                league_share=league_share,
             )
             pair_jobs = []
             for k, (opp_kind, opp_idx) in enumerate(opp_sched):
@@ -5116,6 +5153,12 @@ def rl_mirror_league_ppo_gen4(
             for s_idx, rec in iter_snap_stats.items():
                 if 0 <= s_idx < len(snap_ids):
                     pool_ladder.record_match(cur_pol_id, snap_ids[s_idx], rec[0], rec[1], rec[2])
+            # Resolve league W/D/L labels before snapshot pruning can shift pool indices.
+            lg_parts = [
+                f"{league_names[snap_ids[s_idx]]}={rec[0]}/{sum(rec)}"
+                for s_idx, rec in sorted(iter_snap_stats.items())
+                if 0 <= s_idx < len(snap_ids) and snap_ids[s_idx] in league_ids
+            ]
 
             if it % 3 == 0:
                 snap_copy = copy.deepcopy(cpu_policy).eval()
@@ -5141,7 +5184,7 @@ def rl_mirror_league_ppo_gen4(
                     snapshot_pool,
                     snap_ids,
                     snap_ckpt_paths,
-                    protected_ids={snap_ids[0], new_sid},
+                    protected_ids={snap_ids[0], new_sid} | league_ids,
                 )
 
             boss_str = f", boss={boss_wins}/{boss_eps}" if boss_eps > 0 else ""
@@ -5153,6 +5196,8 @@ def rl_mirror_league_ppo_gen4(
                 f"wins={wins}/{2*pairs_per_iter} (sp={sp_wins}/{sp_eps}, bots={bot_wins}/{bot_eps}{boss_str}{boss2_str}{boss3_str}, splits={split_pairs}) | "
                 f"states={len(ds)} | pool={len(snapshot_pool)}"
             )
+            if lg_parts:
+                log_msg += f" | league[{' '.join(lg_parts)}]"
             if it % eval_every == 0 or it == iters:
                 cur_val = quick_gen4_val(cpu_policy)
                 log_msg += f" | {_fmt_val(cur_val)}"
@@ -5175,6 +5220,18 @@ def rl_mirror_league_ppo_gen4(
                     )
                     log_msg += " *BEST*"
             print(log_msg, flush=True)
+            if snapshot_every > 0 and it % int(snapshot_every) == 0:
+                torch.save(
+                    {
+                        "model_config": cpu_policy.config,
+                        "model_state_dict": copy.deepcopy(cpu_sd),
+                        "has_trained_redir": True,
+                        "has_trained_multi_send": True,
+                        "use_canonical_d4": True,
+                        "ppo_episodes": total_eps,
+                    },
+                    out_path.with_name(f"{out_path.stem}_it{it:02d}.pt"),
+                )
 
         final_path = out_path.with_name(out_path.stem + "_final.pt")
         torch.save(
@@ -5300,7 +5357,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--waffle-share", type=float, default=0.15)
     parser.add_argument("--large-map-prob", type=float, default=0.30)
     parser.add_argument("--compact-map-prob", type=float, default=0.0, help="Fraction of compact 6pl 200x200 arenas (when >0, balances Standard/Large/Compact).")
-    parser.add_argument("--league-opps", default="", help="Optional comma-separated neural Search opponent checkpoints for dual-recorded EI league games.")
+    parser.add_argument("--league-opps", default="", help="Optional comma-separated neural Search opponent checkpoints (gen4_ei: dual-recorded Search league games; gen4_ppo: fixed never-pruned sparring snapshots).")
+    parser.add_argument("--league-share", type=float, default=0.25, help="gen4_ppo: fraction of pairs per iteration played vs --league-opps checkpoints.")
+    parser.add_argument("--snapshot-every", type=int, default=0, help="gen4_ppo: also save <out>_itNN.pt every N iterations (0=off).")
     parser.add_argument("--kl-coef", type=float, default=0.030)
     parser.add_argument("--v-anchor-coef", type=float, default=0.0)
     parser.add_argument("--freeze-value-head", action="store_true", help="Freeze WDL/scalar value head parameters and skip GAE value loss during PPO to preserve Search value calibration.")
@@ -5522,6 +5581,9 @@ def main(argv: list[str] | None = None) -> int:
             train_threads=args.train_threads,
             workers=args.workers,
             device=args.device,
+            league_opp_ckpts=[Path(s.strip()) for s in str(args.league_opps).split(",") if s.strip()] or None,
+            league_share=args.league_share,
+            snapshot_every=args.snapshot_every,
         )
         return 0
 
