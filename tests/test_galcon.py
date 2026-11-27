@@ -3707,6 +3707,88 @@ def test_tournament_large24_and_combine_ladders(tmp_path, capsys):
     assert "| `bot:macro` |" in md_text and "| — |" in md_text
 
 
+def test_sample_gen3_map_config_balanced_three_sizes():
+    """Verify balanced 50/35/15 Standard/Large/Compact sampling while preserving legacy compact_prob=0 behavior."""
+    import random
+    from galcon.train import _sample_gen3_map_config
+
+    rng = random.Random(2301)
+    samples = [_sample_gen3_map_config(rng, large_prob=0.35, compact_prob=0.15) for _ in range(2000)]
+    c6 = [s for s in samples if s[0] == 6]
+    lg = [s for s in samples if s[0] >= 22]
+    st = [s for s in samples if 14 <= s[0] <= 20]
+    assert 0.12 <= len(c6) / len(samples) <= 0.18
+    assert 0.31 <= len(lg) / len(samples) <= 0.39
+    assert 0.46 <= len(st) / len(samples) <= 0.54
+    assert all(s[1] == 200.0 and s[2] == 200.0 for s in c6)
+    assert sum(1 for s in lg if not s[3]) / len(lg) > 0.60
+
+    rng_legacy = random.Random(2302)
+    legacy = [_sample_gen3_map_config(rng_legacy, large_prob=0.35, compact_prob=0.0) for _ in range(500)]
+    assert all(s[0] >= 8 for s in legacy)
+
+
+def test_prune_ppo_snapshot_pool_crowded_middle():
+    """Verify PPO snapshot pool keeps extremes, anchor, and newest rung while pruning tightest interior Elo."""
+    from galcon.elo_rating import EloLadder, PlayerEntry
+    from galcon.train import _prune_ppo_snapshot_pool
+
+    ladder = EloLadder(anchor_id="snap_0", anchor_elo=1800.0, max_ladder_size=4)
+    snap_ids = [f"snap_{i}" for i in range(5)]
+    for sid in snap_ids:
+        ladder.register_player(PlayerEntry(player_id=sid, kind="checkpoint", active=True))
+    # Order by Elo: snap_1 (~1600), snap_0 (1800 anchor), snap_2 (~1805 crowded), snap_3 (~1880), snap_4 (~2000 newest)
+    ladder.record_match("snap_0", "snap_1", wins_a=15, draws=0, losses_a=5)
+    ladder.record_match("snap_2", "snap_0", wins_a=10, draws=1, losses_a=10)
+    ladder.record_match("snap_3", "snap_0", wins_a=12, draws=0, losses_a=8)
+    ladder.record_match("snap_4", "snap_3", wins_a=14, draws=0, losses_a=6)
+
+    pool = [f"model_{i}" for i in range(5)]
+    ckpts = [f"/tmp/s{i}.pt" for i in range(5)]
+    pruned = _prune_ppo_snapshot_pool(ladder, pool, snap_ids, ckpts, protected_ids={"snap_0", "snap_4"})
+
+    assert pruned == ["snap_2"]
+    assert snap_ids == ["snap_0", "snap_1", "snap_3", "snap_4"]
+    assert len(pool) == 4 and len(ckpts) == 4
+
+
+def test_collect_gen4_ei_balanced_league_smoke(tmp_path):
+    """Smoke test dual-search league EI collection with balanced compact_map_prob=0.15."""
+    from galcon.gen5_model import build_galcon_gen5_transformer
+    from galcon.train import collect_gen4_multisend_ei_dataset
+
+    torch.manual_seed(23)
+    m = build_galcon_gen5_transformer(d_model=64, n_heads=4, n_layers=2, dim_ff=128, edge_hidden=16).eval()
+    ckpt_a = tmp_path / "hero.pt"
+    ckpt_b = tmp_path / "league.pt"
+    for p in (ckpt_a, ckpt_b):
+        torch.save(
+            {
+                "model_config": m.config,
+                "model_state_dict": m.state_dict(),
+                "has_trained_redir": True,
+                "has_trained_multi_send": True,
+                "use_canonical_d4": True,
+            },
+            p,
+        )
+
+    data, _ = collect_gen4_multisend_ei_dataset(
+        ckpt_a,
+        league_opp_ckpts=[ckpt_b],
+        num_games=3,
+        seed=23000,
+        rollout_horizon=6,
+        large_map_prob=0.35,
+        compact_map_prob=0.15,
+        act_every=1,
+        workers=1,
+    )
+    assert len(data["val_targets"]) >= 10
+    assert data["planet_feats"].shape[0] == data["teacher_ms_prob"].shape[0]
+
+
+
 
 
 

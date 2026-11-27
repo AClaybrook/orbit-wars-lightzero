@@ -27,13 +27,16 @@ import random
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Sampler, TensorDataset
+
+from galcon.elo_rating import EloLadder, PlayerEntry
+from galcon.fast_sim_cpp import HAS_FAST_SIM_CPP
 
 
 class _LengthBucketBatchSampler(Sampler[List[int]]):
@@ -1994,10 +1997,39 @@ def rl_league_ppo_gen2(
     return out_path
 
 
-def _sample_gen3_map_config(rng: random.Random, large_prob: float = 0.30) -> Tuple[int, float, float, bool]:
-    """Gen 3/8 multi-scale map distribution preferring symmetric even-planet 1v1 maps."""
+def _galcon_max_ticks_for_planets(n_pl: int) -> int:
+    """Return arena-appropriate horizon (100 compact6, 200 standard, 240 large >=22pl)."""
+    if n_pl <= 6:
+        return 100
+    if n_pl >= 22:
+        return 240
+    return 200
+
+
+def _sample_gen3_map_config(
+    rng: random.Random,
+    large_prob: float = 0.30,
+    compact_prob: float = 0.0,
+) -> Tuple[int, float, float, bool]:
+    """Gen 3/8 multi-scale map distribution, optionally balanced across Standard/Large/Compact."""
     lp = max(0.0, min(0.80, float(large_prob)))
+    cp = max(0.0, min(max(0.0, 0.90 - lp), float(compact_prob)))
     u = rng.random()
+    if cp > 0.0:
+        if u < cp:
+            # Compact 6pl arena matching compact6 ladder (75% asymmetric, 25% symmetric)
+            return 6, 200.0, 200.0, (rng.random() < 0.25)
+        if u < cp + lp:
+            # Large 22-26pl arena (75% asymmetric, matching large24 ladder)
+            w = rng.choice([540.0, 560.0, 580.0])
+            h = 340.0 if w == 560.0 else round(w * 0.60, 1)
+            n_pl = rng.choice([24, 24, 22, 26])
+            return n_pl, w, h, (rng.random() < 0.25)
+        # Standard 14-20pl arena (70% exact 18pl 400x240 symmetric, 30% 14-20pl variants)
+        if rng.random() < 0.70:
+            return 18, 400.0, 240.0, True
+        return rng.randrange(14, 21, 2), 400.0, 240.0, (rng.random() < 0.90)
+
     if u >= 1.0 - lp:
         # Large gbots arena (22-28 even planets, 520x320 to 600x360, 70% symmetric / 30% asymmetric)
         w = rng.choice([520.0, 560.0, 600.0])
@@ -2215,7 +2247,7 @@ def rl_mirror_league_ppo_gen3(
     ):
         opp_pid = 2 if ours_pid == 1 else 1
         sim = GalconSim.create(
-            seed=map_seed, num_planets=n_pl, width=w, height=h, max_ticks=220 if n_pl >= 22 else 200, symmetric=sym
+            seed=map_seed, num_planets=n_pl, width=w, height=h, max_ticks=_galcon_max_ticks_for_planets(n_pl), symmetric=sym
         )
         ep_steps = []
         snaps: List[Tuple[int, np.ndarray, np.ndarray]] = []
@@ -2605,6 +2637,8 @@ def _gen4_ei_worker(
     lua_opp3_str: str = "",
     filter_draw_policy: bool = False,
     act_every: int = 2,
+    compact_map_prob: float = 0.0,
+    league_opp_strs: Tuple[str, ...] = (),
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     torch.set_num_threads(1)
     return collect_gen4_multisend_ei_dataset(
@@ -2616,12 +2650,24 @@ def _gen4_ei_worker(
         lua_opp2_path=lua_opp2_str if lua_opp2_str else None,
         lua_opp3_path=lua_opp3_str if lua_opp3_str else None,
         ckpt_path2=Path(ckpt_path2_str) if ckpt_path2_str else None,
+        league_opp_ckpts=[Path(p) for p in league_opp_strs if p] if league_opp_strs else None,
         large_map_prob=large_map_prob,
+        compact_map_prob=compact_map_prob,
         filter_losing_policy=filter_losing_policy,
         filter_draw_policy=filter_draw_policy,
         act_every=act_every,
         workers=1,
     )
+
+
+def _format_ei_size_breakdown(pad_mask: Optional[np.ndarray]) -> str:
+    if pad_mask is None or len(pad_mask) == 0:
+        return "sizes=0/0/0"
+    n_counts = pad_mask.sum(axis=1)
+    c6 = int((n_counts <= 6).sum())
+    l22 = int((n_counts >= 22).sum())
+    s18 = int(len(n_counts) - c6 - l22)
+    return f"sizes(compact<=6/std/large>=22)={c6}/{s18}/{l22}"
 
 
 def collect_gen4_multisend_ei_dataset(
@@ -2634,7 +2680,9 @@ def collect_gen4_multisend_ei_dataset(
     lua_opp2_path: Optional[str | Path] = None,
     lua_opp3_path: Optional[str | Path] = None,
     ckpt_path2: Optional[Path] = None,
+    league_opp_ckpts: Optional[Sequence[Path]] = None,
     large_map_prob: float = 0.30,
+    compact_map_prob: float = 0.0,
     filter_losing_policy: bool = True,
     filter_draw_policy: bool = False,
     act_every: int = 2,
@@ -2643,13 +2691,15 @@ def collect_gen4_multisend_ei_dataset(
     """Collect winning/drawing multi-send trajectories from our Opponent-Adaptive Reactive Search.
 
     Supports up to 3 external Lua bosses (e.g. ``Sparky v1.6`` + ``EsparanBot v0.2`` + ``Waffle3z-GA`` via
-    ``path.lua::bots_waffle3z_optimized``). When ``ckpt_path2`` is supplied, uses ``EnsembleGalconSearchAgent``
-    as the teacher to distill 2-model Ensemble Search directly into a single fast student.
+    ``path.lua::bots_waffle3z_optimized``) plus optional neural search ``league_opp_ckpts`` where both
+    sides run ``act_with_search_info`` and are recorded. When ``ckpt_path2`` is supplied, uses
+    ``EnsembleGalconSearchAgent`` as the teacher to distill 2-model Ensemble Search into a fast student.
     When ``filter_draw_policy=True``, boss stalemate draws still supervise the value & aux heads while
     masking passive draw trajectories from policy updates.
     Set ``act_every=1`` to play full-speed 1-tick tournament cadence (recording alternating even/odd ticks).
     """
     act_every = max(1, int(act_every))
+    league_strs = tuple(str(Path(p).resolve()) for p in (league_opp_ckpts or ()) if Path(p).is_file())
     if workers > 1 and num_games >= 2:
         n_w = min(int(workers), int(num_games))
         base = num_games // n_w
@@ -2677,6 +2727,8 @@ def collect_gen4_multisend_ei_dataset(
                     lua3_str,
                     filter_draw_policy,
                     act_every,
+                    compact_map_prob,
+                    league_strs,
                 )
                 for idx, cnt in enumerate(shards)
             ]
@@ -2684,8 +2736,11 @@ def collect_gen4_multisend_ei_dataset(
         merged_d = _merge_datasets([r[0] for r in results])
         merged_r = _merge_datasets([r[1] for r in results])
         ens_tag = " [EnsembleTeacher]" if ckpt2_str else ""
+        lg_tag = f" [League={len(league_strs)}]" if league_strs else ""
+        sz_tag = _format_ei_size_breakdown(merged_d.get("pad_mask"))
         print(
-            f"[Galcon Gen4 Multi-Send EI{ens_tag} {act_every}t x{n_w} workers] Merged {len(merged_d.get('val_targets', []))} states "
+            f"[Galcon Gen4 Multi-Send EI{ens_tag}{lg_tag} {act_every}t cpp={HAS_FAST_SIM_CPP} x{n_w}w] "
+            f"Merged {len(merged_d.get('val_targets', []))} states ({sz_tag}) "
             f"+ {len(merged_r.get('planet_feats', []))} redir states across {num_games} games in {time.time()-t_par:.1f}s",
             flush=True,
         )
@@ -2724,29 +2779,29 @@ def collect_gen4_multisend_ei_dataset(
             prior_bonus=0.040,
         )
     else:
-        from galcon.gen5_model import GalconGen5Transformer
-
         search_ag = GalconSearchTransformerAgent(
             ckpt_path,
             use_d4_canonical=True,
+            use_d4_tta=False,
             rollout_horizon=rollout_horizon,
-            num_plies=2,
-            time_budget_sec=0.24,
-            neural_value_weight=0.70,
-            reactive_mid_ply=True,
-            opponent_adaptive=True,
-            enable_def_stream=True,
-            enable_opening_def_guard=True,
-            prior_bonus=0.010,
         )
-        if isinstance(search_ag.model, GalconGen5Transformer):
-            search_ag.prior_bonus = 0.040
+
+    league_agents = [
+        GalconSearchTransformerAgent(
+            Path(lp_s),
+            use_d4_canonical=True,
+            use_d4_tta=False,
+            rollout_horizon=rollout_horizon,
+        )
+        for lp_s in league_strs
+    ]
 
     pf_l, tf_l, ef_l, le_l, om_l, pm_l = [], [], [], [], [], []
     ms_tar_l, ms_fr_l, t_msp_l, vt_l, aux_o_l, aux_s_l = [], [], [], [], [], []
     r_pf, r_tf, r_ef, r_pm, r_cur, r_feat, r_tar, r_msk = [], [], [], [], [], [], [], []
     wins_bots = draws_bots = games_bots = 0
     wins_boss = draws_boss = games_boss = 0
+    wins_lg = draws_lg = games_lg = 0
     multi_send_events = 0
     total_send_ticks = 0
     t0 = time.time()
@@ -2756,16 +2811,58 @@ def collect_gen4_multisend_ei_dataset(
     boss_idx = 0
     boss2_idx = 0
     boss3_idx = 0
+    league_idx = 0
 
     try:
         for g in range(num_games):
-            n_pl, w, h, sym = _sample_gen3_map_config(rng, large_prob=large_map_prob)
-            max_t = 220 if n_pl >= 22 else 200
+            n_pl, w, h, sym = _sample_gen3_map_config(
+                rng, large_prob=large_map_prob, compact_prob=compact_map_prob
+            )
+            max_t = _galcon_max_ticks_for_planets(n_pl)
             sim = GalconSim.create(seed=seed + g, num_planets=n_pl, width=w, height=h, max_ticks=max_t, symmetric=sym)
 
             is_selfplay = False
+            is_dual_search = False
             is_boss = False
-            if lua_opp is not None and lua_opp2 is not None and lua_opp3 is not None:
+            league_opp = None
+            opp_bot = None
+            our_pid = opp_pid = 0
+
+            if league_agents:
+                # 10-slot high-Elo flywheel cycle: 2 Self-Play, 4 Dual-Search League, 2 Sparky, 2 Waffle/Alt
+                slot = g % 10
+                if slot in (0, 1):
+                    is_selfplay = True
+                elif slot in (2, 3, 4, 5):
+                    is_dual_search = True
+                    league_opp = league_agents[league_idx % len(league_agents)]
+                    league_idx += 1
+                    our_pid = 1 if (league_idx % 2 == 1) else 2
+                    opp_pid = 2 if our_pid == 1 else 1
+                elif slot in (6, 7):
+                    if lua_opp is not None:
+                        is_boss = True
+                        boss_idx += 1
+                        opp_bot = lua_opp
+                        our_pid = 1 if (boss_idx % 2 == 1) else 2
+                        opp_pid = 2 if our_pid == 1 else 1
+                    else:
+                        is_selfplay = True
+                else:
+                    sec_lua = lua_opp3 if lua_opp3 is not None else (lua_opp2 if lua_opp2 is not None else lua_opp)
+                    if sec_lua is not None:
+                        is_boss = True
+                        boss3_idx += 1
+                        opp_bot = sec_lua
+                        our_pid = 1 if (boss3_idx % 2 == 1) else 2
+                        opp_pid = 2 if our_pid == 1 else 1
+                    else:
+                        opp_kind = opp_cycle[bot_idx % len(opp_cycle)]
+                        bot_idx += 1
+                        opp_bot = _make_sparring_bot(rng, opp_kind)
+                        our_pid = 1 if (bot_idx % 2 == 0) else 2
+                        opp_pid = 2 if our_pid == 1 else 1
+            elif lua_opp is not None and lua_opp2 is not None and lua_opp3 is not None:
                 # Elo-weighted 8-game cycle: 3 Sparky (37.5%), 2 Waffle3z (25%), 1 EsparanBot (12.5%), 1 Self-Play, 1 Heur
                 slot = g % 8
                 if slot in (0, 1, 2):
@@ -2788,8 +2885,6 @@ def collect_gen4_multisend_ei_dataset(
                     opp_pid = 2 if our_pid == 1 else 1
                 elif slot == 6:
                     is_selfplay = True
-                    opp_bot = None
-                    our_pid = opp_pid = 0
                 else:
                     opp_kind = opp_cycle[bot_idx % len(opp_cycle)]
                     bot_idx += 1
@@ -2813,8 +2908,6 @@ def collect_gen4_multisend_ei_dataset(
                     opp_pid = 2 if our_pid == 1 else 1
                 elif slot == 3:
                     is_selfplay = True
-                    opp_bot = None
-                    our_pid = opp_pid = 0
                 else:
                     opp_kind = opp_cycle[bot_idx % len(opp_cycle)]
                     bot_idx += 1
@@ -2831,8 +2924,6 @@ def collect_gen4_multisend_ei_dataset(
                     opp_pid = 2 if our_pid == 1 else 1
                 elif slot == 2:
                     is_selfplay = True
-                    opp_bot = None
-                    our_pid = opp_pid = 0
                 else:
                     opp_kind = opp_cycle[bot_idx % len(opp_cycle)]
                     bot_idx += 1
@@ -2847,9 +2938,6 @@ def collect_gen4_multisend_ei_dataset(
                     opp_bot = _make_sparring_bot(rng, opp_kind)
                     our_pid = 1 if (bot_idx % 2 == 0) else 2
                     opp_pid = 2 if our_pid == 1 else 1
-                else:
-                    opp_bot = None
-                    our_pid = opp_pid = 0
 
             traj_by_p: Dict[int, List[Tuple]] = {1: [], 2: []}
             snaps_by_p: Dict[int, List[Tuple[int, np.ndarray, np.ndarray]]] = {1: [], 2: []}
@@ -2857,14 +2945,15 @@ def collect_gen4_multisend_ei_dataset(
             while not sim.done:
                 if sim.tick % act_every == 0:
                     orders_map: Dict[int, List[Order]] = {}
-                    search_pids = (1, 2) if is_selfplay else (our_pid,)
+                    search_pids = (1, 2) if (is_selfplay or is_dual_search) else (our_pid,)
                     # When playing full 1-tick speed, always record critical opening ticks (0-6) and alternate thereafter
                     rec_tick = (act_every >= 2) or (sim.tick <= 6) or (sim.tick % 2 == (g % 2))
                     for pid in search_pids:
+                        ag = search_ag if (is_selfplay or pid == our_pid or league_opp is None) else league_opp
                         enc = extract_galcon_features(sim, pid, feature_version=2)
                         so, ss = _snapshot_planet_state(sim, enc.planet_ids, pid)
                         snaps_by_p[pid].append((sim.tick, so, ss))
-                        best_plan, _, _, best_sc = search_ag.act_with_search_info(sim, pid)
+                        best_plan, _, _, best_sc = ag.act_with_search_info(sim, pid)
                         orders_map[pid] = best_plan
 
                         if rec_tick and np.any(enc.owned_mask):
@@ -2873,8 +2962,8 @@ def collect_gen4_multisend_ei_dataset(
                             enc_c.planet_feats = canonicalize_galcon_d4(enc.planet_feats)
                             pad = pad_galcon_state(enc_c)
                             ms_tar, ms_fr = _orders_to_multi_send_targets(enc, best_plan)
-                            t_msp_raw = getattr(search_ag, "_last_root_ms_probs", None)
-                            t_val = float(getattr(search_ag, "_last_root_val", best_sc))
+                            t_msp_raw = getattr(ag, "_last_root_ms_probs", None)
+                            t_val = float(getattr(ag, "_last_root_val", best_sc))
                             t_msp_pad = np.zeros((GALCON_MAX_PLANETS, GALCON_MAX_PLANETS), dtype=np.float32)
                             if t_msp_raw is not None:
                                 tn = min(GALCON_MAX_PLANETS, t_msp_raw.shape[0])
@@ -2895,14 +2984,20 @@ def collect_gen4_multisend_ei_dataset(
                                     redir_pack = _pad_redir_sample(enc_c, renc, rlabels)
                             traj_by_p[pid].append((sim.tick, pad, ms_tar, ms_fr, t_msp_pad, float(best_sc), t_val, redir_pack))
 
-                    if not is_selfplay and opp_bot is not None:
+                    if not is_selfplay and not is_dual_search and opp_bot is not None:
                         orders_map[opp_pid] = opp_bot.act(sim, opp_pid)
                     sim.step(orders_map)
                 else:
                     sim.step({})
 
             win = sim.winner()
-            if is_boss:
+            if is_dual_search:
+                games_lg += 1
+                if win == our_pid:
+                    wins_lg += 1
+                elif win == 0:
+                    draws_lg += 1
+            elif is_boss:
                 games_boss += 1
                 if win == our_pid:
                     wins_boss += 1
@@ -2915,7 +3010,7 @@ def collect_gen4_multisend_ei_dataset(
                 elif win == 0:
                     draws_bots += 1
 
-            rec_pids = (1, 2) if is_selfplay else (our_pid,)
+            rec_pids = (1, 2) if (is_selfplay or is_dual_search) else (our_pid,)
             for pid in rec_pids:
                 enc_f = extract_galcon_features(sim, pid, feature_version=2)
                 so, ss = _snapshot_planet_state(sim, enc_f.planet_ids, pid)
@@ -2984,10 +3079,16 @@ def collect_gen4_multisend_ei_dataset(
         if games_boss > 0
         else ""
     )
+    lg_msg = (
+        f", league={wins_lg}-{games_lg - wins_lg - draws_lg}-{draws_lg}"
+        if games_lg > 0
+        else ""
+    )
+    sz_tag = _format_ei_size_breakdown(data.get("pad_mask"))
     print(
-        f"[Galcon Gen4 Multi-Send EI] Collected {len(vt_l)} states ({multi_send_events}/{max(1, total_send_ticks)} multi-send ticks) "
+        f"[Galcon Gen4 Multi-Send EI cpp={HAS_FAST_SIM_CPP}] Collected {len(vt_l)} states ({sz_tag}, {multi_send_events}/{max(1, total_send_ticks)} multi-send ticks) "
         f"+ {len(r_pf)} redir states across {num_games} games "
-        f"(bots={wins_bots}-{games_bots - wins_bots - draws_bots}-{draws_bots}{boss_msg}) in {time.time()-t0:.1f}s",
+        f"(bots={wins_bots}-{games_bots - wins_bots - draws_bots}-{draws_bots}{boss_msg}{lg_msg}) in {time.time()-t0:.1f}s",
         flush=True,
     )
     return data, redir_data
@@ -3505,7 +3606,7 @@ def _run_gen4_ppo_episode(
     act_every = max(1, int(act_every))
     opp_pid = 2 if ours_pid == 1 else 1
     sim = GalconSim.create(
-        seed=map_seed, num_planets=n_pl, width=w, height=h, max_ticks=220 if n_pl >= 22 else 200, symmetric=sym
+        seed=map_seed, num_planets=n_pl, width=w, height=h, max_ticks=_galcon_max_ticks_for_planets(n_pl), symmetric=sym
     )
     ep_steps = []
     snaps: List[Tuple[int, np.ndarray, np.ndarray]] = []
@@ -3713,7 +3814,7 @@ def _run_gen4_ppo_episodes_batched(
 
     for map_seed, n_pl, w, h, sym, ours_pid, opp_snap, opp_bot, is_boss in ep_specs:
         sim = GalconSim.create(
-            seed=map_seed, num_planets=n_pl, width=w, height=h, max_ticks=220 if n_pl >= 22 else 200, symmetric=sym
+            seed=map_seed, num_planets=n_pl, width=w, height=h, max_ticks=_galcon_max_ticks_for_planets(n_pl), symmetric=sym
         )
         sims.append(sim)
         ours_pids.append(ours_pid)
@@ -3922,6 +4023,7 @@ def _gen4_ppo_rollout_worker(args_tuple):
     wins = sp_wins = sp_eps = bot_wins = bot_eps = 0
     boss_wins = boss_eps = boss2_wins = boss2_eps = boss3_wins = boss3_eps = 0
     split_pairs = total_eps = 0
+    snap_stats: Dict[int, List[int]] = {}
 
     need_b1 = any(j[5] == "boss" for j in pair_jobs)
     need_b2 = any(j[5] == "boss2" for j in pair_jobs)
@@ -4021,6 +4123,15 @@ def _gen4_ppo_rollout_worker(args_tuple):
         elif is_snap:
             sp_eps += 2
             sp_wins += won_a + won_b
+            opp_s_idx = pair_jobs[p_idx][6]
+            rec = snap_stats.setdefault(opp_s_idx, [0, 0, 0])
+            for ep_x in (ep_a, ep_b):
+                if ep_x[5] == 1:
+                    rec[0] += 1
+                elif float(draw_penalty) > -0.99 and abs(float(ep_x[4]) - float(draw_penalty)) < 1e-5:
+                    rec[1] += 1
+                else:
+                    rec[2] += 1
         else:
             bot_eps += 2
             bot_wins += won_a + won_b
@@ -4042,7 +4153,29 @@ def _gen4_ppo_rollout_worker(args_tuple):
         boss3_eps,
         split_pairs,
         total_eps,
+        snap_stats,
     )
+
+
+def _prune_ppo_snapshot_pool(
+    pool_ladder: EloLadder,
+    snapshot_pool: List[object],
+    snap_ids: List[str],
+    snap_ckpt_paths: List[str],
+    protected_ids: Optional[Set[str]] = None,
+) -> List[str]:
+    """Refit BT Elos on PPO snapshots and prune the tightest crowded interior rung(s)."""
+    pool_ladder.fit_ratings()
+    pruned = pool_ladder.prune_if_needed(protected_ids=protected_ids)
+    pruned_ids = {p.player_id for p in pruned}
+    if not pruned_ids:
+        return []
+    keep_idx = [i for i, sid in enumerate(snap_ids) if sid not in pruned_ids]
+    snapshot_pool[:] = [snapshot_pool[i] for i in keep_idx]
+    snap_ids[:] = [snap_ids[i] for i in keep_idx]
+    if snap_ckpt_paths:
+        snap_ckpt_paths[:] = [snap_ckpt_paths[i] for i in keep_idx]
+    return sorted(pruned_ids)
 
 
 def _build_stratified_gen4_opp_schedule(
@@ -4401,6 +4534,7 @@ def rl_mirror_league_ppo_gen4(
     esparan_share: float = 0.17,
     waffle_share: float = 0.15,
     large_map_prob: float = 0.30,
+    compact_map_prob: float = 0.0,
     max_sends_per_planet: int = 6,
     act_every: int = 2,
     eval_every: int = 4,
@@ -4464,6 +4598,14 @@ def rl_mirror_league_ppo_gen4(
     snapshot_pool.append(copy.deepcopy(cpu_policy).eval())
     for p in snapshot_pool[-1].parameters():
         p.requires_grad_(False)
+
+    snap_ids: List[str] = [f"snap_{idx}" for idx in range(len(snapshot_pool))]
+    snap_id_seq = len(snapshot_pool)
+    pool_ladder = EloLadder(anchor_id=snap_ids[0], anchor_elo=1800.0, max_ladder_size=10)
+    for sid in snap_ids:
+        pool_ladder.register_player(PlayerEntry(player_id=sid, kind="checkpoint", active=True))
+    for sid in snap_ids[1:]:
+        pool_ladder.record_match(sid, snap_ids[0], wins_a=0, draws=1, losses_a=0)
 
     if freeze_value_head:
         for pname, p in policy.named_parameters():
@@ -4533,6 +4675,12 @@ def rl_mirror_league_ppo_gen4(
             for k in range(2):
                 for a_p in (1, 2):
                     jobs.append(("boss3", "boss3", 39700 + k, 24 + (k % 3), 560.0, 340.0, 220, (k % 2 == 0), a_p))
+        if compact_map_prob > 0.0:
+            for a_p in (1, 2):
+                jobs.append(("boss" if has_lua1 else "heur", "boss" if has_lua1 else "tactical", 39800, 6, 200.0, 200.0, 100, False, a_p))
+                jobs.append(("anc", "anc", 39801, 6, 200.0, 200.0, 100, False, a_p))
+                jobs.append(("boss" if has_lua1 else "heur", "boss" if has_lua1 else "tactical", 39850, 24, 560.0, 340.0, 240, False, a_p))
+                jobs.append(("anc", "anc", 39851, 24, 560.0, 340.0, 240, False, a_p))
         return jobs
 
     val_jobs_template = _build_val_jobs()
@@ -4667,12 +4815,15 @@ def rl_mirror_league_ppo_gen4(
             )
             pair_jobs = []
             for k, (opp_kind, opp_idx) in enumerate(opp_sched):
-                n_pl, w, h, sym = _sample_gen3_map_config(rng, large_prob=large_map_prob)
+                n_pl, w, h, sym = _sample_gen3_map_config(
+                    rng, large_prob=large_map_prob, compact_prob=compact_map_prob
+                )
                 map_seed = seed + it * 500 + k
                 pair_jobs.append((map_seed, n_pl, w, h, sym, opp_kind, opp_idx))
 
             wins = sp_wins = sp_eps = bot_wins = bot_eps = 0
             boss_wins = boss_eps = boss2_wins = boss2_eps = boss3_wins = boss3_eps = split_pairs = 0
+            iter_snap_stats: Dict[int, List[int]] = {}
             t_roll = time.time()
             if use_parallel and pool_exec is not None and tmp_dir_ctx is not None:
                 pol_p = Path(tmp_dir_ctx.name) / "policy_cur.pt"
@@ -4715,6 +4866,12 @@ def rl_mirror_league_ppo_gen4(
                     boss3_eps += o[11]
                     split_pairs += o[12]
                     total_eps += o[13]
+                    if len(o) > 14 and o[14]:
+                        for s_idx, rec in o[14].items():
+                            acc = iter_snap_stats.setdefault(int(s_idx), [0, 0, 0])
+                            acc[0] += int(rec[0])
+                            acc[1] += int(rec[1])
+                            acc[2] += int(rec[2])
                 adv_arr = merged["adv"].astype(np.float32)
                 adv_arr = (adv_arr - adv_arr.mean()) / (adv_arr.std() + 1e-6)
                 ds = TensorDataset(
@@ -4787,6 +4944,14 @@ def rl_mirror_league_ppo_gen4(
                     elif opp_snap is not None:
                         sp_eps += 2
                         sp_wins += won_a + won_b
+                        rec = iter_snap_stats.setdefault(opp_idx, [0, 0, 0])
+                        for ep_x in (ep_a, ep_b):
+                            if ep_x[5] == 1:
+                                rec[0] += 1
+                            elif float(draw_penalty) > -0.99 and abs(float(ep_x[4]) - float(draw_penalty)) < 1e-5:
+                                rec[1] += 1
+                            else:
+                                rec[2] += 1
                     else:
                         bot_eps += 2
                         bot_wins += won_a + won_b
@@ -4946,20 +5111,38 @@ def rl_mirror_league_ppo_gen4(
             setattr(cpu_policy, "_fast_gen5_infer", None)
             upd_sec = time.time() - t_upd
 
+            cur_pol_id = f"policy_it_{it}"
+            pool_ladder.register_player(PlayerEntry(player_id=cur_pol_id, kind="bot", active=False))
+            for s_idx, rec in iter_snap_stats.items():
+                if 0 <= s_idx < len(snap_ids):
+                    pool_ladder.record_match(cur_pol_id, snap_ids[s_idx], rec[0], rec[1], rec[2])
+
             if it % 3 == 0:
                 snap_copy = copy.deepcopy(cpu_policy).eval()
                 for p in snap_copy.parameters():
                     p.requires_grad_(False)
                 snapshot_pool.append(snap_copy)
+                new_sid = f"snap_{snap_id_seq}"
+                snap_id_seq += 1
+                snap_ids.append(new_sid)
+                pool_ladder.register_player(PlayerEntry(player_id=new_sid, kind="checkpoint", active=True))
+                if iter_snap_stats:
+                    pool_ladder.record_match(new_sid, cur_pol_id, wins_a=0, draws=2, losses_a=0)
+                else:
+                    ref_sid = snap_ids[-2] if len(snap_ids) >= 2 else snap_ids[0]
+                    pool_ladder.record_match(new_sid, ref_sid, wins_a=0, draws=1, losses_a=0)
                 if use_parallel and tmp_dir_ctx is not None:
                     sp_p = Path(tmp_dir_ctx.name) / f"snap_{snap_seq}.pt"
                     snap_seq += 1
                     torch.save({"model_config": snap_copy.config, "model_state_dict": snap_copy.state_dict()}, sp_p)
                     snap_ckpt_paths.append(str(sp_p))
-                if len(snapshot_pool) > 10:
-                    snapshot_pool = [snapshot_pool[0]] + snapshot_pool[-9:]
-                    if use_parallel:
-                        snap_ckpt_paths = [snap_ckpt_paths[0]] + snap_ckpt_paths[-9:]
+                _prune_ppo_snapshot_pool(
+                    pool_ladder,
+                    snapshot_pool,
+                    snap_ids,
+                    snap_ckpt_paths,
+                    protected_ids={snap_ids[0], new_sid},
+                )
 
             boss_str = f", boss={boss_wins}/{boss_eps}" if boss_eps > 0 else ""
             boss2_str = f", boss2={boss2_wins}/{boss2_eps}" if boss2_eps > 0 else ""
@@ -5116,6 +5299,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--esparan-share", type=float, default=0.17)
     parser.add_argument("--waffle-share", type=float, default=0.15)
     parser.add_argument("--large-map-prob", type=float, default=0.30)
+    parser.add_argument("--compact-map-prob", type=float, default=0.0, help="Fraction of compact 6pl 200x200 arenas (when >0, balances Standard/Large/Compact).")
+    parser.add_argument("--league-opps", default="", help="Optional comma-separated neural Search opponent checkpoints for dual-recorded EI league games.")
     parser.add_argument("--kl-coef", type=float, default=0.030)
     parser.add_argument("--v-anchor-coef", type=float, default=0.0)
     parser.add_argument("--freeze-value-head", action="store_true", help="Freeze WDL/scalar value head parameters and skip GAE value loss during PPO to preserve Search value calibration.")
@@ -5254,6 +5439,7 @@ def main(argv: list[str] | None = None) -> int:
                 datasets_to_pool.append(cached)
 
         g4_redir: Dict[str, np.ndarray] = {}
+        league_p_list = [Path(s.strip()) for s in str(args.league_opps).split(",") if s.strip()] if args.league_opps else None
         if args.search_games > 0:
             fresh_data, g4_redir = collect_gen4_multisend_ei_dataset(
                 resume_p,
@@ -5263,7 +5449,9 @@ def main(argv: list[str] | None = None) -> int:
                 lua_opp2_path=lua_p2,
                 lua_opp3_path=lua_p3,
                 ckpt_path2=resume_p2,
+                league_opp_ckpts=league_p_list,
                 large_map_prob=args.large_map_prob,
+                compact_map_prob=args.compact_map_prob,
                 filter_draw_policy=args.filter_draws,
                 act_every=args.act_every,
                 workers=args.workers,
@@ -5327,6 +5515,7 @@ def main(argv: list[str] | None = None) -> int:
             esparan_share=args.esparan_share,
             waffle_share=args.waffle_share,
             large_map_prob=args.large_map_prob,
+            compact_map_prob=args.compact_map_prob,
             act_every=args.act_every,
             eval_every=max(1, args.eval_every),
             seed=args.seed,
