@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import math
+import random
 from typing import Dict, List, Optional, Tuple
 
 from galcon.sim import (
@@ -686,4 +687,62 @@ class GalconMacroBot:
                     claimed[best_t.id] = claimed.get(best_t.id, 0.0) + best_need
                     surplus[src.id] = max(0.0, avail - best_need)
         return orders
+
+
+class GalconPassBot:
+    """Baseline bot that always passes (never sends fleets)."""
+
+    def act(self, sim: GalconSim, player: int) -> List[Order]:
+        return []
+
+
+class GalconRandomBot:
+    """Stochastic random-send baseline matching Evan's LightZero random anchor.
+
+    Deterministically seeds its per-game RNG on tick 0 (or first call) from map
+    geometry + seat + ``seed`` so paired seat-swap games and ``--resume`` runs
+    are reproducible and worker-safe.
+    """
+
+    def __init__(
+        self,
+        *,
+        send_percent: int = 50,
+        min_ships: float = 1.0,
+        send_prob: float = 1.0,
+        seed: int = 0,
+    ) -> None:
+        self.send_percent = max(5, min(100, int(send_percent)))
+        self.min_ships = float(min_ships)
+        self.send_prob = float(send_prob)
+        self.seed = int(seed)
+        self._rng: Optional[random.Random] = None
+
+    def act(self, sim: GalconSim, player: int) -> List[Order]:
+        if sim.tick == 0 or self._rng is None:
+            sig = tuple(
+                (p.id, round(p.x, 1), round(p.y, 1))
+                for p in sorted(sim.planets.values(), key=lambda p: p.id)[:4]
+            )
+            self._rng = random.Random(
+                repr((self.seed, int(player), len(sim.planets), sig))
+            )
+
+        if self._rng.random() >= self.send_prob:
+            return []
+
+        all_planets = list(sim.planets.values())
+        if len(all_planets) < 2:
+            return []
+        mine = [p for p in all_planets if p.owner == player and p.ships >= self.min_ships]
+        if not mine:
+            return []
+
+        src = self._rng.choice(mine)
+        targets = [p for p in all_planets if p.id != src.id]
+        if not targets:
+            return []
+        dst = self._rng.choice(targets)
+        return [SendOrder(src.id, dst.id, self.send_percent)]
+
 
