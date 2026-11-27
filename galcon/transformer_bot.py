@@ -2315,6 +2315,65 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         return self._decode_orders(sim, opp_enc, op, of, launch_threshold=self.launch_threshold, include_redirects=False)
 
     @torch.inference_mode()
+    def _eval_opening_guard_against_opp(
+        self,
+        sim: GalconSim,
+        root_cpp: Optional[FastGalconCppSim],
+        work_cpp: Optional[FastGalconCppSim],
+        use_fast_cpp: bool,
+        player: int,
+        opp: int,
+        eval_cands: List[List[Order]],
+        opp_fixed_orders: Sequence[Order],
+        horizon: int,
+    ) -> Tuple[List[float], Optional[FastGalconCppSim]]:
+        """Evaluate all opening candidates against a fixed opponent defense/hold policy."""
+        h_vals: List[float] = []
+        done_flags: List[bool] = []
+        encs: List[EncodedGalconState] = []
+        pos: List[int] = []
+        opp_ord_list = list(opp_fixed_orders)
+        if use_fast_cpp and root_cpp is not None:
+            if work_cpp is None:
+                work_cpp = root_cpp.clone()
+            rem = horizon - 1
+            for loc_i, plan in enumerate(eval_cands):
+                work_cpp.copy_from(root_cpp)
+                work_cpp.step({player: plan, opp: opp_ord_list})
+                if rem > 0:
+                    work_cpp.step_n_ticks(rem)
+                enc_i, h_i, d_i = extract_galcon_features_from_cpp(
+                    work_cpp, player, feature_version=self.feature_version, need_heuristic=True
+                )
+                h_vals.append(h_i)
+                done_flags.append(d_i)
+                if not d_i and enc_i is not None:
+                    pos.append(loc_i)
+                    encs.append(enc_i)
+        else:
+            for loc_i, plan in enumerate(eval_cands):
+                r_sim = sim.clone()
+                r_sim.step({player: plan, opp: opp_ord_list})
+                for _ in range(1, horizon):
+                    if r_sim.done:
+                        break
+                    r_sim.step({})
+                h_vals.append(evaluate_galcon_state(r_sim, player))
+                done_flags.append(r_sim.done)
+                if not r_sim.done:
+                    pos.append(loc_i)
+                    encs.append(extract_galcon_features(r_sim, player, feature_version=self.feature_version))
+        nn_vals = self._batch_evaluate_leaves(encs)
+        nn_map = {p_i: float(nn_vals[idx_l]) for idx_l, p_i in enumerate(pos)}
+        out_sc = [
+            h_vals[loc_i]
+            if done_flags[loc_i]
+            else (self.neural_value_weight * nn_map[loc_i] + (1.0 - self.neural_value_weight) * h_vals[loc_i])
+            for loc_i in range(len(eval_cands))
+        ]
+        return out_sc, work_cpp
+
+    @torch.inference_mode()
     def act_with_search_info(
         self,
         sim: GalconSim,
@@ -2328,7 +2387,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
         n = len(enc.planet_ids)
         if n == 0 or not np.any(enc.owned_mask):
             return [], [], [], 0.0
-        eff_budget = max(self.time_budget_sec, 0.45) if n >= 22 else self.time_budget_sec
+        eff_budget = max(self.time_budget_sec, 0.55) if n >= 22 else self.time_budget_sec
         deadline = t0 + eff_budget
 
         redir_enc = (
@@ -2508,7 +2567,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                         raw_cands.append(neu_plan)
 
         use_adv = self.adversarial_search and (n < 22)
-        if use_adv:
+        if self.adversarial_search:
             ff_plan = self._build_focus_fire_plan(
                 sim, enc, probs, ms_probs=prior_ms, max_sources=4, base_redirs=base_redirs
             )
@@ -2572,7 +2631,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
             opp_orders = self._predict_opponent_reply(sim, opp_enc, op, of, oms_p, oms_f)
             if self.enable_opening_def_guard and sim.tick <= 10:
                 opp_def_orders = self._build_fanout_plan(
-                    sim, opp_enc, op, max_targets_per_planet=2, reserve_ratio=0.55
+                    sim, opp_enc, op, max_targets_per_planet=1, reserve_ratio=0.75
                 )
             if use_adv:
                 opp_adv_orders = self._build_fanout_plan(
@@ -2825,10 +2884,10 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                     )
                     scores[cand_i] = 0.65 * scores[cand_i] + 0.35 * min(scores[cand_i], s_adv)
 
-            # Wave 16/19 opening defensive soft-minimax guard:
-            # Breaks self-mirror opening-rush delusion by testing ALL candidates against a calm defending &
-            # safe-neutral-expanding opponent (opp_def_orders) out to min(36, max_eta + 10) ticks so real C++
-            # multi-ship flocks finish gradual landing before evaluation.
+            # Wave 16/19/22 opening defensive soft-minimax guard (Guard75):
+            # Breaks self-mirror opening-rush delusion by testing ALL candidates against BOTH a tight-defending
+            # opponent (reserve=0.75, max_targets=1) and pure-hold [] out to min(36, max_eta + 10) ticks so
+            # real C++ multi-ship flocks finish gradual landing before evaluation.
             if (
                 self.enable_opening_def_guard
                 and sim.tick <= 10
@@ -2847,49 +2906,18 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                                     max_strike_eta = eta_sd
                 if max_strike_eta >= 4:
                     def_horizon = min(36, max_strike_eta + 10)
-                    top_k_def = list(range(len(eval_cands)))
-                    def_h: List[float] = []
-                    def_done: List[bool] = []
-                    def_encs: List[EncodedGalconState] = []
-                    def_pos: List[int] = []
-                    if use_fast_cpp and root_cpp is not None:
-                        if work_cpp is None:
-                            work_cpp = rolls_cpp.pop() if rolls_cpp else root_cpp.clone()
-                        rem_def = def_horizon - 1
-                        for loc_i, cand_i in enumerate(top_k_def):
-                            work_cpp.copy_from(root_cpp)
-                            work_cpp.step({player: eval_cands[cand_i], opp: opp_def_orders})
-                            if rem_def > 0:
-                                work_cpp.step_n_ticks(rem_def)
-                            d_enc, d_h, d_done = extract_galcon_features_from_cpp(
-                                work_cpp, player, feature_version=self.feature_version, need_heuristic=True
-                            )
-                            def_h.append(d_h)
-                            def_done.append(d_done)
-                            if not d_done and d_enc is not None:
-                                def_pos.append(loc_i)
-                                def_encs.append(d_enc)
-                    else:
-                        for loc_i, cand_i in enumerate(top_k_def):
-                            r_def = sim.clone()
-                            r_def.step({player: eval_cands[cand_i], opp: opp_def_orders})
-                            for _ in range(1, def_horizon):
-                                if r_def.done:
-                                    break
-                                r_def.step({})
-                            def_h.append(evaluate_galcon_state(r_def, player))
-                            def_done.append(r_def.done)
-                            if not r_def.done:
-                                def_pos.append(loc_i)
-                                def_encs.append(extract_galcon_features(r_def, player, feature_version=self.feature_version))
-                    def_nn = self._batch_evaluate_leaves(def_encs)
-                    def_nn_map = {pos: float(def_nn[idx_l]) for idx_l, pos in enumerate(def_pos)}
-                    for loc_i, cand_i in enumerate(top_k_def):
-                        s_def = (
-                            def_h[loc_i]
-                            if def_done[loc_i]
-                            else (self.neural_value_weight * def_nn_map[loc_i] + (1.0 - self.neural_value_weight) * def_h[loc_i])
+                    if use_fast_cpp and root_cpp is not None and work_cpp is None:
+                        work_cpp = rolls_cpp.pop() if rolls_cpp else root_cpp.clone()
+                    def_sc, work_cpp = self._eval_opening_guard_against_opp(
+                        sim, root_cpp, work_cpp, use_fast_cpp, player, opp, eval_cands, opp_def_orders, def_horizon
+                    )
+                    if opp_def_orders and time.perf_counter() < deadline - 0.015:
+                        hold_sc, work_cpp = self._eval_opening_guard_against_opp(
+                            sim, root_cpp, work_cpp, use_fast_cpp, player, opp, eval_cands, [], def_horizon
                         )
+                        def_sc = [min(a, b) for a, b in zip(def_sc, hold_sc)]
+                    for cand_i in range(len(eval_cands)):
+                        s_def = def_sc[cand_i]
                         scores[cand_i] = 0.50 * scores[cand_i] + 0.50 * min(scores[cand_i], s_def)
 
             best_idx = 0
