@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from orbit_wars_bot.fast_sim_cpp import HAS_ORBIT_SIM_CPP, solve_intercept_cpp
 from orbit_wars_bot.physics import (
     CENTER,
     DEFAULT_SHIP_SPEED,
@@ -378,19 +379,36 @@ class FastHoberSparringModel:
                     dst_j = int(np.argmax(np.where(enc.legal_edges[i], p_row[1:], -1.0)))
                     if not enc.legal_edges[i, dst_j]:
                         continue
-                sol = solve_intercept(
-                    enc.planet_rows[i],
-                    enc.planet_rows[dst_j],
-                    avail,
-                    enc.planet_rows,
-                    enc.current_step,
-                    enc.angular_velocity,
-                    enc.initial_by_id,
-                    comet_lookup=enc.comet_lookup,
-                    tracks=enc.tracks,
-                    max_eta=MAX_ROUTE_ETA + 4,
-                    max_speed=max_speed,
-                )
+                if (
+                    HAS_ORBIT_SIM_CPP
+                    and enc.tr_x is not None
+                    and enc.tr_y is not None
+                    and enc.planet_radii is not None
+                ):
+                    sol = solve_intercept_cpp(
+                        i,
+                        dst_j,
+                        avail,
+                        enc.tr_x,
+                        enc.tr_y,
+                        enc.planet_radii,
+                        max_eta=MAX_ROUTE_ETA + 4,
+                        max_speed=max_speed,
+                    )
+                else:
+                    sol = solve_intercept(
+                        enc.planet_rows[i],
+                        enc.planet_rows[dst_j],
+                        avail,
+                        enc.planet_rows,
+                        enc.current_step,
+                        enc.angular_velocity,
+                        enc.initial_by_id,
+                        comet_lookup=enc.comet_lookup,
+                        tracks=enc.tracks,
+                        max_eta=MAX_ROUTE_ETA + 4,
+                        max_speed=max_speed,
+                    )
                 if sol is not None:
                     moves.append([int(enc.planet_rows[i][0]), float(sol.angle), int(avail)])
             moves_batch.append(moves)

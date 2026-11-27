@@ -379,3 +379,22 @@ This log tracks calibrated **Kaggle-equivalent Elo** estimates (anchored against
   - **2P vs. `#2 Hober Malloc` (`seeds 200–207`, 8g):** `4–0–4 (50.0%)`, `AvgRank=1.50`, `AvgLen=205.6t`, **`130.76 ms` mean**, **`214.31 ms` p95** (`253.17 ms` max, cleanly `< 300 ms` gate).
   - **4P FFA vs. `3× subham_v14` (`seeds 400–407`, 8g):** **`8–0–0 (100.0%)`**, `AvgRank=1.00`, `AvgLen=123.0t`, **`151.18 ms` mean**, **`233.04 ms` p95** (`301.46 ms` max).
 - **Takeaway:** Fast C++17 search cuts Stage 16A p95 latency from `661.5 ms` down to **`214.31 ms`**, but `Gen 15B` Pure (`50.0%` 48g Boss, `58.80 ms/t`) remains the active default until Gen 17 upgrades `feature_version=3` and recalibrates the value head.
+
+---
+
+### Generation 17 — C++17 Training-Loop Acceleration & Pure `fv=3` Experiment (2026-11-27)
+
+- **Infrastructure (`orbit_wars_bot/hober_sparring.py`, `scripts/rl_finetune_transformer.py`):**
+  - Wired C++17 `solve_intercept_cpp` fast paths into `FastHoberSparringModel.act_batch` and `_decode_sampled_actions`.
+  - Fixed per-player `feature_version` isolation (`hero_fv` vs `opp_fv`) across `collect_episode`, `collect_batch_episodes`, and `_eval_match` so `fv=3` policies spar against `fv=2` anchors cleanly without feature leakage.
+- **Training & Polish (`4.67M PT-v3.5`, `feature_version=3`):**
+  - Collected `108,852` fresh pure `fv=3` boards via `CppFastOrbitSim` (`r9_v3_hober_mirror` `68,160` + `r9_v3_dagger` `37,496` + `r9_v3_cf_win` `3,196`) + `r8_v3` (`37,485`) -> `143,431` effective train + `9,000` unseen val boards.
+  - `Gen17-KD` (`16` ep DirectML, `value_weight=0.75`): `v3_kl=0.0820`, `l_f1=87.7%`, `val_tgt=93.9%`, `aux=96.5%`, `vsign=72.4%`.
+  - `Gen17-GRPO` (`12` iters `18x4` C++ balanced-league counterfactual GRPO on DirectML): `vl 0.120 -> 0.041`, `kl=0.0145`, `aux=97.1%`.
+- **Official Kaggle Benchmarks (`8× D4`, `@t=0.53`):**
+  - **48g Boss Suite Screen (`200–223` + `300–323` vs. `#2 Hober Malloc`):** `Gen17-kd` `14–0–34 (29.2%)`, `Gen17-kd_final` `18–0–30 (37.5%)`, `Gen17-grpo_best` `18–0–30 (37.5%)`, `Gen17-grpo_it6` `15–0–33 (31.2%)`, **`Gen17-grpo_it4` `19–0–29 (39.6%)`** (`b200=9/24, b300=10/24`; `@0.51`: `18–0–30 / 37.5%`; `@0.55`: `16–0–32 / 33.3%`).
+  - **48g Unseen Holdout (`400–447` vs. `#2 Hober Malloc`):** `Gen17-grpo_it4` `12–0–36 (25.0%)` vs. `Gen 15B` Pure `17–0–31 (35.4%)` → **Combined `96g`: `31/96 (32.3%)` vs. `Gen 15B` Pure `41/96 (42.7%)`**.
+  - **20g Unseen Mirrors (`990–999`):** **`12–0–8 (60.0%)`** vs. `Gen 15B`, `10–0–10 (50.0%)` vs. `Gen 13 PT-v3.5`, `18–0–2 (90.0%)` vs. `Gen 12 PPO`.
+  - **`OrbitSearchAgent` on `Gen17-grpo_it4` (`200–223`, `24g`):** **`10–0–14 (41.7%)`** (improved **`+4.2 pp`** over `Gen17-grpo_it4` Pure `9/24 = 37.5%`).
+  - **Solo 1-Thread Checks (`Gen17-grpo_it4 @0.53`):** `8–0–0 (100.0%)` 4P FFA vs. `3× subham_v14` (`400–407`, `62.79 ms` mean / `80.70 ms` p95 / `138.46 ms` max); `3–0–1 (75.0%)` 2P vs. `#2 Hober Malloc` (`200–203`, `58.40 ms` mean / `73.79 ms` p95 / `100.80 ms` max).
+- **Root-Cause Takeaway:** `checkpoints/planet_transformer_best.pt` stays at `Gen 15B` (`42.7%` 96g vs `Gen 17` `32.3%`). Heavy single-corpus Hober-mirror repetition (`tr_kl 0.030` vs `v3_kl 0.082`) + high `value_weight=0.75` + dropping `3,500+`-map `r5–r7` diversity caused `Gen17-KD` to drop `50.0% -> 29.2%` Boss48 (even though GRPO lifted `+10.4 pp` back to `39.6%` and beat `Gen 15B` `60.0%` in mirrors). Full-diversity `r5–r9` 2-stage KD follows in Gen 18.

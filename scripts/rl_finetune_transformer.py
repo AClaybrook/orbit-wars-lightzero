@@ -50,6 +50,7 @@ from orbit_wars_bot.dml_utils import (  # noqa: E402
     snap_bucket_batches,
 )
 from orbit_wars_bot.fast_sim import FastOrbitSim  # noqa: E402
+from orbit_wars_bot.fast_sim_cpp import HAS_ORBIT_SIM_CPP, solve_intercept_cpp  # noqa: E402
 from orbit_wars_bot.features import evaluate_state  # noqa: E402
 from orbit_wars_bot.heuristic_bot import heuristic_moves  # noqa: E402
 from orbit_wars_bot.physics import DEFAULT_SHIP_SPEED, solve_intercept  # noqa: E402
@@ -164,19 +165,36 @@ def _decode_sampled_actions(
         f = float(fracs[i, dst_j])
         send_ships = avail if (force_all_in or forced or f >= 0.88) else max(1, min(avail, int(round(avail * f))))
 
-        sol = solve_intercept(
-            src_row,
-            dst_row,
-            send_ships,
-            enc.planet_rows,
-            enc.current_step,
-            enc.angular_velocity,
-            enc.initial_by_id,
-            comet_lookup=enc.comet_lookup,
-            tracks=enc.tracks,
-            max_eta=MAX_ROUTE_ETA + 4,
-            max_speed=max_speed,
-        )
+        if (
+            HAS_ORBIT_SIM_CPP
+            and enc.tr_x is not None
+            and enc.tr_y is not None
+            and enc.planet_radii is not None
+        ):
+            sol = solve_intercept_cpp(
+                i,
+                dst_j,
+                send_ships,
+                enc.tr_x,
+                enc.tr_y,
+                enc.planet_radii,
+                max_eta=MAX_ROUTE_ETA + 4,
+                max_speed=max_speed,
+            )
+        else:
+            sol = solve_intercept(
+                src_row,
+                dst_row,
+                send_ships,
+                enc.planet_rows,
+                enc.current_step,
+                enc.angular_velocity,
+                enc.initial_by_id,
+                comet_lookup=enc.comet_lookup,
+                tracks=enc.tracks,
+                max_eta=MAX_ROUTE_ETA + 4,
+                max_speed=max_speed,
+            )
         if sol is not None:
             moves.append([int(src_row[0]), float(sol.angle), int(send_ships)])
     return moves
@@ -287,7 +305,8 @@ def collect_episode(
     sim = FastOrbitSim.from_seed(seed=seed, num_agents=num_players, max_steps=max_steps)
     hero_slot_val = int(rng.integers(0, num_players)) if hero_slot is None else int(hero_slot)
     active_opp_model = opp_model if opp_model is not None else anchor
-    feat_ver = max(int(getattr(policy, "feature_version", 1)), int(getattr(active_opp_model, "feature_version", 1)))
+    hero_fv = int(getattr(policy, "feature_version", 1))
+    opp_fv = int(getattr(active_opp_model, "feature_version", 1)) if active_opp_model is not None else 2
     tl_dim_pol = int(getattr(policy, "timeline_dim", 8))
     k_rot, flip_x = (int(rng.integers(0, 4)), bool(rng.integers(0, 2))) if rollout_d4 else (0, False)
 
@@ -322,7 +341,7 @@ def collect_episode(
                     obs_shared,
                     player=hero_slot_val,
                     max_speed=sim.ship_speed,
-                    feature_version=feat_ver,
+                    feature_version=hero_fv,
                     shared_physics=shared_phys,
                 )
                 if np.any(enc_h.owned_mask):
@@ -363,7 +382,7 @@ def collect_episode(
                         obs_shared,
                         player=pid,
                         max_speed=sim.ship_speed,
-                        feature_version=feat_ver,
+                        feature_version=2,
                         shared_physics=shared_phys,
                     )
                     actions[pid] = _get_worker_hober().act_batch(
@@ -385,7 +404,7 @@ def collect_episode(
                         obs_shared,
                         player=pid,
                         max_speed=sim.ship_speed,
-                        feature_version=feat_ver,
+                        feature_version=hero_fv,
                         shared_physics=shared_phys,
                     )
                     mv_o, _, _, _ = _policy_step(
@@ -397,7 +416,7 @@ def collect_episode(
                         obs_shared,
                         player=pid,
                         max_speed=sim.ship_speed,
-                        feature_version=feat_ver,
+                        feature_version=opp_fv,
                         shared_physics=shared_phys,
                     )
                     opp_sample = opp_temperature > 1e-4
@@ -741,8 +760,8 @@ def collect_episodes_batched_2p(
     m = len(specs)
     if m == 0:
         return []
-    opp_fv = int(getattr(opp_model, "feature_version", 1)) if opp_model is not None else 1
-    feat_ver = max(int(getattr(policy, "feature_version", 1)), opp_fv)
+    hero_fv = int(getattr(policy, "feature_version", 1))
+    opp_fv = int(getattr(opp_model, "feature_version", 1)) if opp_model is not None else (2 if hober_opp is not None else hero_fv)
     tl_dim_pol = int(getattr(policy, "timeline_dim", 8))
 
     parsed_specs: List[Tuple[int, int, int, int]] = []
@@ -810,10 +829,10 @@ def collect_episodes_batched_2p(
             sh_phys = build_shared_planet_physics(o_sh, max_speed=sim.ship_speed)
             hp = hero_slots[idx]
             eh = extract_planet_features(
-                o_sh, player=hp, max_speed=sim.ship_speed, feature_version=feat_ver, shared_physics=sh_phys
+                o_sh, player=hp, max_speed=sim.ship_speed, feature_version=hero_fv, shared_physics=sh_phys
             )
             eo = extract_planet_features(
-                o_sh, player=1 - hp, max_speed=sim.ship_speed, feature_version=feat_ver, shared_physics=sh_phys
+                o_sh, player=1 - hp, max_speed=sim.ship_speed, feature_version=opp_fv, shared_physics=sh_phys
             )
             h_encs.append(eh)
             o_encs.append(eo)
@@ -1154,8 +1173,8 @@ def _play_deterministic_eval_game(
     decoupled_logit_tta: bool = False,
 ) -> Tuple[float, float]:
     sim = FastOrbitSim.from_seed(seed=seed, num_agents=num_players, max_steps=max_steps)
-    opp_fv = int(getattr(opp_model, "feature_version", 1)) if opp_model is not None else 1
-    feat_ver = max(int(getattr(policy, "feature_version", 1)), opp_fv)
+    hero_fv = int(getattr(policy, "feature_version", 1))
+    opp_fv = int(getattr(opp_model, "feature_version", 1)) if opp_model is not None else (2 if hober_opp is not None else hero_fv)
     last_alive = [0] * num_players
     while not sim.done:
         acts = []
@@ -1166,7 +1185,7 @@ def _play_deterministic_eval_game(
                 obs_shared,
                 player=pid,
                 max_speed=sim.ship_speed,
-                feature_version=feat_ver,
+                feature_version=(hero_fv if pid == hero_slot else opp_fv),
                 shared_physics=shared_phys,
             )
             if pid == hero_slot:
