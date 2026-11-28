@@ -2884,7 +2884,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                     )
                     scores[cand_i] = 0.65 * scores[cand_i] + 0.35 * min(scores[cand_i], s_adv)
 
-            # Wave 16/19/22 opening defensive soft-minimax guard (Guard75):
+            # Wave 16/19/22/25 opening defensive soft-minimax guard (Guard75-Minimax80):
             # Breaks self-mirror opening-rush delusion by testing ALL candidates against BOTH a tight-defending
             # opponent (reserve=0.75, max_targets=1) and pure-hold [] out to min(36, max_eta + 10) ticks so
             # real C++ multi-ship flocks finish gradual landing before evaluation.
@@ -2918,7 +2918,7 @@ class GalconSearchTransformerAgent(GalconTransformerAgent):
                         def_sc = [min(a, b) for a, b in zip(def_sc, hold_sc)]
                     for cand_i in range(len(eval_cands)):
                         s_def = def_sc[cand_i]
-                        scores[cand_i] = 0.50 * scores[cand_i] + 0.50 * min(scores[cand_i], s_def)
+                        scores[cand_i] = 0.20 * scores[cand_i] + 0.80 * min(scores[cand_i], s_def)
 
             best_idx = 0
             best_score = -1e9
