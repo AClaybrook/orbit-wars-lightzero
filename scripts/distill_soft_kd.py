@@ -1008,6 +1008,8 @@ def train_soft_kd(
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0, foreach=not use_dml)
             opt.step()
+            if gpu_sleep_ms > 0.0:
+                time.sleep(gpu_sleep_ms / 1000.0)
             tr_kl_acc = tr_kl_acc + m["kl"]
             tr_steps += 1
         sched.step()

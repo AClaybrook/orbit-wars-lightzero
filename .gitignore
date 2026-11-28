@@ -40,6 +40,7 @@ checkpoints/*
 !checkpoints/planet_transformer_gen13_ptv35_ppo.pt
 !checkpoints/planet_transformer_gen15b_grpo.pt
 !checkpoints/planet_transformer_gen20_valcal.pt
+!checkpoints/planet_value_gen21.pt
 ckpts/
 *.pth
 *.pth.tar
@@ -61,6 +62,7 @@ ckpts/
 !checkpoints/planet_transformer_gen13_ptv35_ppo.pt
 !checkpoints/planet_transformer_gen15b_grpo.pt
 !checkpoints/planet_transformer_gen20_valcal.pt
+!checkpoints/planet_value_gen21.pt
 *.onnx
 runs/
 wandb/

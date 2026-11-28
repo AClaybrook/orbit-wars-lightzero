@@ -237,3 +237,51 @@ def test_orbit_search_joint_cliff_candidates():
     assert isinstance(moves, list)
     for pid, ang, count in moves:
         assert isinstance(pid, int) and np.isfinite(ang) and count > 0
+
+
+@pytest.mark.skipif(not CKPT_BEST.is_file(), reason="Missing planet_transformer_best.pt checkpoint")
+def test_orbit_search_external_value_model_and_multi_replan(tmp_path):
+    import torch
+    from orbit_wars_bot.planet_transformer import PlanetTimelineTransformer
+
+    val_model = PlanetTimelineTransformer(
+        timeline_dim=14,
+        d_model=32,
+        n_heads=2,
+        n_layers=2,
+        dim_ff=64,
+        feature_version=2,
+        arch_version=3,
+    )
+    tiny_val = tmp_path / "tiny_val.pt"
+    torch.save(
+        {
+            "model_config": val_model.config,
+            "model_state_dict": val_model.state_dict(),
+        },
+        tiny_val,
+    )
+
+    agent = OrbitSearchAgent(
+        CKPT_BEST,
+        value_checkpoint_path=tiny_val,
+        rollout_horizon=12,
+        replan_steps=(4, 8),
+    )
+    assert agent.value_model is not agent.model
+    assert agent.replan_steps_tuple == (4, 8)
+    assert agent.replan_step == 4
+
+    sim2 = CppFastOrbitSim.from_seed(200, num_agents=2, max_steps=500)
+    sim2.step_n(55)
+    info2 = agent.act_with_search_info(sim2.to_observation(player=0))
+    assert "moves" in info2 and 0 <= int(info2["chosen_idx"]) < len(info2["candidates"])
+
+    sim4 = CppFastOrbitSim.from_seed(77, num_agents=4, max_steps=500)
+    sim4.step_n(25)
+    moves4 = agent.act(sim4.to_observation(player=2))
+    assert isinstance(moves4, list)
+
+    fn = resolve_agent(f"orbit_search_t53:{CKPT_BEST}|{tiny_val}")
+    moves_resolved = fn(sim2.to_observation(player=0), {"shipSpeed": 2.0})
+    assert isinstance(moves_resolved, list)

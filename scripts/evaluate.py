@@ -232,10 +232,16 @@ def resolve_agent(spec: str, checkpoint: str | None = None, sims: int = 20, time
     if matched_orbit_search:
         from orbit_wars_bot.orbit_search import create_orbit_search_agent
 
-        ckpt_path = arg_os or checkpoint or str(REPO_ROOT / "checkpoints" / "planet_transformer_best.pt")
+        raw_os = arg_os or checkpoint or str(REPO_ROOT / "checkpoints" / "planet_transformer_best.pt")
+        value_ckpt = None
+        if "|" in raw_os:
+            ckpt_path, value_ckpt = [s.strip() for s in raw_os.split("|", 1)]
+        else:
+            ckpt_path = raw_os
         eff_thr = 0.53 if "_t" not in spec.split(":", 1)[0] else thr_os
         return create_orbit_search_agent(
             checkpoint_path=ckpt_path,
+            value_checkpoint_path=value_ckpt,
             launch_threshold=eff_thr,
             time_budget_sec=min(0.21, time_budget),
         )
