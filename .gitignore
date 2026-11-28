@@ -23,12 +23,6 @@ data_gmz*/
 data_lightzero*/
 outputs/
 checkpoints/*
-!checkpoints/galcon_transformer_best.pt
-!checkpoints/galcon_wave7_p1.pt
-!checkpoints/galcon_wave8_pure.pt
-!checkpoints/galcon_wave9_search.pt
-!checkpoints/galcon_gen3_champion.pt
-!checkpoints/galcon_gen4_ppo_s2.pt
 !checkpoints/planet_transformer_best.pt
 !checkpoints/planet_transformer_4p_best.pt
 !checkpoints/planet_transformer_gen9_balanced.pt
@@ -49,12 +43,6 @@ ckpts/
 *.pth
 *.pth.tar
 *.pt
-!checkpoints/galcon_transformer_best.pt
-!checkpoints/galcon_wave7_p1.pt
-!checkpoints/galcon_wave8_pure.pt
-!checkpoints/galcon_wave9_search.pt
-!checkpoints/galcon_gen3_champion.pt
-!checkpoints/galcon_gen4_ppo_s2.pt
 !checkpoints/planet_transformer_best.pt
 !checkpoints/planet_transformer_4p_best.pt
 !checkpoints/planet_transformer_gen9_balanced.pt

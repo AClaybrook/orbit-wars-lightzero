@@ -2,6 +2,8 @@
 
 A complete reinforcement learning, MCTS, and exact-physics engineering stack for **Kaggle Orbit Wars** (`kaggle_environments` `orbit_wars`), integrated with [OpenDILab LightZero](https://github.com/opendilab/LightZero) (`AlphaZero`, `MuZero`, and `Gumbel MuZero`).
 
+> **Galcon** (previously under `galcon/`) has moved to its own repo: [`AClaybrook/galcon`](https://github.com/AClaybrook/galcon).
+
 ## Architecture Overview
 
 | Module | Purpose |
