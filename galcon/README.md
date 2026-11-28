@@ -1,11 +1,45 @@
-# Galcon AI Wave 22 — Search Guard75 + Large-Map Upgrade (`80.00%` Elo-Weighted • `1961.6` True MLE Elo • `85.0%` Sparky!)
+# Galcon AI Wave 25 — `#1` Overall Cross-Map Champion (`1915.5` BT Elo Search • `1814.6` BT Elo Zero-Search Pure • `Guard75-Minimax80`!)
 
 A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-lightzero` featuring our **Gen 5 Edge-Gated Residual-Edge WDL Transformer** ([`galcon/gen5_model.py`](gen5_model.py), `2.93M` params + fused TorchScript [`FastGen5Infer`](gen5_model.py)), **`esparano`'s real Galcon 2 C++ multi-ship physics simulator** ([`galcon/sim_core.cpp`](sim_core.cpp)), Phil Hassey's official **`gbots`** protocol, and zero-copy head-to-head benchmarking against Evan Sparano's (`esparano/GalconModVault`) unmodified Lua tournament bots (`Sparky v1.6`, `Waffle3z-GA / bots_waffle3z_optimized`, & `EsparanBot v0.2`) via [`galcon/lua_bridge.py`](lua_bridge.py).
 
-## Wave 24 — Multi-Size League PPO + 3-Size WDL Recal (NOT promoted; `--league-opps` plumbing landed)
+## Wave 25 Highlights — `Guard75-Minimax80`, First `1900+` Overall Search & `1800+` Overall Pure BT Elo, and Gen 5 Plateau Analysis
+- **Zero-Latency Search Engine Upgrade ([`galcon/transformer_bot.py`](transformer_bot.py)):**
+  - **`Guard75-Minimax80`:** Tightened the opening defensive soft-minimax blend (`sim.tick <= 10`) from `0.50 * scores + 0.50 * min(scores, s_def)` to **`0.20 * scores + 0.80 * min(scores, s_def)`** with zero extra compute latency.
+  - Verified on [`checkpoints/galcon_gen5_w24.pt`](../checkpoints/galcon_gen5_w24.pt):
+    - **Compact 6pl (`32g 1t`):** Held all-time record **`93.8%`** (`Sparky 96.9% [15–0–1]`, `Waffle3z 90.6% [14–1–1]`)!
+    - **Standard 18pl (`104g`):** **`1918.5` MLE Elo** (`Sparky 80.0%`, `Waffle3z 75.0%`, **`EsparanBot 62.5% [+4.2%]`**).
+    - **Large 24pl (`24g / 48g 2t`):** Canonical 24g **`62.5%`** with **`66.7%` (`8–4–0`) Large Sparky (`+16.7%`)**; Full 48g **`50.0%` (`+2.1%` over W24's `47.9%`!)** with **`50.0%` (`12–12–0`) Large Sparky (`+12.5%` over W24, `+8.3%` over W19 — ALL-TIME 48g RECORD!)**.
+- **Official 3,508-Game Cross-Map Bradley-Terry Milestones (20 Bots · `Compact 6pl` + `Standard 18pl` + `Large 24pl`):**
+  - **`#1` Overall Cross-Map Search (`w25_search` = `galcon_gen5_w24.pt` + `Guard75-Minimax80`):** **`1915.5` BT Elo (`±45.3`, 352g)** — **first bot in project history over `1900+` Overall Cross-Map Elo!** `#1` on Compact 6pl (`1982.2`), `#1` on Standard 18pl (`1969.6`, `+47.8 Elo` above `w22_search` [beat `11–1–4`]), and `+34.0 Elo` above `w22_search` on Large 24pl (`1794.5`, beat `7–0–5`) — **`+156.3 Elo` above `bot:sparky`** and **`+218.2 Elo` above `bot:waffle`**!
+  - **`#1` Overall Zero-Search Pure (`w24_pure` = `galcon_gen5_w24_pure.pt`, `5.0–9.6 ms/tick`, ZERO Search!):** **`1814.6` BT Elo (`±45.0`, 340g)** — **first zero-search Pure net over `1800+` Overall Cross-Map Elo!** Beats `w14_search` (`1791.4`) overall, hits **`1866.1` Elo on Standard 18pl (`#5` overall, beat `w18_search` `10–1–5` & `bot:waffle` `13–0–3`)** and **`1752.9` Elo on Large 24pl (`+127.9 Elo` over `w21_pure`, beat `w25_search` `7–0–5` & `w22_search` `7–0–5`!)** — **`+55.4 Elo` above `bot:sparky`** and **`+117.3 Elo` above `bot:waffle`** with ZERO search!
+- **Wave 25A Flywheel (`+13,338` `W24` States → `79,531` Real-C++ Corpus) & Confirmed Gen 5 + 2-Ply/3-Ply Plateau Diagnosis:**
+  - Across 6 independent Wave 25 training & search ablations (`W25_Unified_e1/e2` on `47.7k` states, frozen-trunk `W24_VCal48k`, `W25_Search_Soup3`, 2 rounds of `--ppo-temp 0.55` Multi-Size Pure PPO, `LgH36Search`, `2PlyGuard75`, `Beam3`), both Gen 5 Search and Pure confirmed a genuine architectural plateau at **`~94%` Compact / `~79–80%` Std18 / `~50–62%` Large24 Search** (`1915.5` BT Elo) and **`1814.6` BT Elo Pure**.
+  - **Root Causes Identified for Gen 6:**
+    1. **Search Opponent-Model Drift:** Adding deeper self-mirror rollouts (`Beam3`, `2PlyGuard75`, `LgH36Search`) consistently lost `-30 to -50 Elo` because 10-tick self-mirror neural replies diverge from 1-tick Sparky/Waffle3z continuous streaming. Breaking past ~80% Std18 / ~62% Large24 requires a **dedicated fast opponent-policy predictor** or **short-step (`2–4` tick) PUCT/MCTS**.
+    2. **Large-Map Timeline Horizon Blindness (`H=20`):** Large 24pl maps have home-to-home travel times `h2h_eta = 21..37` exceeding `GALCON_TIMELINE_HORIZON = 20`, requiring **`H=32` + overflow arrival-bucket features trained from scratch**.
+    3. **Pure Multi-Send Independence:** Single-step independent Bernoulli edge sampling hits ~55.3% 3-size / `1814.6` BT Elo because Large 24pl multi-planet coordination and anti-stream draw-breaking require **autoregressive/joint multi-send decoding** or **cross-tick recurrent memory**.
+
+## Wave 24 Highlights — Unbiased `--pos-weight 1.0`, Exact On-Policy `--ppo-temp`, 3-Size Guard75 League EI (`78.33%` 3-Size Search & `1946.6 Elo` Zero-Search Pure!)
+- **Training Pipeline Upgrades ([`galcon/train.py`](train.py)):**
+  - **Unbiased Multi-Send Supervision (`--pos-weight`, `--opening-pol-weight`):** Eliminated `pos_weight=2.2` logit inflation that caused early tick `0–10` over-firing (`prec 48.7% → 70.1%`, cutting Large-map early-rush losses in half) and up-weighted critical opening ticks `0–12` (`sim.tick <= 12` 100% 1-tick EI coverage).
+  - **Exact On-Policy Bernoulli Temperature (`--ppo-temp`, e.g. `0.55`):** Scales multi-edge logits `ms_l / T` identically in both PPO rollouts and PPO log-prob updates while keeping unscaled EMA KL — suppressing ~270-edge tail sampling noise `30×` and turning 1-tick Multi-Size League PPO from regression into monotonic `+8.6%` / `+96.8 Elo` gains.
+- **New 3-Size Search Champion ([`checkpoints/galcon_gen5_w24.pt`](../checkpoints/galcon_gen5_w24.pt), default `--bot search`, `45.6 ms/tick`):**
+  - Collected `15,935` fresh 1-tick balanced 3-size Guard75 Neural-League EI states (`Compact 1,943 | Std 6,126 | Large 7,866`, bringing our 100% real-C++ corpus to **`66,193` states**), trained `W24_Unified_e2` on `44,077` 1-tick states (`vloss=0.365, vsign=87.7%, prec=63.5%`), recalibrated `W19`'s WDL value head across all `66,193` states (`val_ce: 0.5531 → 0.5248, vsign: 88.7% → 91.3%`), and formed a zero-latency 3-way Model Soup (`0.40 W21 + 0.30 W19_VCal66k + 0.30 W24_Unified_e2`).
+  - **Jumped `+11.81%` in 3-Size Boss Avg (`66.52% → 78.33%`) over `W21_Search`:**
+    - **Compact 6pl (`32g 1t`):** **`93.8%`** (`Sparky 96.9% [15–0–1]`, `Waffle3z 90.6% [14–1–1]` — BOTH >90%, `+6.3%` vs W21!)
+    - **Standard 18pl (`104g`):** **`78.75%`** Dual-Boss (`Sparky 80.0% [s14k 85.0%]`, `Waffle3z 77.5% [s9.5k 80.0%]`, `EsparanBot 58.3%`, `1918.5 Elo`)
+    - **Large 24pl (`24g / 48g 2t`):** **`62.5%`** canonical 24g (`Sparky 50.0% [6–6]`, `Waffle3z 75.0% [9–3]`, **`+29.2%`** vs W21's `33.3%`!) • **`47.9%`** on full 48g (`Sparky 37.5%`, `Waffle3z 58.3%`)
+    - **Heuristics (`32g 2t`):** **`96.9%` (`31–1–0`)**
+- **New Zero-Search Pure Champion ([`checkpoints/galcon_gen5_w24_pure.pt`](../checkpoints/galcon_gen5_w24_pure.pt), default `--bot transformer`, `7.5 ms/tick`, ZERO Search!):**
+  - Combined unbiased `--pos-weight 1.0 --opening-pol-weight 2.5` supervision, exact logit bias calibration, and `--ppo-temp 0.55` Multi-Size 1-tick League PPO (`--boss-draw-penalty -0.45`), beating `W21_Pure` on **EVERY map size with ZERO regression** and matching `W21_Search`'s Standard 18pl Elo at **7.5 ms/tick**:
+    - **Standard 18pl (`104g`, ZERO SEARCH!):** **`1946.6` True MLE Elo (`+103.2 Elo` vs W21_Pure!)** — **`82.5%` Waffle3z (`33–7–0`, `s14k 90.0%`!)**, **`79.2%` EsparanBot (`19–5–0`, `+33.4%`!)**, **`70.0%` Sparky (`24–8–8`)**, `76.25%` Dual-Boss
+    - **Compact 6pl (`32g 1t`):** **`56.2%`** (`+7.8%` vs W21_Pure, `68.8%` Sparky) • **Large 24pl (`24g 2t`):** **`33.3%`** (`+8.3%` vs W21_Pure, `41.7%` Waffle3z) • **Heuristics:** **`90.6%`**
+    - **3-Size Boss Avg:** **`55.28%` (`+7.05%` vs W21_Pure's `48.23%`)**
+
+## Wave 24b (parallel experiment) — Multi-Size League PPO from W21 + 3-Size WDL Recal (NOT promoted; `--league-opps` plumbing landed)
 - **New in [`galcon/train.py`](train.py):** `gen4_ppo` now accepts `--league-opps ckpt1,ckpt2,...` (fixed, never-pruned neural sparring snapshots played by their 1-tick multi-send prior), `--league-share` (fraction of non-boss pairs per iter; boss pair counts unchanged) and `--snapshot-every N` (`<out>_itNN.pt`).
 - **Run (4-core CPU):** 30 frozen-value-head 1-tick PPO iters from `galcon_gen5_w21.pt` (`50/35/15` Std/Large/Compact, `lr=2e-5`, `kl=0.035`, `v-anchor=0.50`, `45%` Sparky / `15%` Waffle / `10%` Esparan / `25%` League `w21+w20+w19`), then `--freeze-trunk` WDL recal of `it12` on `25,000` balanced 1-tick league EI states (holdout value MSE `0.142 → 0.098`, vsign `85.3% → 87.4%`).
-- **Result:** every PPO snapshot (`it03`–`it30`) lost `11–20` pts Elo-Weighted vs `w21` in Search mode on the 160g Boss Suite (`w21 77.5%` vs `it12 65.0%`, `w24_final 69.4%`); value recal recovered `+4.4` pts but not the policy-prior regression. 3-ladder BT gate (24 g/pair): `w24_search` **`1858.8`** Overall (`1920.0` C6 / `1881.6` S18 / `1774.6` L24) vs `w22_search` **`1894.0`** (`1959.0` / `1943.3` / `1779.8`) → **−35.2 Overall**, so `galcon_gen5_w21.pt` stays champion and the ladder JSONs are unchanged.
+- **Result:** every PPO snapshot (`it03`–`it30`) lost `11–20` pts Elo-Weighted vs `w21` in Search mode on the 160g Boss Suite (`w21 77.5%` vs `it12 65.0%`, `w24_final 69.4%`); value recal recovered `+4.4` pts but not the policy-prior regression. 3-ladder BT gate (24 g/pair, run before Wave 24/25 ladders merged): `w24b_ppo_search` **`1858.8`** Overall (`1920.0` C6 / `1881.6` S18 / `1774.6` L24) vs `w22_search` **`1894.0`** (`1959.0` / `1943.3` / `1779.8`) → **−35.2 Overall**, so it was not promoted and its games were not added to the ladder JSONs.
 - **Takeaway:** sampled-Bernoulli 1-tick PPO shifts the multi-send prior in ways Search cannot exploit even at 3 iters; Large-map gains (`lg_sparky 25% → 41.7%` in every snapshot) came with Standard losses.
 
 ## Wave 22 Highlights — Guard75 Search Upgrade (`1961.6` MLE Elo), DirectML Optimizer Fix & EI Teacher Parity
@@ -48,103 +82,111 @@ A competitive, self-contained Galcon AI stack inside `AClaybrook/orbit-wars-ligh
 - **Continued Frozen-Value-Head `1-Tick` C++ PPO ([`checkpoints/galcon_gen5_w19.pt`](../checkpoints/galcon_gen5_w19.pt)):**
   - Continued 7 gentle iterations (`lr=2.2e-5`, `--freeze-value-head --v-anchor-coef 0.50`, `42%` Sparky / `38%` Waffle3z) directly on top of our sharpest `vloss=0.370` C++ WDL value head + `3,495` 100% real C++ redirs, pushing `val_56g` to `67.9%` (`comp = 63.1%`, `87.5%` / `7–1` vs `Gen5_W18`) → **`67.46%` Elo-Weighted / `1851.3` True MLE Elo Search** (`71.2%` Waffle3z, `66.2%` Sparky, `50.0% / 50.0%` Large 24pl) & **`55.71%` / `1765.3 Elo` Pure**.
 
-## Unified Real-C++ Cross-Bot Bradley-Terry Elo Leaderboards (2,860 Games · Overall + Per-Map-Size)
+## Unified Real-C++ Cross-Bot Bradley-Terry Elo Leaderboards (3,508 Games · 20 Bots · Overall + Per-Map-Size)
 
-To put **all** model generations (`Gen 3` → `Wave 22`, Pure & Search), built-in heuristics (`Random`, `Classic`, `Macro`, `Rusher`, `Tactical`), unmodified Lua tournament bosses (`Sparky v1.6`, `Waffle3z-GA`, `EsparanBot v0.2`), and future external bots (`esparano/LightZero` checkpoints via `py:mod:factory`) on **one shared leaderboard system**, [`galcon/elo_rating.py`](elo_rating.py) + [`galcon/tournament.py`](tournament.py) use **Evan Sparano's exact Bradley-Terry MLE solver** (`esparano/LightZero` `lzero/worker/elo_rating.py` — vectorized damped Newton-Raphson, played-edge prior `prior_draws=0.1`, `l2_reg=1e-4`, and analytical Laplace `±Std`) on **Evan's real Galcon 2 C++ simulator** ([`galcon/sim_core.cpp`](sim_core.cpp)).
+To put **all** model generations (`Gen 3` → `Wave 25`, Pure & Search), built-in heuristics (`Random`, `Classic`, `Macro`, `Rusher`, `Tactical`), unmodified Lua tournament bosses (`Sparky v1.6`, `Waffle3z-GA`, `EsparanBot v0.2`), and future external bots (`esparano/LightZero` checkpoints via `py:mod:factory`) on **one shared leaderboard system**, [`galcon/elo_rating.py`](elo_rating.py) + [`galcon/tournament.py`](tournament.py) use **Evan Sparano's exact Bradley-Terry MLE solver** (`esparano/LightZero` `lzero/worker/elo_rating.py` — vectorized damped Newton-Raphson, played-edge prior `prior_draws=0.1`, `l2_reg=1e-4`, and analytical Laplace `±Std`) on **Evan's real Galcon 2 C++ simulator** ([`galcon/sim_core.cpp`](sim_core.cpp)).
 
 Each map size has its own dedicated JSON ladder (`Compact 6pl`, `Standard 18pl`, `Large 24pl`), aggregated equal-weight into an **Overall Cross-Map Leaderboard**:
 
-### Overall Cross-Map Leaderboard (`Compact 6pl` + `Standard 18pl` + `Large 24pl` · 2,860 Total Games)
+### Overall Cross-Map Leaderboard (`Compact 6pl` + `Standard 18pl` + `Large 24pl` · 3,508 Total Games)
 
 | Rank | Bot | Overall Elo (`bot:classic=1200`) | ±Std | Compact 6pl | Standard 18pl | Large 24pl | Overall vs `bot:random` (0) | Sizes | Total Games | Score% |
 |---:|---|---:|---:|---:|---:|---:|---:|:---:|---:|---:|
-| 1 | `w22_search` | **1889.1** | ±46.6 | `1965.6` | `1925.2` | `1776.5` | `1297.9` | 3/3 | 296 | 63.3% |
-| 2 | `w20_search` | **1882.8** | ±45.5 | `1919.9` | `1927.6` | `1801.0` | `1291.6` | 3/3 | 340 | 62.9% |
-| 3 | `w19_search` | **1882.3** | ±45.8 | `1870.8` | `1909.7` | `1866.5` | `1291.1` | 3/3 | 340 | 60.6% |
-| 4 | `w18_search` | **1855.2** | ±45.3 | `1925.2` | `1852.7` | `1787.8` | `1264.0` | 3/3 | 340 | 57.8% |
-| 5 | `w14_search` | **1786.7** | ±44.9 | `1737.9` | `1830.3` | `1792.0` | `1195.6` | 3/3 | 340 | 45.9% |
-| 6 | `w21_pure` | **1782.4** | ±45.0 | `1910.7` | `1808.3` | `1628.1` | `1191.2` | 3/3 | 340 | 53.2% |
-| 7 | `w20_pure` | **1765.9** | ±44.7 | `1845.4` | `1804.3` | `1648.1` | `1174.8` | 3/3 | 340 | 48.4% |
-| 8 | `bot:sparky` | **1760.1** | ±43.1 | `1687.0` | `1768.1` | `1825.1` | `1168.9` | 3/3 | 340 | 55.9% |
-| 9 | `w18_pure` | **1718.0** | ±43.8 | `1727.2` | `1763.6` | `1663.1` | `1126.8` | 3/3 | 340 | 43.8% |
-| 10 | `bot:waffle` | **1701.2** | ±41.7 | `1636.9` | `1783.3` | `1683.5` | `1110.0` | 3/3 | 340 | 56.8% |
-| 11 | `gen3_pure` | **1514.1** | ±36.3 | `1445.6` | `1541.5` | `1555.1` | `922.9` | 3/3 | 340 | 56.5% |
-| 12 | `gen4_pure` | **1492.5** | ±36.7 | `1425.4` | `1531.4` | `1520.7` | `901.3` | 3/3 | 340 | 48.1% |
-| 13 | `bot:esparan` | **1396.7** | ±33.9 | `1189.7` | `1446.4` | `1553.9` | `805.5` | 3/3 | 324 | 57.4% |
-| 14 | `bot:classic` | **1200.0** | ±0.0 | `1200.0` | `1200.0` | `1200.0` | `608.9` | 3/3 | 328 | 38.0% |
-| 15 | `bot:macro` | **1192.7** | ±34.2 | `1007.8` | `1211.2` | `1358.9` | `601.6` | 3/3 | 260 | 46.9% |
-| 16 | `bot:rusher` | **1181.3** | ±33.3 | `1104.5` | `1147.2` | `1292.1` | `590.2` | 3/3 | 292 | 37.0% |
-| 17 | `bot:tactical` | **1168.3** | ±32.9 | `1036.7` | `1203.8` | `1264.3` | `577.2` | 3/3 | 308 | 39.4% |
-| 18 | `bot:random` | **590.0** | ±84.9 | `583.2` | `553.0` | `633.8` | `0.0` | 3/3 | 172 | 2.9% |
+| 1 | `w25_search` | **1915.5** | ±45.3 | `1982.2` | `1969.6` | `1794.5` | `1324.1` | 3/3 | 352 | 60.7% |
+| 2 | `w19_search` | **1899.9** | ±44.7 | `1899.8` | `1922.4` | `1877.6` | `1308.6` | 3/3 | 412 | 60.8% |
+| 3 | `w20_search` | **1888.6** | ±44.6 | `1931.2` | `1936.2` | `1798.3` | `1297.2` | 3/3 | 400 | 61.1% |
+| 4 | `w22_search` | **1887.1** | ±45.0 | `1979.0` | `1921.8` | `1760.5` | `1295.7` | 3/3 | 384 | 60.3% |
+| 5 | `w18_search` | **1855.1** | ±44.3 | `1921.7` | `1860.1` | `1783.4` | `1263.7` | 3/3 | 412 | 55.0% |
+| 6 | `w24_pure` | **1814.6** | ±45.0 | `1824.8` | `1866.1` | `1752.9` | `1223.2` | 3/3 | 340 | 49.6% |
+| 7 | `w14_search` | **1791.4** | ±44.1 | `1741.7` | `1839.8` | `1792.7` | `1200.0` | 3/3 | 400 | 45.1% |
+| 8 | `w21_pure` | **1787.7** | ±44.4 | `1920.6` | `1817.5` | `1625.0` | `1196.3` | 3/3 | 388 | 52.2% |
+| 9 | `w20_pure` | **1776.4** | ±43.9 | `1870.4` | `1811.6` | `1647.4` | `1185.1` | 3/3 | 396 | 47.9% |
+| 10 | `bot:sparky` | **1759.2** | ±42.6 | `1679.0` | `1776.9` | `1821.6` | `1167.8` | 3/3 | 416 | 51.2% |
+| 11 | `w18_pure` | **1720.3** | ±43.3 | `1731.1` | `1763.6` | `1666.2` | `1128.9` | 3/3 | 384 | 42.7% |
+| 12 | `bot:waffle` | **1697.3** | ±41.4 | `1637.4` | `1771.5` | `1683.0` | `1105.9` | 3/3 | 368 | 54.6% |
+| 13 | `gen3_pure` | **1514.1** | ±36.3 | `1446.5` | `1540.7` | `1555.0` | `922.7` | 3/3 | 340 | 56.5% |
+| 14 | `gen4_pure` | **1492.9** | ±36.7 | `1426.1` | `1531.4` | `1521.1` | `901.6` | 3/3 | 340 | 48.1% |
+| 15 | `bot:esparan` | **1396.4** | ±33.9 | `1189.7` | `1446.2` | `1553.5` | `805.1` | 3/3 | 324 | 57.4% |
+| 16 | `bot:classic` | **1200.0** | ±0.0 | `1200.0` | `1200.0` | `1200.0` | `608.7` | 3/3 | 328 | 38.0% |
+| 17 | `bot:macro` | **1192.8** | ±34.2 | `1008.0` | `1211.1` | `1359.2` | `601.5` | 3/3 | 260 | 46.9% |
+| 18 | `bot:rusher` | **1181.4** | ±33.3 | `1104.7` | `1147.0` | `1292.5` | `590.1` | 3/3 | 292 | 37.0% |
+| 19 | `bot:tactical` | **1168.2** | ±32.9 | `1036.9` | `1203.6` | `1264.2` | `576.9` | 3/3 | 308 | 39.4% |
+| 20 | `bot:random` | **590.0** | ±84.9 | `583.4` | `552.9` | `633.7` | `0.0` | 3/3 | 172 | 2.9% |
 
-### Compact 6pl (200×200 · Evan LightZero Geometry · 67 Pairs / 1,072 Games · [`galcon_ladder_compact6.json`](../docs/galcon_ladder_compact6.json))
-
-| Rank | Bot | Elo (`bot:classic=1200`) | ±Std | vs `bot:random` (0) | Games | W-D-L | Score% | Mean ms |
-|---:|---|---:|---:|---:|---:|:---:|---:|---:|
-| 1 | `w22_search` | **1965.6** | ±77.2 | `1381.8` | 112 | 65-17-30 | 65.6% | `16.47 ms` |
-| 2 | `w18_search` | **1925.2** | ±74.6 | `1341.4` | 128 | 76-7-45 | 62.1% | `15.68 ms` |
-| 3 | `w20_search` | **1919.9** | ±74.6 | `1336.0` | 128 | 74-9-45 | 61.3% | `15.49 ms` |
-| 4 | `w21_pure` | **1910.7** | ±74.4 | `1326.9` | 128 | 65-25-38 | 60.5% | `7.39 ms` |
-| 5 | `w19_search` | **1870.8** | ±74.8 | `1287.0` | 128 | 63-18-47 | 56.2% | `16.24 ms` |
-| 6 | `w20_pure` | **1845.4** | ±74.8 | `1261.5` | 128 | 62-11-55 | 52.7% | `7.13 ms` |
-| 7 | `w14_search` | **1737.9** | ±73.7 | `1154.0` | 128 | 44-2-82 | 35.2% | `10.26 ms` |
-| 8 | `w18_pure` | **1727.2** | ±74.1 | `1143.4` | 128 | 41-2-85 | 32.8% | `5.77 ms` |
-| 9 | `bot:sparky` | **1687.0** | ±64.3 | `1103.2` | 128 | 77-4-47 | 61.7% | `0.33 ms` |
-| 10 | `bot:waffle` | **1636.9** | ±62.0 | `1053.1` | 128 | 81-8-39 | 66.4% | `0.41 ms` |
-| 11 | `gen3_pure` | **1445.6** | ±54.3 | `861.8` | 128 | 69-5-54 | 55.9% | `4.13 ms` |
-| 12 | `gen4_pure` | **1425.4** | ±53.7 | `841.6` | 128 | 68-2-58 | 53.9% | `3.87 ms` |
-| 13 | `bot:classic` | **1200.0** | ±0.0 | `616.2` | 128 | 50-1-77 | 39.5% | `0.01 ms` |
-| 14 | `bot:esparan` | **1189.7** | ±48.9 | `605.9` | 128 | 48-2-78 | 38.3% | `0.55 ms` |
-| 15 | `bot:rusher` | **1104.5** | ±50.6 | `520.7` | 112 | 50-2-60 | 45.5% | `0.23 ms` |
-| 16 | `bot:tactical` | **1036.7** | ±51.9 | `453.0` | 128 | 41-3-84 | 33.2% | `0.49 ms` |
-| 17 | `bot:macro` | **1007.8** | ±56.1 | `424.1` | 80 | 36-0-44 | 45.0% | `0.30 ms` |
-| 18 | `bot:random` | **583.2** | ±110.3 | `0.0` | 48 | 3-0-45 | 6.2% | `0.01 ms` |
-
-### Standard 18pl (400×240 Symmetric · Classic 1v1 · 66 Pairs / 1,056 Games · [`galcon_unified_ladder.json`](../docs/galcon_unified_ladder.json))
+### Compact 6pl (200×200 · Evan LightZero Geometry · 82 Pairs / 1,312 Games · [`galcon_ladder_compact6.json`](../docs/galcon_ladder_compact6.json))
 
 | Rank | Bot | Elo (`bot:classic=1200`) | ±Std | vs `bot:random` (0) | Games | W-D-L | Score% | Mean ms |
 |---:|---|---:|---:|---:|---:|:---:|---:|---:|
-| 1 | `w20_search` | **1927.6** | ±75.4 | `1373.0` | 128 | 78-11-39 | 65.2% | `46.17 ms` |
-| 2 | `w22_search` | **1925.2** | ±78.0 | `1370.6` | 112 | 67-14-31 | 66.1% | `44.12 ms` |
-| 3 | `w19_search` | **1909.7** | ±75.3 | `1355.1` | 128 | 73-8-47 | 60.2% | `46.91 ms` |
-| 4 | `w18_search` | **1852.7** | ±74.8 | `1298.1` | 128 | 64-6-58 | 52.3% | `41.84 ms` |
-| 5 | `w14_search` | **1830.3** | ±74.8 | `1275.7` | 128 | 60-6-62 | 49.2% | `20.73 ms` |
-| 6 | `w21_pure` | **1808.3** | ±75.7 | `1253.6` | 128 | 56-15-57 | 49.6% | `9.98 ms` |
-| 7 | `w20_pure` | **1804.3** | ±73.6 | `1249.7` | 128 | 61-6-61 | 50.0% | `10.04 ms` |
-| 8 | `bot:waffle` | **1783.3** | ±71.9 | `1228.7` | 128 | 64-4-60 | 51.6% | `0.62 ms` |
-| 9 | `bot:sparky` | **1768.1** | ±73.3 | `1213.5` | 128 | 55-10-63 | 46.9% | `0.61 ms` |
-| 10 | `w18_pure` | **1763.6** | ±71.5 | `1209.0` | 128 | 64-2-62 | 50.8% | `8.84 ms` |
-| 11 | `gen3_pure` | **1541.5** | ±59.2 | `986.9` | 128 | 70-1-57 | 55.1% | `5.45 ms` |
-| 12 | `gen4_pure` | **1531.4** | ±60.5 | `976.8` | 128 | 56-1-71 | 44.1% | `5.25 ms` |
-| 13 | `bot:esparan` | **1446.4** | ±55.0 | `891.9` | 112 | 80-0-32 | 71.4% | `0.92 ms` |
-| 14 | `bot:macro` | **1211.2** | ±52.8 | `656.7` | 96 | 47-0-49 | 49.0% | `0.45 ms` |
-| 15 | `bot:tactical` | **1203.8** | ±52.9 | `649.3` | 96 | 46-0-50 | 47.9% | `0.82 ms` |
-| 16 | `bot:classic` | **1200.0** | ±0.0 | `645.5` | 128 | 48-0-80 | 37.5% | `0.01 ms` |
-| 17 | `bot:rusher` | **1147.2** | ±54.1 | `592.7` | 96 | 24-0-72 | 25.0% | `0.35 ms` |
-| 18 | `bot:random` | **553.0** | ±163.1 | `0.0` | 64 | 1-0-63 | 1.6% | `0.01 ms` |
+| 1 | `w25_search` | **1982.2** | ±74.1 | `1398.0` | 128 | 73-17-38 | 63.7% | `13.61 ms` |
+| 2 | `w22_search` | **1979.0** | ±74.0 | `1394.9` | 144 | 82-22-40 | 64.6% | `15.81 ms` |
+| 3 | `w20_search` | **1931.2** | ±73.0 | `1347.1` | 144 | 79-13-52 | 59.4% | `15.09 ms` |
+| 4 | `w18_search` | **1921.7** | ±72.9 | `1337.5` | 144 | 80-7-57 | 58.0% | `15.66 ms` |
+| 5 | `w21_pure` | **1920.6** | ±72.0 | `1336.4` | 160 | 79-30-51 | 58.8% | `6.95 ms` |
+| 6 | `w19_search` | **1899.8** | ±72.4 | `1315.6` | 160 | 81-20-59 | 56.9% | `16.16 ms` |
+| 7 | `w20_pure` | **1870.4** | ±72.3 | `1286.2` | 160 | 77-15-68 | 52.8% | `6.75 ms` |
+| 8 | `w24_pure` | **1824.8** | ±73.1 | `1240.6` | 128 | 54-11-63 | 46.5% | `5.03 ms` |
+| 9 | `w14_search` | **1741.7** | ±71.9 | `1157.6` | 144 | 48-4-92 | 34.7% | `10.50 ms` |
+| 10 | `w18_pure` | **1731.1** | ±72.7 | `1146.9` | 144 | 46-2-96 | 32.6% | `5.72 ms` |
+| 11 | `bot:sparky` | **1679.0** | ±63.4 | `1094.9` | 160 | 82-6-72 | 53.1% | `0.37 ms` |
+| 12 | `bot:waffle` | **1637.4** | ±61.9 | `1053.3` | 128 | 81-8-39 | 66.4% | `0.41 ms` |
+| 13 | `gen3_pure` | **1446.5** | ±54.4 | `862.4` | 128 | 69-5-54 | 55.9% | `4.13 ms` |
+| 14 | `gen4_pure` | **1426.1** | ±53.7 | `842.1` | 128 | 68-2-58 | 53.9% | `3.87 ms` |
+| 15 | `bot:classic` | **1200.0** | ±0.0 | `615.9` | 128 | 50-1-77 | 39.5% | `0.01 ms` |
+| 16 | `bot:esparan` | **1189.7** | ±48.9 | `605.6` | 128 | 48-2-78 | 38.3% | `0.55 ms` |
+| 17 | `bot:rusher` | **1104.7** | ±50.6 | `520.7` | 112 | 50-2-60 | 45.5% | `0.23 ms` |
+| 18 | `bot:tactical` | **1036.9** | ±51.8 | `452.9` | 128 | 41-3-84 | 33.2% | `0.49 ms` |
+| 19 | `bot:macro` | **1008.0** | ±56.1 | `424.0` | 80 | 36-0-44 | 45.0% | `0.30 ms` |
+| 20 | `bot:random` | **583.4** | ±110.3 | `0.0` | 48 | 3-0-45 | 6.2% | `0.01 ms` |
 
-### Large 24pl (560×340 Asymmetric Macro · 61 Pairs / 732 Games · [`galcon_ladder_large24.json`](../docs/galcon_ladder_large24.json))
+### Standard 18pl (400×240 Symmetric · Classic 1v1 · 81 Pairs / 1,296 Games · [`galcon_unified_ladder.json`](../docs/galcon_unified_ladder.json))
 
 | Rank | Bot | Elo (`bot:classic=1200`) | ±Std | vs `bot:random` (0) | Games | W-D-L | Score% | Mean ms |
 |---:|---|---:|---:|---:|---:|:---:|---:|---:|
-| 1 | `w19_search` | **1866.5** | ±87.0 | `1231.4` | 84 | 57-0-27 | 67.9% | `110.44 ms` |
-| 2 | `bot:sparky` | **1825.1** | ±85.1 | `1190.0` | 84 | 51-0-33 | 60.7% | `0.85 ms` |
-| 3 | `w20_search` | **1801.0** | ±85.9 | `1165.8` | 84 | 52-0-32 | 61.9% | `114.06 ms` |
-| 4 | `w14_search` | **1792.0** | ±84.3 | `1156.9` | 84 | 48-0-36 | 57.1% | `43.10 ms` |
-| 5 | `w18_search` | **1787.8** | ±85.6 | `1152.6` | 84 | 50-0-34 | 59.5% | `113.48 ms` |
-| 6 | `w22_search` | **1776.5** | ±86.7 | `1141.3` | 72 | 40-0-32 | 55.6% | `107.06 ms` |
-| 7 | `bot:waffle` | **1683.5** | ±81.4 | `1048.4` | 84 | 42-0-42 | 50.0% | `0.70 ms` |
-| 8 | `w18_pure` | **1663.1** | ±81.7 | `1028.0` | 84 | 42-0-42 | 50.0% | `9.80 ms` |
-| 9 | `w20_pure` | **1648.1** | ±83.3 | `1013.0` | 84 | 33-0-51 | 39.3% | `10.26 ms` |
-| 10 | `w21_pure` | **1628.1** | ±83.4 | `993.0` | 84 | 40-0-44 | 47.6% | `9.75 ms` |
-| 11 | `gen3_pure` | **1555.1** | ±73.4 | `920.0` | 84 | 50-0-34 | 59.5% | `5.71 ms` |
-| 12 | `bot:esparan` | **1553.9** | ±70.3 | `918.8` | 84 | 57-0-27 | 67.9% | `1.33 ms` |
-| 13 | `gen4_pure` | **1520.7** | ±74.6 | `885.6` | 84 | 38-0-46 | 45.2% | `5.66 ms` |
-| 14 | `bot:macro` | **1358.9** | ±67.7 | `723.8` | 84 | 39-0-45 | 46.4% | `0.60 ms` |
-| 15 | `bot:rusher` | **1292.1** | ±67.1 | `657.1` | 84 | 33-0-51 | 39.3% | `0.52 ms` |
-| 16 | `bot:tactical` | **1264.3** | ±65.3 | `629.2` | 84 | 33-0-51 | 39.3% | `1.06 ms` |
-| 17 | `bot:classic` | **1200.0** | ±0.0 | `564.9` | 72 | 26-0-46 | 36.1% | `0.01 ms` |
-| 18 | `bot:random` | **633.8** | ±161.5 | `0.0` | 60 | 1-0-59 | 1.7% | `0.01 ms` |
+| 1 | `w25_search` | **1969.6** | ±76.5 | `1414.9` | 128 | 74-16-38 | 64.1% | `43.04 ms` |
+| 2 | `w20_search` | **1936.2** | ±74.1 | `1381.5` | 160 | 93-16-51 | 63.1% | `45.96 ms` |
+| 3 | `w19_search` | **1922.4** | ±74.7 | `1367.7` | 144 | 80-11-53 | 59.4% | `46.10 ms` |
+| 4 | `w22_search` | **1921.8** | ±75.8 | `1367.1` | 144 | 80-17-47 | 61.5% | `44.53 ms` |
+| 5 | `w24_pure` | **1866.1** | ±75.2 | `1311.3` | 128 | 61-10-57 | 51.6% | `7.73 ms` |
+| 6 | `w18_search` | **1860.1** | ±73.7 | `1305.3` | 160 | 76-10-74 | 50.6% | `41.05 ms` |
+| 7 | `w14_search` | **1839.8** | ±73.7 | `1285.0` | 160 | 73-7-80 | 47.8% | `21.20 ms` |
+| 8 | `w21_pure` | **1817.5** | ±75.0 | `1262.7` | 144 | 60-17-67 | 47.6% | `9.76 ms` |
+| 9 | `w20_pure` | **1811.6** | ±73.7 | `1256.9` | 128 | 61-6-61 | 50.0% | `10.04 ms` |
+| 10 | `bot:sparky` | **1776.9** | ±72.5 | `1222.1` | 160 | 64-14-82 | 44.4% | `0.68 ms` |
+| 11 | `bot:waffle` | **1771.5** | ±71.4 | `1216.8` | 144 | 67-4-73 | 47.9% | `0.63 ms` |
+| 12 | `w18_pure` | **1763.6** | ±71.1 | `1208.9` | 144 | 69-2-73 | 48.6% | `8.66 ms` |
+| 13 | `gen3_pure` | **1540.7** | ±59.2 | `986.1` | 128 | 70-1-57 | 55.1% | `5.45 ms` |
+| 14 | `gen4_pure` | **1531.4** | ±60.5 | `976.7` | 128 | 56-1-71 | 44.1% | `5.25 ms` |
+| 15 | `bot:esparan` | **1446.2** | ±55.0 | `891.5` | 112 | 80-0-32 | 71.4% | `0.92 ms` |
+| 16 | `bot:macro` | **1211.1** | ±52.8 | `656.5` | 96 | 47-0-49 | 49.0% | `0.45 ms` |
+| 17 | `bot:tactical` | **1203.6** | ±52.9 | `648.9` | 96 | 46-0-50 | 47.9% | `0.82 ms` |
+| 18 | `bot:classic` | **1200.0** | ±0.0 | `645.3` | 128 | 48-0-80 | 37.5% | `0.01 ms` |
+| 19 | `bot:rusher` | **1147.0** | ±54.1 | `592.4` | 96 | 24-0-72 | 25.0% | `0.35 ms` |
+| 20 | `bot:random` | **552.9** | ±163.1 | `0.0` | 64 | 1-0-63 | 1.6% | `0.01 ms` |
+
+### Large 24pl (560×340 Asymmetric Macro · 75 Pairs / 900 Games · [`galcon_ladder_large24.json`](../docs/galcon_ladder_large24.json))
+
+| Rank | Bot | Elo (`bot:classic=1200`) | ±Std | vs `bot:random` (0) | Games | W-D-L | Score% | Mean ms |
+|---:|---|---:|---:|---:|---:|:---:|---:|---:|
+| 1 | `w19_search` | **1877.6** | ±84.5 | `1242.3` | 108 | 74-0-34 | 68.5% | `113.35 ms` |
+| 2 | `bot:sparky` | **1821.6** | ±83.9 | `1186.3` | 96 | 57-0-39 | 59.4% | `1.03 ms` |
+| 3 | `w20_search` | **1798.3** | ±84.4 | `1163.0` | 96 | 58-0-38 | 60.4% | `114.70 ms` |
+| 4 | `w25_search` | **1794.5** | ±84.6 | `1159.2` | 96 | 50-0-46 | 52.1% | `113.55 ms` |
+| 5 | `w14_search` | **1792.7** | ±83.2 | `1157.5` | 96 | 54-0-42 | 56.2% | `44.67 ms` |
+| 6 | `w18_search` | **1783.4** | ±83.3 | `1148.1` | 108 | 62-0-46 | 57.4% | `111.00 ms` |
+| 7 | `w22_search` | **1760.5** | ±84.0 | `1125.2` | 96 | 50-0-46 | 52.1% | `110.71 ms` |
+| 8 | `w24_pure` | **1752.9** | ±85.0 | `1117.6` | 84 | 43-0-41 | 51.2% | `9.62 ms` |
+| 9 | `bot:waffle` | **1683.0** | ±80.6 | `1047.7` | 96 | 47-0-49 | 49.0% | `0.73 ms` |
+| 10 | `w18_pure` | **1666.2** | ±80.7 | `1030.9` | 96 | 47-0-49 | 49.0% | `9.71 ms` |
+| 11 | `w20_pure` | **1647.4** | ±81.6 | `1012.1` | 108 | 41-0-67 | 38.0% | `10.04 ms` |
+| 12 | `w21_pure` | **1625.0** | ±83.3 | `989.7` | 84 | 40-0-44 | 47.6% | `9.75 ms` |
+| 13 | `gen3_pure` | **1555.0** | ±73.3 | `919.7` | 84 | 50-0-34 | 59.5% | `5.71 ms` |
+| 14 | `bot:esparan` | **1553.5** | ±70.3 | `918.2` | 84 | 57-0-27 | 67.9% | `1.33 ms` |
+| 15 | `gen4_pure` | **1521.1** | ±74.6 | `885.9` | 84 | 38-0-46 | 45.2% | `5.66 ms` |
+| 16 | `bot:macro` | **1359.2** | ±67.7 | `724.0` | 84 | 39-0-45 | 46.4% | `0.60 ms` |
+| 17 | `bot:rusher` | **1292.5** | ±67.2 | `657.3` | 84 | 33-0-51 | 39.3% | `0.52 ms` |
+| 18 | `bot:tactical` | **1264.2** | ±65.3 | `629.0` | 84 | 33-0-51 | 39.3% | `1.06 ms` |
+| 19 | `bot:classic` | **1200.0** | ±0.0 | `564.8` | 72 | 26-0-46 | 36.1% | `0.01 ms` |
+| 20 | `bot:random` | **633.7** | ±161.5 | `0.0` | 60 | 1-0-59 | 1.7% | `0.01 ms` |
 
 ```bash
 # Re-anchor & print any per-size leaderboard without replaying games:
@@ -172,18 +214,21 @@ python3 -m galcon.tournament --resume --arena compact6 --bots evan_sez=py:my_ada
 | `Gen5_W18_Pure` (`galcon_gen5_w18_pure.pt`, `6ms`) | 58.8% | 40.0% | 62.5% | 51.62% | 1743.7 | — | — |
 | `Gen5_W19_Pure` (`galcon_gen5_w19.pt`, `7ms`) | 63.8% | 45.0% | 58.3% | 55.71% | 1765.3 | — | — |
 | `Gen5_W20_Pure` (`galcon_gen5_w20_pure.pt`, `7.5ms`) | **75.0%** (`30–10`) | 40.0% | 70.8% | 60.58% | 1805.5 | 16.7% / — | — |
-| `Gen5_W21_PureDistill` (zero-search, `7.5ms`) | 67.5% (`27–13`) | **67.5%** (`s14k: 95%`!) | 62.5% | 67.00% | **1851.3** | 25.0% / 33.3% | 84.4% |
-| **`Gen5_W21_Pure` (`galcon_gen5_w21_pure.pt`, `7.5ms`)** | **75.0%** (`30–10`, `75/75`) | **67.5%** (`27–13`, `70/65`) | 45.8% | **69.08%** (`+28.6%`!) | 1843.4 (`71.25%` Dual!) | 16.7% / 33.3% | **90.6%** |
+| `Gen5_W21_PureDistill` (zero-search, `7.5ms`) | 67.5% (`27–13`) | 67.5% (`s14k: 95%`!) | 62.5% | 67.00% | 1851.3 | 25.0% / 33.3% | 84.4% |
+| `Gen5_W21_Pure` (`galcon_gen5_w21_pure.pt`, `7.5ms`) | **75.0%** (`30–10`, `75/75`) | 67.5% (`27–13`, `70/65`) | 45.8% | 69.08% | 1843.4 (`71.25%` Dual!) | 16.7% / 33.3% | **90.6%** |
+| **`Gen5_W24_Pure` (`galcon_gen5_w24_pure.pt`, `7.5ms`, ZERO Search!)** | 70.0% (`24–8–8`) | **82.5%** (`33–7–0`, `s14k: 90%`!) | **79.2%** (`19–5–0`) | **75.92%** (`+6.8%`!) | **1946.6** (`+103.2`!) | 25.0% / **41.7%** (`1752.9` BT!) | **90.6%** |
 | `Gen5_W16_Search` (old physics, `25–33ms`) | 67.5% (`25–11–4`) | 33.8% (`11–24–5`) | 66.7% | 53.92% | 1758.1 | 16.7% / 33.3% | 87.5% |
 | `Gen5_W17_Search` (old physics, `27–42ms`) | 50.0% (`17–17–6`) | 41.2% (`14–21–5`) | 75.0% | 49.00% | 1743.7 | 41.7% / 58.3% | 84.4% |
 | `Gen5_W18_R1_Search` (`7.7k` C++ EI, `31–53ms`) | 60.0% | 46.2% | 62.5% | 54.75% | 1765.3 | 33.3% / 50.0% | 81.2% |
-| `Gen5_W18_R2_Search` (`13.4k` C++ EI, `30–31ms`) | 53.8% | 53.8% | **83.3%** | 56.71% | 1805.5 | **50.0%** / 58.3% | 87.5% |
-| `Gen5_W18_Search` (`galcon_gen5_w18.pt`, `29–31ms`) | 66.2% (`24–11–5`) | 52.5% | 70.8% | 61.21% | 1816.7 | 41.7% / **66.7%** | 84.4% |
-| `Gen5_W19_Search` (`galcon_gen5_w19.pt`, `42ms`) | 66.2% (`26–13–1`) | 71.2% (`28–11–1`) | 58.3% | 67.46% | 1851.3 | **50.0%** / 50.0% | 84.4% |
-| `Gen5_W20_Search` (`galcon_gen5_w20.pt`, `49ms`) | **80.0%** (`32–8–0`) | 72.5% (`29–11–0`) | 54.2% | 74.42% | 1892.1 | 33.3% / 50.0% (`h=28`) | 84.4% |
-| `Gen5_W21_PureDistill_Search` (`47ms`) | 72.5% (`29–11–0`) | 65.0% (`26–14–0`) | 50.0% | 67.25% | 1835.7 | **50.0%** / **66.7%** | **90.6%** |
-| `Gen5_W21_Search` (`galcon_gen5_w21.pt`, `49ms`) | 80.0% (`32–8`, `s9.5k: 85%`) | **77.5%** (`31–9`, `s14k: 85%`) | 70.8% | 78.08% (`+24.2%`!) | 1946.6 (`+188.5`!) | 25.0% / 41.7% | 84.4% |
-| **`Gen5_W22_Search` (`galcon_gen5_w21.pt` + Guard75 Engine)** | **85.0%** (`34–6–0`) | 75.0% (`30–10–0`) | 75.0% (`18–6–0`) | **80.00%** (`+1.9%`!) | **1961.6** (`+15.0`!) | **50.0%** / 58.3% | **90.6%** |
+| `Gen5_W18_R2_Search` (`13.4k` C++ EI, `30–31ms`) | 53.8% | 53.8% | **83.3%** | 56.71% | 1805.5 | 50.0% / 58.3% | 87.5% |
+| `Gen5_W18_Search` (`galcon_gen5_w18.pt`, `29–31ms`) | 66.2% (`24–11–5`) | 52.5% | 70.8% | 61.21% | 1816.7 | 41.7% / 66.7% | 84.4% |
+| `Gen5_W19_Search` (`galcon_gen5_w19.pt`, `42ms`) | 66.2% (`26–13–1`) | 71.2% (`28–11–1`) | 58.3% | 67.46% | 1851.3 | 50.0% / 50.0% | 84.4% |
+| `Gen5_W20_Search` (`galcon_gen5_w20.pt`, `49ms`) | 80.0% (`32–8–0`) | 72.5% (`29–11–0`) | 54.2% | 74.42% | 1892.1 | 33.3% / 50.0% (`h=28`) | 84.4% |
+| `Gen5_W21_PureDistill_Search` (`47ms`) | 72.5% (`29–11–0`) | 65.0% (`26–14–0`) | 50.0% | 67.25% | 1835.7 | 50.0% / 66.7% | 90.6% |
+| `Gen5_W21_Search` (`galcon_gen5_w21.pt`, `49ms`) | 80.0% (`32–8`, `s9.5k: 85%`) | **77.5%** (`31–9`, `s14k: 85%`) | 70.8% | 78.08% | 1946.6 | 25.0% / 41.7% | 84.4% |
+| `Gen5_W22_Search` (`galcon_gen5_w21.pt` + Guard75) | **85.0%** (`34–6–0`) | 75.0% (`30–10–0`) | 75.0% (`18–6–0`) | **80.00%** | **1961.6** | 50.0% / 58.3% | 90.6% |
+| `Gen5_W24_Search` (`galcon_gen5_w24.pt` + Guard75) | 80.0% (`s14k: 85%`) | **77.5%** (`s9.5k: 80%`) | 58.3% | 76.83% (`93.8%` C6!) | 1918.5 | 50.0% / **75.0%** (24g) | **96.9%** |
+| **`Gen5_W25_Search` (`galcon_gen5_w24.pt` + Guard75-M80)** | 80.0% (`1969.6` BT!) | 75.0% (`1982.2` C6 BT!) | 62.5% (`+4.2%`) | 76.25% (**`1915.5` Overall BT!**) | 1918.5 | **66.7%** / 58.3% (24g · **50% Sp 48g!**) | **96.9%** |
 
 ## Wave 18 Highlights — Real Galcon 2 C++ Physics Transition, `FastGen5Infer` Speedup & Frozen-Value-Head `1-Tick` PPO
 - **Real Galcon 2 C++ Physics Shift Autopsy:** Switching from simplified point-mass Python physics to real multi-ship Galcon 2 C++ physics (flock separation, planet-edge steering, gradual multi-tick arrivals, fractional ship packing) exposed a massive physics-shift gap against `Waffle3z-GA` (genetically evolved on real Galcon 2 physics): old-physics `Gen5_W16_Search` held `67.5%` vs `Sparky v1.6` but dropped `72.5% → 33.8%` vs `Waffle3z-GA` (`Gen5_W16_Pure` dropped to `20.0%`), repeatedly launching giant tick-0 home rushes that spread out over 6–10 ticks of gradual landing and lost `-68` to `-166` production by tick 20.
