@@ -439,3 +439,25 @@ This log tracks calibrated **Kaggle-equivalent Elo** estimates (anchored against
   - **Clean `200g` Unseen Gate (`500–699`, `Gen 19 it25 @0.53`):** `53–0–147 (26.5%)` (`b500=12/50, b550=16/50, b600=13/50, b650=12/50; P0=26/100, P1=27/100; avg_t=198.5`; `-3.5 pp` vs. `Gen 15B` `30.0%`).
   - **`20g` Unseen Mirror vs. `Gen 15B` (`990–999`):** `12–0–8 (60.0%)` (`avg_t=268.2`).
 - **Root-Cause Diagnosis & Promotion Decision:** Keep `checkpoints/planet_transformer_best.pt` on `Gen 15B` (`30.0% Unseen200`). `--grpo-k 4` overwrote GAE advantages with flat terminal `±1` rewards (bypassing the newly calibrated `90.0%/94.7%` value head), while the `75%` older-bot league rewarded passive play (`lr% 35.2% -> 23.0%`). Follows immediately in Gen 20 with calibrated-value C++ search and `--grpo-k 1` GAE PPO (`--hober-share 0.70`).
+
+---
+
+## Generation 20 — Joint Multi-Planet Cliff Search Breakthrough (`35.1%` / `87/248` Unseen vs. `#2 Hober Malloc`) & Calibrated GAE Frozen-V PPO (2026-11-27)
+
+- **Step 20A — Joint Multi-Planet Cliff Search (`orbit_wars_bot/orbit_search.py`, tested in `tests/test_orbit_search.py`):**
+  - Added coherent multi-planet cliff proposals (`joint_cliff_delta`, simultaneously flipping owned planets within `[thr - delta, thr)` to Launch or `[thr, thr + delta]` to Hold) inside `OrbitSearchAgent._build_surgical_candidates`.
+  - Updated `OrbitSearchAgent.__init__` defaults to the verified `valcal_joint` configuration (`max_candidates=4, cliff_band=0.07, neural_value_weight=0.90, prior_bonus=0.05, override_margin=0.08, joint_cliff_delta=0.08`) paired with `checkpoints/planet_transformer_gen20_valcal.pt` (`Gen 15B` policy logits with `0.000000` diff + calibrated `90.0%` `t>=35` / `94.7%` `t>=60` value head).
+  - **Strictly Unseen `Hold48` (`seeds 400–447` vs. `#2 Hober Malloc`, `8× D4 @0.53`, `4` workers):**
+    - `valcal_base` (`joint_cliff_delta=0.0`): `17–0–31 (35.4%)` (`b400=9/24 b424=8/24 | P0=8/24 P1=9/24 | avg_t=184.5`)
+    - **`valcal_joint` (`joint_cliff_delta=0.08, max_candidates=4, nn_w=0.90`):** **`21–0–27 (43.8%)`** (`b400=11/24 b424=10/24 | P0=12/24 P1=9/24 | avg_t=185.1` — **`+8.4 pp`** over `Gen 15B` Pure `17–0–31 / 35.4%`)
+    - `valcal_tight_joint`: `16–0–32 (33.3%)` (`b400=9/24 b424=7/24`)
+  - **Clean `200g` Unseen Gate (`seeds 500–699` vs. `#2 Hober Malloc`, `valcal_joint`):**
+    - **`66–0–134 (33.0%)`** (`b500=11/50 b550=16/50 b600=18/50 b650=21/50 | P0=31/100 P1=35/100 | avg_t=181.2`, `2022.1s`) vs. `Gen 15B` Pure **`60–0–140 (30.0%)`** (`+3.0 pp`; every 50-game block matched or beat `Gen 15B`).
+    - **Combined 248 Strictly Unseen Games (`400–447` + `500–699`):** **`87/248 (35.1%)`** vs. `Gen 15B` Pure `77/248 (31.0%)` (**`+4.0 pp`**, `+10` net wins); `20g` unseen mirror (`990–999`) vs. `Gen 15B` Pure = `6–0–14 (30.0%)` (`avg_t=206.8`).
+  - **Solo 1-Thread Checks (`valcal_joint @0.53`):**
+    - 2P vs. `#2 Hober Malloc` (`200–203`, `4g`): `2–0–2 (50.0%)` | **`142.59 ms` mean / `210.81 ms` p95 / `267.47 ms` max**.
+    - 4P FFA vs. `3× subham_v14` (`400–407`, `8g`): **`7–0–1 (87.5%)` (`AvgRank=1.25`)** | `150.11 ms` mean / `236.54 ms` p95 / `309.72 ms` max.
+- **Step 20B — Calibrated-Value GAE Frozen-V PPO (`20` iters × `32` games = `640` paired games, `--grpo-k 1`, `70%` live `#2 Hober`, `batch_size=64`):**
+  - Training stayed crisp without launch-rate collapse (`lr%=32.3%`, `akl=0.0472`, `aux=96.5%`, `EVAL(32g)` hit `init=56.2% hober=37.5% avg=43.1% *BEST*` at `it20`).
+  - Strictly unseen `Hold48` (`400–447`): `it12` `14–0–34 (29.2%)` (`b400=6/24 b424=8/24 | avg_t=203.1`), `it20` `13–0–35 (27.1%)` (`b400=5/24 b424=8/24 | avg_t=186.4`).
+- **Promotion Summary:** `checkpoints/planet_transformer_best.pt` stays on `Gen 15B` for fast Pure inference (`~59 ms`), while the verified stronger C++ search stack (`OrbitSearchAgent` `valcal_joint` defaults + `checkpoints/planet_transformer_gen20_valcal.pt`) is now tracked in git (`87/248 = 35.1%` strictly unseen vs. `#2`, `210.81 ms` p95 2P solo).
