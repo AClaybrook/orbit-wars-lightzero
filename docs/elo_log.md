@@ -461,3 +461,27 @@ This log tracks calibrated **Kaggle-equivalent Elo** estimates (anchored against
   - Training stayed crisp without launch-rate collapse (`lr%=32.3%`, `akl=0.0472`, `aux=96.5%`, `EVAL(32g)` hit `init=56.2% hober=37.5% avg=43.1% *BEST*` at `it20`).
   - Strictly unseen `Hold48` (`400–447`): `it12` `14–0–34 (29.2%)` (`b400=6/24 b424=8/24 | avg_t=203.1`), `it20` `13–0–35 (27.1%)` (`b400=5/24 b424=8/24 | avg_t=186.4`).
 - **Promotion Summary:** `checkpoints/planet_transformer_best.pt` stays on `Gen 15B` for fast Pure inference (`~59 ms`), while the verified stronger C++ search stack (`OrbitSearchAgent` `valcal_joint` defaults + `checkpoints/planet_transformer_gen20_valcal.pt`) is now tracked in git (`87/248 = 35.1%` strictly unseen vs. `#2`, `210.81 ms` p95 2P solo).
+
+---
+
+## Generation 21A — Dedicated Unfrozen `1.07M` Value Network + Deep Multi-Replan C++ Search (2026-11-28)
+
+- **Infrastructure (`orbit_wars_bot/orbit_search.py`, `scripts/evaluate.py`, `scripts/distill_soft_kd.py`, `tests/test_orbit_search.py`):**
+  - Added optional `value_checkpoint_path` (loading a dedicated lightweight value network via `_predict_value_batch` & `_run_leaf_rot_refine`) and configurable multi-step `replan_steps` to `OrbitSearchAgent` with 100% backward-compatible defaults (`value_checkpoint_path=None`, `rollout_horizon=10`, `replan_step=4`).
+  - Wired `orbit_search[...]:<policy_ckpt>|<value_ckpt>` support into `scripts/evaluate.py`, added `--gpu-sleep-ms` throttling to the full soft-KD loop in `scripts/distill_soft_kd.py`, and added `test_orbit_search_external_value_model_and_multi_replan` (`77 passed in 34.73s` across all 8 Orbit Wars test modules).
+- **Dedicated `1.07M` Value Network Training (`checkpoints/planet_value_gen21.pt`):**
+  - Trained from scratch (`d_model=128, n_heads=4, n_layers=4, dim_ff=256, fv=2, av=3, use_aux_future=True`) for `10` DirectML epochs (`bs=64, gpu_sleep_ms=25`) on `293,048` off-policy `CppFastOrbitSim` boards (`276,666` train / `16,382` strictly game-disjoint val across 2P SP/league/Hober/Search + `300g` 4P FFA rank targets).
+  - **Apples-to-Apples Unseen Validation (`13,777` 2P + `2,605` 4P boards):**
+    - `Gen 15B`: `val_score=0.47742` (`2P_all=0.4591 / 82.83%`, `early=1.0425 / 54.17%`, `mid+=0.3130 / 90.02%`, `Search b4=0.5279 / 79.83%`, `4P=0.5507 / 80.77% sign, 79.70% AUC`)
+    - `Gen 20 ValCal`: `val_score=0.42118` (`2P_all=0.3513 / 84.90%`, `early=0.9143 / 57.14%`, `mid+=0.2103 / 91.86%`, `Search b4=0.4135 / 80.02%`, `4P=0.7007 / 82.50% sign, 81.24% AUC`)
+    - **`Gen 21 ValueNet` (`1.07M`, 36% faster leaf eval):** **`val_score=0.32218`** (`2P_all=0.3615 / 85.29%`, `early=0.9207 / 58.80%`, `mid+=0.2215 / 91.92%`, `Search b4=0.4177 / 81.16%`, **`4P=0.1649 / 91.30% sign, 96.20% AUC`**)
+- **Strictly Unseen Kaggle Gates (`8× D4 @0.53`, `4` workers):**
+  - **`Hold48` (`seeds 400–447` vs. `#2 Hober Malloc`):**
+    - **`valnet_deep`** (`H=14, replan=(4, 8), K=4, nn_w=0.90, prior=0.05, margin=0.08, cliff=0.07, joint_cliff_delta=0.08, budget=0.23`): **`20–0–28 (41.7%)`** (`b400=10/24 b424=10/24 | P0=12/24 P1=8/24 | avg_t=179.5`)
+    - `valnet_base` (`H=10, replan=(4,)`): `17–0–31 (35.4%)` | `valnet_wide` (`K=5`): `17–0–31 (35.4%)` | `valnet_h12_sharp`: `15–0–33 (31.2%)`
+  - **`Unseen200` (`seeds 500–699` vs. `#2 Hober Malloc`, `valnet_deep`):**
+    - **`66–0–134 (33.0%)`** (`b500=10/50 b550=17/50 b600=21/50 b650=18/50 | P0=27/100 P1=39/100 | avg_t=180.1`) vs. `Gen 15B` Pure `60–0–140 (30.0%)` (**`+3.0 pp`**); combined `248g` unseen = `86/248 (34.7%)`.
+  - **Mirrors (`seeds 990–999`, `20g` each):** **`12–1–7 (60.0% wins, avg_t=208.8)`** vs. `Gen 15B` Pure (reversing `Gen 20 valcal_joint`'s `6–0–14 = 30.0%`), `7–0–13 (35.0%, avg_t=222.1)` vs. `Gen 20 valcal_joint`.
+  - **Solo 1-Thread Checks (`valnet_deep`):**
+    - **4P FFA vs. `3× subham_v14` (`400–407`, `8g`):** **`8–0–0 (100.0%, AvgRank=1.00)`** (`192.53 ms` mean / `290.54 ms` p95 / `370.39 ms` max) — restored `100%` 4P FFA from `Gen 20`'s `7–0–1` (`valnet_base` = `7–0–1`, `141.78 ms` mean / `237.61 ms` p95).
+    - **2P vs. `#2 Hober Malloc` (`200–203`, `4g`):** `1–0–3` (`150.68 ms` mean / `237.69 ms` p95 / `298.09 ms` max; `valnet_base` = `2–0–2`, `131.04 ms` mean / `193.29 ms` p95).

@@ -22,8 +22,10 @@ from orbit_wars_bot.physics import DEFAULT_EPISODE_STEPS, DEFAULT_SHIP_SPEED
 from orbit_wars_bot.planet_transformer import (
     EDGE_FEAT_DIM,
     PLANET_FEAT_DIM,
+    TIMELINE_FEAT_DIM,
     TIMELINE_HORIZON,
     EncodedPlanetState,
+    PlanetTimelineTransformer,
     SearchPlanetTransformerAgent,
     _obs_get,
     apply_d4_planet_feats,
@@ -134,12 +136,14 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
         self,
         checkpoint_path: str | Path,
         *,
+        value_checkpoint_path: Optional[str | Path] = None,
         launch_threshold: float = 0.53,
         use_rot_tta: bool = True,
         use_d4_tta: bool = True,
         force_all_in: bool = True,
         rollout_horizon: int = 10,
         replan_step: int = 4,
+        replan_steps: Optional[Sequence[int]] = None,
         time_budget_sec: float = 0.21,
         max_candidates: int = 4,
         cliff_band: float = 0.07,
@@ -155,7 +159,13 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
         use_cpp_sim: bool = True,
         device: str = "cpu",
     ) -> None:
-        r_step = max(1, min(int(replan_step), max(2, int(rollout_horizon)) - 1))
+        max_r = max(2, int(rollout_horizon)) - 1
+        r_step = max(1, min(int(replan_step), max_r))
+        if replan_steps is None:
+            r_steps_tup: Tuple[int, ...] = (r_step,)
+        else:
+            cleaned = sorted({max(1, min(int(t), max_r)) for t in replan_steps if int(t) > 0})
+            r_steps_tup = tuple(cleaned) if cleaned else (r_step,)
         super().__init__(
             checkpoint_path=checkpoint_path,
             launch_threshold=launch_threshold,
@@ -166,7 +176,7 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
             rollout_horizon=rollout_horizon,
             time_budget_sec=time_budget_sec,
             neural_value_weight=neural_value_weight,
-            replan_steps=(r_step,),
+            replan_steps=r_steps_tup,
             max_candidates=max_candidates,
             prior_bonus=prior_bonus,
             symmetric_value=symmetric_value,
@@ -176,7 +186,8 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
             leaf_rot_tta_top_k=0,
             device=device,
         )
-        self.replan_step = r_step
+        self.replan_steps_tuple = r_steps_tup
+        self.replan_step = r_steps_tup[0]
         self.cliff_band = float(cliff_band)
         self.alt_target_ratio = float(alt_target_ratio)
         self.override_margin = float(override_margin)
@@ -184,6 +195,25 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
         self.leaf_rot_refine = bool(leaf_rot_refine)
         self.joint_cliff_delta = float(joint_cliff_delta)
         self.use_cpp_sim = bool(use_cpp_sim and HAS_ORBIT_SIM_CPP)
+
+        if value_checkpoint_path is not None:
+            vckpt = torch.load(str(value_checkpoint_path), map_location=self.device, weights_only=False)
+            vcfg = vckpt.get("model_config", {})
+            self.value_model = PlanetTimelineTransformer(**vcfg).to(self.device)
+            self.value_model.load_state_dict(vckpt["model_state_dict"])
+            self.value_model.eval()
+            self.value_feature_version = int(vcfg.get("feature_version", 1))
+            self.value_timeline_dim = int(vcfg.get("timeline_dim", TIMELINE_FEAT_DIM))
+            self.value_checkpoint_path: Optional[str] = str(value_checkpoint_path)
+            val_params = sum(p.numel() for p in self.value_model.parameters())
+            pol_params = max(1, sum(p.numel() for p in self.model.parameters()))
+            self._val_param_ratio = min(1.0, float(val_params) / float(pol_params))
+        else:
+            self.value_model = self.model
+            self.value_feature_version = self.feature_version
+            self.value_timeline_dim = self.timeline_dim
+            self.value_checkpoint_path = None
+            self._val_param_ratio = 1.0
 
     def _build_surgical_candidates(
         self,
@@ -403,6 +433,56 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
                         break
                     sim.step(empty)
 
+    @torch.no_grad()
+    def _predict_value_batch(self, encs: Sequence[EncodedPlanetState]) -> np.ndarray:
+        """Run a batched ``value_only=True`` forward pass through ``self.value_model``."""
+        b_size = len(encs)
+        if b_size == 0:
+            return np.zeros((0,), dtype=np.float32)
+
+        ns = [len(e.planet_ids) for e in encs]
+        max_n = max(ns)
+        if max_n == 0:
+            return np.zeros((b_size,), dtype=np.float32)
+
+        if all(n_i == max_n for n_i in ns):
+            pf_np = np.stack([e.planet_feats for e in encs], axis=0)
+            tf_np = np.stack([e.timeline_feats[..., : self.value_timeline_dim] for e in encs], axis=0)
+            ef_np = np.stack([e.edge_feats for e in encs], axis=0)
+            le_np = np.stack([e.legal_edges for e in encs], axis=0)
+            pm_np = np.ones((b_size, max_n), dtype=bool)
+        else:
+            pf_np = np.zeros((b_size, max_n, PLANET_FEAT_DIM), dtype=np.float32)
+            tf_np = np.zeros((b_size, max_n, TIMELINE_HORIZON, self.value_timeline_dim), dtype=np.float32)
+            ef_np = np.zeros((b_size, max_n, max_n, EDGE_FEAT_DIM), dtype=np.float32)
+            le_np = np.zeros((b_size, max_n, max_n), dtype=bool)
+            pm_np = np.zeros((b_size, max_n), dtype=bool)
+            for idx_b, (e, n_i) in enumerate(zip(encs, ns)):
+                if n_i > 0:
+                    pf_np[idx_b, :n_i] = e.planet_feats
+                    tf_np[idx_b, :n_i] = e.timeline_feats[..., : self.value_timeline_dim]
+                    ef_np[idx_b, :n_i, :n_i] = e.edge_feats
+                    le_np[idx_b, :n_i, :n_i] = e.legal_edges
+                    pm_np[idx_b, :n_i] = True
+                else:
+                    pm_np[idx_b, 0] = True
+
+        le_t = torch.from_numpy(le_np).to(self.device)
+        _, _, vals = self.value_model(
+            torch.from_numpy(pf_np).to(self.device),
+            torch.from_numpy(tf_np).to(self.device),
+            torch.from_numpy(ef_np).to(self.device),
+            torch.from_numpy(pm_np).to(self.device),
+            legal_edges=le_t,
+            compute_frac=False,
+            value_only=True,
+        )
+        vals_np = vals.cpu().numpy().astype(np.float32, copy=False)
+        for idx_b, n_i in enumerate(ns):
+            if n_i == 0:
+                vals_np[idx_b] = 0.0
+        return vals_np
+
     def _run_leaf_rot_refine(
         self,
         hero_opps: Dict[int, List[Tuple[EncodedPlanetState, int]]],
@@ -422,7 +502,7 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
                 n_l = len(l_enc.planet_ids)
                 if n_l == 0:
                     continue
-                tf_base = l_enc.timeline_feats[..., : self.timeline_dim]
+                tf_base = l_enc.timeline_feats[..., : self.value_timeline_dim]
                 for k_rot in k_rots:
                     pf_l.append(apply_d4_planet_feats(l_enc.planet_feats, k_rot=k_rot, flip_x=False))
                     tf_l.append(apply_d4_timeline_feats(tf_base, k_rot=k_rot, flip_x=False))
@@ -446,7 +526,7 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
             pm_t = torch.ones((b_tot, max_nl), dtype=torch.bool, device=self.device)
         else:
             pf_np = np.zeros((b_tot, max_nl, PLANET_FEAT_DIM), dtype=np.float32)
-            tf_np = np.zeros((b_tot, max_nl, TIMELINE_HORIZON, self.timeline_dim), dtype=np.float32)
+            tf_np = np.zeros((b_tot, max_nl, TIMELINE_HORIZON, self.value_timeline_dim), dtype=np.float32)
             ef_np = np.zeros((b_tot, max_nl, max_nl, EDGE_FEAT_DIM), dtype=np.float32)
             le_np = np.zeros((b_tot, max_nl, max_nl), dtype=bool)
             pm_np = np.zeros((b_tot, max_nl), dtype=bool)
@@ -462,7 +542,7 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
             le_t = torch.from_numpy(le_np).to(self.device)
             pm_t = torch.from_numpy(pm_np).to(self.device)
 
-        _, _, vals_t = self.model(
+        _, _, vals_t = self.value_model(
             pf_t, tf_t, ef_t, pm_t, legal_edges=le_t, compute_frac=False, value_only=True
         )
         pos_map = {finalists[0]: 0, finalists[1]: 1}
@@ -574,16 +654,25 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
                 ap[opp_id] = omv
             acts_t0.append(ap)
 
-        # Advance t=0 -> replan_step in a single C++ batch burst
-        self._step_sims_burst(sims, acts_t0, n_empty_after=self.replan_step - 1, is_cpp=is_cpp)
+        # Advance t=0 -> first replan tick (or rollout_horizon) in a single C++ batch burst
+        replan_ticks = [t for t in self.replan_steps_tuple if 0 < t < self.rollout_horizon]
+        first_tick = replan_ticks[0] if replan_ticks else self.rollout_horizon
+        self._step_sims_burst(sims, acts_t0, n_empty_after=first_tick - 1, is_cpp=is_cpp)
 
         use_sym = self.symmetric_value and (n_players == 2)
         need_nn_leaf = self.neural_value_weight > 1e-6
         est_replan_sec = max(0.025, dt_root * 0.65 * (k_cand / 4.0) * (2 if n_players == 2 else 1) / 2.0)
-        est_leaf_sec = (max(0.020, est_replan_sec * (0.85 if use_sym else 0.50))) if need_nn_leaf else 0.004
+        est_leaf_sec = (
+            max(0.010, est_replan_sec * (0.85 if use_sym else 0.50) * max(0.25, self._val_param_ratio))
+            if need_nn_leaf
+            else 0.004
+        )
 
-        rem_ticks = self.rollout_horizon - self.replan_step
-        if rem_ticks > 0:
+        for idx_r, cur_tick in enumerate(replan_ticks):
+            next_tick = replan_ticks[idx_r + 1] if (idx_r + 1 < len(replan_ticks)) else self.rollout_horizon
+            seg_len = next_tick - cur_tick
+            if seg_len <= 0:
+                continue
             if time.perf_counter() + est_replan_sec + est_leaf_sec < deadline:
                 req_meta: List[Tuple[int, int, EncodedPlanetState]] = []
                 step_acts_all: List[List[List[List[float]]]] = [
@@ -618,10 +707,13 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
                             force_all_in=self.force_all_in,
                             max_speed=max_speed,
                         )
-                self._step_sims_burst(sims, step_acts_all, n_empty_after=rem_ticks - 1, is_cpp=is_cpp)
+                self._step_sims_burst(sims, step_acts_all, n_empty_after=seg_len - 1, is_cpp=is_cpp)
             else:
-                empty_all = [[[] for _ in range(n_players)] for _ in range(k_cand)]
-                self._step_sims_burst(sims, empty_all, n_empty_after=rem_ticks - 1, is_cpp=is_cpp)
+                rem_all = self.rollout_horizon - cur_tick
+                if rem_all > 0:
+                    empty_all = [[[] for _ in range(n_players)] for _ in range(k_cand)]
+                    self._step_sims_burst(sims, empty_all, n_empty_after=rem_all - 1, is_cpp=is_cpp)
+                break
 
         # Leaf evaluation at t = rollout_horizon
         h_vals = np.zeros((k_cand,), dtype=np.float64)
@@ -646,7 +738,7 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
                     None,
                     player=player,
                     max_speed=max_speed,
-                    feature_version=self.feature_version,
+                    feature_version=self.value_feature_version,
                     shared_physics=sh_leaf,
                 )
                 leaf_encs.append(hero_enc)
@@ -657,7 +749,7 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
                         None,
                         player=1 - player,
                         max_speed=max_speed,
-                        feature_version=self.feature_version,
+                        feature_version=self.value_feature_version,
                         shared_physics=sh_leaf,
                     )
                     leaf_encs.append(opp_enc)
@@ -666,7 +758,7 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
 
         if need_nn_leaf and leaf_encs and time.perf_counter() < deadline:
             t_lv = time.perf_counter()
-            _, _, leaf_vals = self.predict_batch(leaf_encs, compute_frac=False, value_only=True)
+            leaf_vals = self._predict_value_batch(leaf_encs)
             dt_leaf_batch = time.perf_counter() - t_lv
             for (idx_c, sign), v_raw in zip(leaf_slots, leaf_vals):
                 nn_val_sum[idx_c] += float(sign) * float(v_raw)
