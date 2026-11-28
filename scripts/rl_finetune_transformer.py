@@ -1560,6 +1560,7 @@ def ppo_update(
     use_dml: bool = False,
     augment_d4: bool = True,
     value_only: bool = False,
+    freeze_value_head: bool = False,
     max_kl: float = 0.0,
     detach_value: bool = False,
     exact_factorized_ppo: bool = False,
@@ -1656,6 +1657,11 @@ def ppo_update(
         saved_req_grad = [(p, p.requires_grad) for p in policy.parameters()]
         for name, p in policy.named_parameters():
             p.requires_grad_(name.startswith("val_attn.") or name.startswith("val_head."))
+    elif freeze_value_head:
+        saved_req_grad = [(p, p.requires_grad) for p in policy.parameters()]
+        for name, p in policy.named_parameters():
+            if name.startswith("val_attn.") or name.startswith("val_head."):
+                p.requires_grad_(False)
 
     loss_acc = torch.zeros((), device=train_dev)
     kl_acc = torch.zeros((), device=train_dev)
@@ -1773,13 +1779,14 @@ def ppo_update(
                 )
                 aux_v = torch.from_numpy(aux_v_np).to(train_dev) if aux_v_np is not None else None
 
+                eff_detach_value = bool(detach_value or freeze_value_head)
                 if want_aux:
                     logits, _, val, aux_pred = policy(
-                        pf, tf, ef, pm, return_aux=True, legal_edges=le, compute_frac=False, detach_value=detach_value
+                        pf, tf, ef, pm, return_aux=True, legal_edges=le, compute_frac=False, detach_value=eff_detach_value
                     )
                 else:
                     logits, _, val = policy(
-                        pf, tf, ef, pm, legal_edges=le, compute_frac=False, detach_value=detach_value
+                        pf, tf, ef, pm, legal_edges=le, compute_frac=False, detach_value=eff_detach_value
                     )
                     aux_pred = None
 
@@ -1857,7 +1864,7 @@ def ppo_update(
                     tkl_mean = logits.sum() * 0.0
                     ent_mean = logits.sum() * 0.0
 
-                v_loss = F.mse_loss(val, ret_t)
+                v_loss = F.mse_loss(val.detach() if freeze_value_head else val, ret_t)
 
                 if aux_pred is not None and aux_v is not None and has_aux_valid and aux_o is not None and aux_s is not None:
                     av_f = aux_v.float()
@@ -1874,9 +1881,10 @@ def ppo_update(
                 else:
                     aux_loss = logits.sum() * 0.0
 
+                eff_value_coef = 0.0 if freeze_value_head else value_coef
                 total_loss = (
                     pol_loss
-                    + value_coef * v_loss
+                    + eff_value_coef * v_loss
                     + kl_coef * kl_mean
                     + anchor_kl_coef * anchor_kl_mean
                     - ent_coef * ent_mean
@@ -1885,7 +1893,11 @@ def ppo_update(
 
                 optimizer.zero_grad(set_to_none=True)
                 total_loss.backward()
-                nn.utils.clip_grad_norm_(policy.parameters(), 0.7, foreach=not is_dml_dev)
+                nn.utils.clip_grad_norm_(
+                    [p for p in policy.parameters() if p.requires_grad],
+                    0.7,
+                    foreach=not is_dml_dev,
+                )
                 optimizer.step()
 
                 loss_acc = loss_acc + total_loss.detach()
@@ -1982,6 +1994,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hober-temperature", type=float, default=0.0, help="Sampling temperature for live #2 Hober sparring (0=deterministic t=0.53).")
     parser.add_argument("--hober-eval-pairs", type=int, default=0, help="Paired-seed games vs exact TTA=1 #2 Hober Malloc in each eval gate.")
     parser.add_argument("--value-warmup-iters", type=int, default=0, help="Warm up only val_attn/val_head for first N iters (eliminates value-head trunk shock).")
+    parser.add_argument("--freeze-value-head", action="store_true", help="Freeze val_attn/val_head parameters and skip value loss during PPO/GRPO updates.")
     parser.add_argument("--eval-every", type=int, default=2, help="Run deterministic anchor eval every N iters.")
     parser.add_argument("--eval-pairs", type=int, default=8, help="Paired-seed games per eval anchor.")
     parser.add_argument("--eval-opponents", nargs="*", default=[], help="Extra checkpoints for multi-anchor eval gate.")
@@ -2023,7 +2036,14 @@ def main(argv: list[str] | None = None) -> int:
         for p in m.parameters():
             p.requires_grad_(False)
 
-    opt = build_optimizer(policy.parameters(), lr=args.lr, weight_decay=1e-4, use_dml=use_dml)
+    if args.freeze_value_head:
+        opt_params = [
+            p for name, p in policy.named_parameters()
+            if not (name.startswith("val_attn.") or name.startswith("val_head."))
+        ]
+    else:
+        opt_params = list(policy.parameters())
+    opt = build_optimizer(opt_params, lr=args.lr, weight_decay=1e-4, use_dml=use_dml)
     val_head_params = [p for name, p in policy.named_parameters() if name.startswith("val_attn.") or name.startswith("val_head.")]
     val_opt = build_optimizer(val_head_params, lr=max(3e-4, args.lr * 10.0), weight_decay=1e-4, use_dml=use_dml)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -2097,7 +2117,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         + f" workers={args.workers} rbatch={args.rollout_batch} async={args.async_rollout} | lr={args.lr} clip={args.clip_eps} kl={args.kl_coef} akl={args.anchor_kl_coef} "
         f"ema={args.teacher_ema} aux={args.aux_coef} shaping={args.shaping_coef} gamma={args.gamma} lam={args.gae_lambda} T={args.temperature} "
-        f"oppT={args.opp_temperature} max_t={args.max_steps} all_in={args.force_all_in} 2p_only={args.two_player_only} mid_adv={args.midgame_adv_weight}{hober_tag}",
+        f"oppT={args.opp_temperature} max_t={args.max_steps} all_in={args.force_all_in} 2p_only={args.two_player_only} "
+        f"freeze_v={int(args.freeze_value_head)} mid_adv={args.midgame_adv_weight}{hober_tag}",
         flush=True,
     )
 
@@ -2435,6 +2456,7 @@ def main(argv: list[str] | None = None) -> int:
                 use_dml=use_dml,
                 augment_d4=False,
                 value_only=is_val_warmup,
+                freeze_value_head=bool(args.freeze_value_head and not is_val_warmup),
                 max_kl=args.max_kl,
                 detach_value=args.detach_value,
                 exact_factorized_ppo=bool(args.exact_factorized_ppo and args.factorized_sample),

@@ -459,3 +459,135 @@ def test_ensemble_mixed_feature_versions(tmp_path: Path):
     exp_v3 = extract_planet_features(obs, feature_version=3).timeline_feats[:, :, 12]
     assert np.allclose(seen_fvs[0][1], exp_v2)
     assert np.allclose(seen_fvs[1][1], exp_v3)
+
+
+def test_ppo_update_freeze_value_head():
+    import copy
+    import sys
+
+    scripts_dir = str(Path(__file__).resolve().parent.parent / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from rl_finetune_transformer import collect_episode, ppo_update
+
+    policy = PlanetTimelineTransformer(d_model=32, n_heads=2, n_layers=1, dim_ff=64, use_aux_future=True)
+    anchor = copy.deepcopy(policy).eval()
+    val_before = {
+        k: v.clone()
+        for k, v in policy.state_dict().items()
+        if k.startswith("val_attn.") or k.startswith("val_head.")
+    }
+    pol_before = {
+        k: v.clone()
+        for k, v in policy.state_dict().items()
+        if not (k.startswith("val_attn.") or k.startswith("val_head."))
+    }
+    assert val_before and pol_before
+
+    batch, _ = collect_episode(
+        policy,
+        anchor,
+        num_players=2,
+        opponent_kind="heuristic",
+        seed=43,
+        max_steps=40,
+        force_all_in=True,
+    )
+    opt_params = [
+        p for name, p in policy.named_parameters()
+        if not (name.startswith("val_attn.") or name.startswith("val_head."))
+    ]
+    opt = torch.optim.AdamW(opt_params, lr=5e-4)
+    upd = ppo_update(
+        policy,
+        anchor,
+        opt,
+        batch,
+        ppo_epochs=2,
+        batch_size=16,
+        freeze_value_head=True,
+    )
+    assert np.isfinite(upd["loss"])
+    for k, prev in val_before.items():
+        assert torch.equal(policy.state_dict()[k], prev), f"Frozen value param {k} changed"
+    assert any(not torch.equal(policy.state_dict()[k], prev) for k, prev in pol_before.items())
+
+
+def test_train_soft_kd_freeze_trunk_value_only(tmp_path: Path):
+    import sys
+
+    scripts_dir = str(Path(__file__).resolve().parent.parent / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from distill_soft_kd import train_soft_kd
+
+    init_model = PlanetTimelineTransformer(
+        d_model=32, n_heads=2, n_layers=1, dim_ff=64, timeline_dim=14, arch_version=3, target_cond_launch=True, feature_version=2, use_aux_future=True
+    )
+    init_path = tmp_path / "init_v2.pt"
+    out_path = tmp_path / "valcal_v2.pt"
+    torch.save({"model_config": dict(init_model.config), "model_state_dict": init_model.state_dict()}, init_path)
+
+    n_boards, n_p, t_len = 24, 10, 20
+    rng = np.random.default_rng(7)
+    pf = rng.normal(size=(n_boards, MAX_PLANETS, 22)).astype(np.float32)
+    tf = rng.normal(size=(n_boards, MAX_PLANETS, t_len, 14)).astype(np.float32)
+    ef = rng.normal(size=(n_boards, MAX_PLANETS, MAX_PLANETS, 12)).astype(np.float32)
+    le = np.zeros((n_boards, MAX_PLANETS, MAX_PLANETS), dtype=bool)
+    le[:, :n_p, :n_p] = True
+    np.fill_diagonal(le[0], False)
+    om = np.zeros((n_boards, MAX_PLANETS), dtype=bool)
+    om[:, :3] = True
+    pm = np.zeros((n_boards, MAX_PLANETS), dtype=bool)
+    pm[:, :n_p] = True
+    sp = np.zeros((n_boards, MAX_PLANETS, MAX_PLANETS + 1), dtype=np.float32)
+    sp[..., 0] = 1.0
+    vt = rng.choice([-1.0, 1.0], size=(n_boards,)).astype(np.float32)
+    data = {
+        "planet_feats": pf,
+        "timeline_feats": tf,
+        "edge_feats": ef,
+        "legal_edges": le,
+        "owned_mask": om,
+        "pad_mask": pm,
+        "soft_probs": sp,
+        "val_targets": vt,
+        "aux_owner": np.zeros((n_boards, MAX_PLANETS), dtype=np.int64),
+        "aux_ships": np.zeros((n_boards, MAX_PLANETS), dtype=np.float32),
+        "aux_valid": pm.copy(),
+    }
+
+    train_soft_kd(
+        data,
+        resume_from=str(init_path),
+        out_path=out_path,
+        epochs=3,
+        batch_size=8,
+        lr=2e-3,
+        freeze_trunk=True,
+        contiguous_val=True,
+        device="cpu",
+        train_threads=1,
+    )
+    assert out_path.is_file()
+    out_ckpt = torch.load(out_path, map_location="cpu", weights_only=False)
+    out_sd = out_ckpt["model_state_dict"]
+    init_sd = init_model.state_dict()
+    for k, prev in init_sd.items():
+        if k.startswith("val_attn.") or k.startswith("val_head."):
+            continue
+        assert torch.equal(out_sd[k], prev), f"Frozen trunk/policy param {k} changed"
+    assert any(
+        not torch.equal(out_sd[k], init_sd[k])
+        for k in init_sd
+        if k.startswith("val_attn.") or k.startswith("val_head.")
+    )
+
+    out_model = PlanetTimelineTransformer(**out_ckpt["model_config"])
+    out_model.load_state_dict(out_sd)
+    init_model.eval()
+    out_model.eval()
+    with torch.no_grad():
+        l0, _, _ = init_model(torch.from_numpy(pf[:2, :n_p]), torch.from_numpy(tf[:2, :n_p]), torch.from_numpy(ef[:2, :n_p, :n_p]), torch.from_numpy(pm[:2, :n_p]), legal_edges=torch.from_numpy(le[:2, :n_p, :n_p]), compute_frac=False)
+        l1, _, _ = out_model(torch.from_numpy(pf[:2, :n_p]), torch.from_numpy(tf[:2, :n_p]), torch.from_numpy(ef[:2, :n_p, :n_p]), torch.from_numpy(pm[:2, :n_p]), legal_edges=torch.from_numpy(le[:2, :n_p, :n_p]), compute_frac=False)
+    assert torch.allclose(l0, l1, atol=1e-6)

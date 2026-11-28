@@ -769,6 +769,8 @@ def train_soft_kd(
     launch_sharpen: float = 1.0,
     launch_center: float = 0.53,
     skip_frac: bool = False,
+    freeze_trunk: bool = False,
+    gpu_sleep_ms: float = 0.0,
     feature_version: int = 1,
     arch_version: int = 1,
     contiguous_val: bool = False,
@@ -828,7 +830,8 @@ def train_soft_kd(
     if resume_from and Path(resume_from).is_file():
         ckpt = torch.load(resume_from, map_location="cpu", weights_only=False)
         cfg = dict(ckpt.get("model_config", {}))
-        cfg["use_aux_future"] = True
+        if not freeze_trunk:
+            cfg["use_aux_future"] = True
         model = PlanetTimelineTransformer(**cfg)
         missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
         init_desc = f"Resumed {resume_from} (new aux keys={len(missing)}, unexpected={len(unexpected)})"
@@ -848,18 +851,110 @@ def train_soft_kd(
 
     model = model.to(train_dev)
     n_params = sum(p.numel() for p in model.parameters())
+    saved_req_grad = [(p, p.requires_grad) for p in model.parameters()]
+    if freeze_trunk:
+        for name, p in model.named_parameters():
+            p.requires_grad_(name.startswith("val_attn.") or name.startswith("val_head."))
+        train_params = [p for p in model.parameters() if p.requires_grad]
+    else:
+        train_params = list(model.parameters())
     print(
-        f"[SoftKD Train] {init_desc} -> {n_params/1e6:.2f}M params (device={dev_tag}) | "
+        f"[SoftKD Train] {init_desc} -> {n_params/1e6:.2f}M params (device={dev_tag}, freeze_trunk={int(freeze_trunk)}, "
+        f"trainable={sum(p.numel() for p in train_params):,}) | "
         f"train={len(tr_idx)} val={len(val_idx)} | epochs={epochs} batch={batch_size} lr={lr} | "
         f"mid_w={midgame_weight} comet_w={comet_weight} hold_b={hold_boost} launch_b={launch_boost} lbce={launch_bce_weight}",
         flush=True,
     )
 
-    opt = build_optimizer(model.parameters(), lr=lr, weight_decay=weight_decay, use_dml=use_dml)
+    opt = build_optimizer(train_params, lr=lr, weight_decay=weight_decay, use_dml=use_dml)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs), eta_min=lr * 0.05)
     best_kl = float("inf")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
+
+    if freeze_trunk:
+        def _eval_val_only() -> Tuple[float, float]:
+            model.eval()
+            mse_acc = 0.0
+            n_b = 0
+            nz_hits = 0.0
+            nz_tot = 0.0
+            with torch.no_grad():
+                for pf, tf, ef, le, om, pm, sp, vt, ao, ash, av in ThreadedPrefetcher(
+                    _iter_bucketed(val_idx, val_counts, do_shuffle=False), maxsize=3
+                ):
+                    pf, tf, ef, vt = (t.to(train_dev).float() for t in (pf, tf, ef, vt))
+                    le, pm = le.to(train_dev), pm.to(train_dev)
+                    _, _, val = model(
+                        pf, tf, ef, pm, legal_edges=le, compute_frac=False, value_only=True, detach_value=True
+                    )
+                    bsz = int(vt.shape[0])
+                    mse_acc += float(F.mse_loss(val, vt, reduction="sum").item())
+                    n_b += bsz
+                    nz = vt.abs() > 1e-6
+                    if bool(nz.any().item()):
+                        nz_hits += float(((val[nz] >= 0) == (vt[nz] >= 0)).float().sum().item())
+                        nz_tot += float(nz.sum().item())
+            return mse_acc / max(1, n_b), (nz_hits / max(1.0, nz_tot))
+
+        try:
+            init_mse, init_vsign = _eval_val_only()
+            print(f"  [ValCal ep 0/{epochs}] val_mse={init_mse:.4f} vsign={100*init_vsign:.1f}%", flush=True)
+            best_mse = float("inf")
+            for ep in range(1, epochs + 1):
+                ep_t0 = time.time()
+                model.eval()
+                tr_mse_acc = 0.0
+                tr_b = 0
+                for pf, tf, ef, le, om, pm, sp, vt, ao, ash, av in ThreadedPrefetcher(
+                    _iter_bucketed(tr_idx, tr_counts, do_shuffle=True), maxsize=3
+                ):
+                    k_rot, flip_x = random.randrange(4), bool(random.randrange(2))
+                    pf_a, tf_a = apply_d4_batch_gpu(
+                        pf.to(train_dev).float(), tf.to(train_dev).float(), k_rot=k_rot, flip_x=flip_x
+                    )
+                    ef, vt = ef.to(train_dev).float(), vt.to(train_dev).float()
+                    le, pm = le.to(train_dev), pm.to(train_dev)
+                    opt.zero_grad(set_to_none=True)
+                    _, _, val = model(
+                        pf_a, tf_a, ef, pm, legal_edges=le, compute_frac=False, value_only=True, detach_value=True
+                    )
+                    loss = F.mse_loss(val, vt)
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(train_params, 1.0, foreach=not use_dml)
+                    opt.step()
+                    if gpu_sleep_ms > 0.0:
+                        time.sleep(gpu_sleep_ms / 1000.0)
+                    tr_mse_acc += float(loss.detach().item()) * int(vt.shape[0])
+                    tr_b += int(vt.shape[0])
+                sched.step()
+                tr_mse = tr_mse_acc / max(1, tr_b)
+                v_mse, v_sign = _eval_val_only()
+                mark = ""
+                if v_mse < best_mse:
+                    best_mse = v_mse
+                    mark = " *BEST*"
+                    torch.save(
+                        {
+                            "model_config": model.config,
+                            "model_state_dict": cpu_state_dict(model),
+                            "epoch": ep,
+                            "val_mse": v_mse,
+                            "val_sign": v_sign,
+                            "freeze_trunk": True,
+                        },
+                        out_path,
+                    )
+                print(
+                    f"  [ValCal ep {ep:2d}/{epochs}] ({time.time()-t0:5.1f}s, {time.time()-ep_t0:4.1f}s/ep) | "
+                    f"tr_mse={tr_mse:.4f} val_mse={v_mse:.4f} vsign={100*v_sign:.1f}%{mark}",
+                    flush=True,
+                )
+        finally:
+            for p, req in saved_req_grad:
+                p.requires_grad_(req)
+        print(f"[ValCal] Saved best value-calibrated checkpoint -> {out_path} (best val_mse={best_mse:.4f})", flush=True)
+        return out_path
 
     acc_keys = (
         "kl",
@@ -1028,6 +1123,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--launch-sharpen", type=float, default=1.0)
     parser.add_argument("--launch-center", type=float, default=0.53)
     parser.add_argument("--skip-frac", action="store_true", help="Skip dead (B,N,N,D/2) frac_head during all-in training (~1.3x faster).")
+    parser.add_argument("--freeze-trunk", action="store_true", help="Freeze trunk/policy and calibrate ONLY val_attn/val_head via MSE on val_targets.")
+    parser.add_argument("--gpu-sleep-ms", type=float, default=0.0, help="Optional sleep (ms) between GPU optimizer steps to throttle GPU load.")
     parser.add_argument("--feature-version", type=int, default=1)
     parser.add_argument("--arch-version", type=int, default=1)
     parser.add_argument("--contiguous-val", action="store_true")
@@ -1100,6 +1197,8 @@ def main(argv: list[str] | None = None) -> int:
         launch_sharpen=args.launch_sharpen,
         launch_center=args.launch_center,
         skip_frac=args.skip_frac,
+        freeze_trunk=args.freeze_trunk,
+        gpu_sleep_ms=args.gpu_sleep_ms,
         feature_version=args.feature_version,
         arch_version=args.arch_version,
         contiguous_val=args.contiguous_val,
