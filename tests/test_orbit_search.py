@@ -188,3 +188,52 @@ def test_evaluate_resolve_orbit_search_spec():
     sim = CppFastOrbitSim.from_seed(204, num_agents=2, max_steps=500)
     moves = fn(sim.to_observation(player=0), {"shipSpeed": 2.0})
     assert isinstance(moves, list)
+
+
+@pytest.mark.skipif(not CKPT_BEST.is_file(), reason="Missing planet_transformer_best.pt checkpoint")
+def test_orbit_search_joint_cliff_candidates():
+    sim = CppFastOrbitSim.from_seed(200, num_agents=2, max_steps=500)
+    # Give player 0 two owned planets with ships > 0
+    planets = sim.export_planets()
+    owned_p0 = [p for p in planets if int(p[1]) == 0]
+    if len(owned_p0) < 2:
+        neu = next(p for p in planets if int(p[1]) == -1)
+        neu[1] = 0
+        neu[5] = 40
+        sim = CppFastOrbitSim.from_parts(
+            planets=planets,
+            initial_planets=planets,
+            fleets=[],
+            comets=[],
+            comet_planet_ids=[],
+            angular_velocity=sim.angular_velocity,
+            num_agents=2,
+            max_steps=500,
+        )
+    obs = sim.to_observation(player=0)
+    sh = build_shared_planet_physics(obs, max_speed=sim.ship_speed)
+    enc = extract_planet_features(obs, player=0, max_speed=sim.ship_speed, feature_version=2, shared_physics=sh)
+    n = len(enc.planet_ids)
+    owned_idxs = [i for i in range(n) if enc.owned_mask[i] and np.any(enc.legal_edges[i]) and int(enc.planet_rows[i][5]) > 0]
+    assert len(owned_idxs) >= 2
+
+    agent = OrbitSearchAgent(
+        CKPT_BEST, launch_threshold=0.53, cliff_band=0.07, joint_cliff_delta=0.08, max_candidates=4
+    )
+    probs = np.zeros((n, n + 1), dtype=np.float32)
+    probs[:, 0] = 1.0
+    for idx in owned_idxs[:2]:
+        j1 = int(np.flatnonzero(enc.legal_edges[idx])[0])
+        probs[idx, 0] = 0.51  # p_launch = 0.49 in [0.53 - 0.08, 0.53)
+        probs[idx, 1 + j1] = 0.49
+    mean_fracs = np.ones((n, n), dtype=np.float32)
+
+    cands, _, overrides, triggered = agent._build_surgical_candidates(enc, probs, mean_fracs, sim.ship_speed, sh)
+    assert triggered
+    assert any(ov is not None and len(ov) >= 2 and all(v > 0 for v in ov.values()) for ov in overrides)
+    assert len(cands) >= 2
+
+    moves = agent.act(obs)
+    assert isinstance(moves, list)
+    for pid, ang, count in moves:
+        assert isinstance(pid, int) and np.isfinite(ang) and count > 0

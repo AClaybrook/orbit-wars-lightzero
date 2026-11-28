@@ -141,14 +141,15 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
         rollout_horizon: int = 10,
         replan_step: int = 4,
         time_budget_sec: float = 0.21,
-        max_candidates: int = 3,
+        max_candidates: int = 4,
         cliff_band: float = 0.07,
         alt_target_ratio: float = 0.45,
-        neural_value_weight: float = 0.80,
-        prior_bonus: float = 0.06,
-        override_margin: float = 0.10,
+        neural_value_weight: float = 0.90,
+        prior_bonus: float = 0.05,
+        override_margin: float = 0.08,
         settle_ticks: int = 12,
         leaf_rot_refine: bool = True,
+        joint_cliff_delta: float = 0.08,
         symmetric_value: bool = True,
         opp_launch_threshold: Optional[float] = None,
         use_cpp_sim: bool = True,
@@ -181,6 +182,7 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
         self.override_margin = float(override_margin)
         self.settle_ticks = max(1, int(settle_ticks))
         self.leaf_rot_refine = bool(leaf_rot_refine)
+        self.joint_cliff_delta = float(joint_cliff_delta)
         self.use_cpp_sim = bool(use_cpp_sim and HAS_ORBIT_SIM_CPP)
 
     def _build_surgical_candidates(
@@ -278,6 +280,10 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
 
         # 2 & 3. Borderline Launch<->Hold flips and credible 2nd-target switches
         single_flips: List[Tuple[float, int, int]] = []
+        joint_launch_ov: Dict[int, int] = {}
+        joint_hold_ov: Dict[int, int] = {}
+        joint_launch_w = 0.0
+        joint_hold_w = 0.0
         for i in range(n):
             if not enc.owned_mask[i] or i in expiring_set:
                 continue
@@ -300,6 +306,14 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
                 single_flips.append((sc, i, alt_cls))
                 proposals.append((sc, {i: alt_cls}))
 
+            if self.joint_cliff_delta > 0.0:
+                if (thr - self.joint_cliff_delta) <= p_launch < thr:
+                    joint_launch_ov[i] = 1 + j1
+                    joint_launch_w += weight
+                elif thr <= p_launch <= (thr + self.joint_cliff_delta):
+                    joint_hold_ov[i] = 0
+                    joint_hold_w += weight
+
             if p_launch >= thr and len(order) >= 2:
                 j2 = int(order[1])
                 p1 = float(probs[i, 1 + j1])
@@ -308,6 +322,11 @@ class OrbitSearchAgent(SearchPlanetTransformerAgent):
                     sc2 = weight * p2
                     single_flips.append((sc2, i, 1 + j2))
                     proposals.append((sc2, {i: 1 + j2}))
+
+        if joint_launch_ov:
+            proposals.append((5e4 + joint_launch_w, joint_launch_ov))
+        if joint_hold_ov:
+            proposals.append((5e4 + joint_hold_w, joint_hold_ov))
 
         # 5. Top 2-planet pair flip if >= 2 distinct borderline planets exist
         single_flips.sort(key=lambda x: x[0], reverse=True)
