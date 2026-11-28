@@ -71,7 +71,16 @@ class CMove(ctypes.Structure):
 def _find_gpp() -> Optional[str]:
     if sys.platform == "win32":
         return None
+    extra_dirs = (
+        Path(sys.executable).parent,
+        Path(sys.executable).resolve().parent,
+        Path.home() / ".local" / "bin",
+    )
     for cand in ("g++", "clang++"):
+        for directory in extra_dirs:
+            candidate_path = directory / cand
+            if candidate_path.is_file() and os.access(candidate_path, os.X_OK):
+                return str(candidate_path)
         path = shutil.which(cand)
         if path:
             return path
@@ -79,8 +88,7 @@ def _find_gpp() -> Optional[str]:
 
 
 def _load_or_build_lib() -> Optional[ctypes.CDLL]:
-    gpp = _find_gpp()
-    if gpp is None:
+    if sys.platform == "win32":
         return None
 
     cpp_path = Path(__file__).resolve().parent / "orbit_sim_core.cpp"
@@ -95,13 +103,16 @@ def _load_or_build_lib() -> Optional[ctypes.CDLL]:
     flags_key = " ".join(_COMPILE_FLAGS).encode("utf-8")
     h = hashlib.sha256(src_bytes + flags_key).hexdigest()[:16]
     cache_dir = Path(tempfile.gettempdir()) / "orbit_wars_fast_sim_cpp_cache"
-    try:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return None
     so_path = cache_dir / f"orbit_sim_core_{h}.so"
 
     if not so_path.is_file():
+        gpp = _find_gpp()
+        if gpp is None:
+            return None
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
         pid = os.getpid()
         so_tmp = cache_dir / f"orbit_sim_core_{h}_{pid}.so"
         try:

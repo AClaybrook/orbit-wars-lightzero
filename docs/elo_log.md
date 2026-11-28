@@ -418,3 +418,24 @@ This log tracks calibrated **Kaggle-equivalent Elo** estimates (anchored against
   - **`Gen18-OrbitSearch@0.53` (`200–223`, `24g`):** `7–0–17 (29.2%)`.
   - **Solo 1-Thread Checks (`Gen18-s2_kd @0.53`):** `6–0–2 (75.0%)` 4P FFA vs. `3× subham_v14` (`400–407`, `AvgRank=1.25`, `AvgLen=262.9t`, `64.44 ms` mean / `80.04 ms` p95 / `114.14 ms` max); `4–0–0 (100.0%)` 2P vs. `#2 Hober Malloc` (`200–203`, `AvgLen=230.8t`, `56.04 ms` mean / `68.38 ms` p95 / `123.12 ms` max).
 - **Promotion Decision:** Keep `checkpoints/planet_transformer_best.pt` on `Gen 15B` (`41/96 = 42.7%` vs. `#2 Hober Malloc`, `100%` 4P FFA). Gen 18 `fv=3` beat `Gen 15B` `70.0%` in mirrors and reached `43.8%` on `Boss48`, while `Gen 15B` retains the `96g` generalization edge (`42.7%` vs. `36.5%`). Key unpromoted Gen 17/18 snapshots are archived in conversation scratch.
+
+---
+
+## Generation 19 — Off-Policy Value Calibration, Frozen-Value GRPO & Clean `200g` Unseen Gate (2026-11-27)
+
+- **Clean `200g` Unseen Baseline (`seeds 500–699` vs. `#2 Hober Malloc`, `8× D4 @0.53`, `kaggle_environments`):**
+  - **`Gen 15B` (`checkpoints/planet_transformer_best.pt`):** **`60–0–140 (30.0%)`** (`b500=10/50, b550=16/50, b600=16/50, b650=18/50; P0=25/100, P1=35/100; avg_t=184.0`, `1405.3s`). Quantified the `-20.0 pp` gap between over-reused `Boss48` (`50.0%`) and completely untouched seeds.
+- **Infrastructure Landed (`feat/orbit-wars-gen19`, `75 passed in 31.48s` across all 8 Orbit Wars test modules):**
+  - Updated `_load_or_build_lib()` and `_find_gpp()` in `orbit_wars_bot/fast_sim_cpp.py` to reuse hash-matched cached `.so` libraries before invoking the compiler and auto-detect venv `g++` (`Path(sys.executable).parent`).
+  - Added `--freeze-value-head` to `scripts/rl_finetune_transformer.py` (excluding `val_attn.*` / `val_head.*` from optimizer & backprop; verified bit-exact `val_params=8 all_equal=True` across 30 GRPO iterations).
+  - Added `--freeze-trunk` and `--gpu-sleep-ms` to `scripts/distill_soft_kd.py` for gentle value-only MSE calibration, plus 2 unit tests in `tests/test_planet_transformer.py`.
+- **Step 19B — Off-Policy Value Calibration (`72,058` `CppFastOrbitSim` boards, zero Hober action labels, `--freeze-trunk --batch-size 64 --gpu-sleep-ms 25`):**
+  - `all (N=7205)`: `val_mse 0.5091 -> 0.3944` (`vsign 80.7% -> 82.7%`)
+  - `t >= 35 (N=5765)`: `val_mse 0.3624 -> 0.2468` (`vsign 87.8% -> 90.0%`)
+  - `t >= 60 (N=4613)`: `val_mse 0.2461 -> 0.1360` (`vsign 93.1% -> 94.7%`)
+  - Max abs policy-logit diff vs. `Gen 15B`: `0.000000e+00`.
+- **Step 19C/19D — Frozen-Value `30`-Iter C++ League GRPO (`2,880` games, `--grpo-k 4`, `25%` Hober / `75%` league):**
+  - **Strictly Unseen `Hold48` (`400–447`, `@0.53`):** `it10` `10–0–38 (20.8%)`, `it15` `12–0–36 (25.0%)`, **`it25` `14–0–34 (29.2%)`**, **`it30` `14–0–34 (29.2%)`**.
+  - **Clean `200g` Unseen Gate (`500–699`, `Gen 19 it25 @0.53`):** `53–0–147 (26.5%)` (`b500=12/50, b550=16/50, b600=13/50, b650=12/50; P0=26/100, P1=27/100; avg_t=198.5`; `-3.5 pp` vs. `Gen 15B` `30.0%`).
+  - **`20g` Unseen Mirror vs. `Gen 15B` (`990–999`):** `12–0–8 (60.0%)` (`avg_t=268.2`).
+- **Root-Cause Diagnosis & Promotion Decision:** Keep `checkpoints/planet_transformer_best.pt` on `Gen 15B` (`30.0% Unseen200`). `--grpo-k 4` overwrote GAE advantages with flat terminal `±1` rewards (bypassing the newly calibrated `90.0%/94.7%` value head), while the `75%` older-bot league rewarded passive play (`lr% 35.2% -> 23.0%`). Follows immediately in Gen 20 with calibrated-value C++ search and `--grpo-k 1` GAE PPO (`--hober-share 0.70`).
