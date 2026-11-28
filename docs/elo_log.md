@@ -485,3 +485,26 @@ This log tracks calibrated **Kaggle-equivalent Elo** estimates (anchored against
   - **Solo 1-Thread Checks (`valnet_deep`):**
     - **4P FFA vs. `3× subham_v14` (`400–407`, `8g`):** **`8–0–0 (100.0%, AvgRank=1.00)`** (`192.53 ms` mean / `290.54 ms` p95 / `370.39 ms` max) — restored `100%` 4P FFA from `Gen 20`'s `7–0–1` (`valnet_base` = `7–0–1`, `141.78 ms` mean / `237.61 ms` p95).
     - **2P vs. `#2 Hober Malloc` (`200–203`, `4g`):** `1–0–3` (`150.68 ms` mean / `237.69 ms` p95 / `298.09 ms` max; `valnet_base` = `2–0–2`, `131.04 ms` mean / `193.29 ms` p95).
+
+### Generation 21B — AlphaZero Search-Distillation (EI) & Untouched `Lockbox200` (`700–899`) Showdown
+- **Search-Distillation (Expert Iteration) Setup:** Collected `480g` (`seeds 250000–250479`, `4,637.3s`) from the Gen 21A `valnet_deep` teacher (`111/300 = 37.0%` vs `#2`, `76/140 = 54.3%` vs `Gen 15B`, `37/40 = 92.5%` 4P vs `3× subham_v14`), yielding `22,430` boards (`20,288` train / `2,142` game-disjoint val; `3,916` override boards with `1,820` won & `7,156` override planets, `18,514` anchor boards).
+- **DirectML Soft-KD Distillation (`v1` vs `v2`):**
+  - `v1` (`lr=6e-5`, unbalanced `71.2%` `to_LAUNCH` overrides) drifted (`anc_agree 96.55% -> 81.48%`).
+  - `v2` (`lr=2e-5`, 1-ep warmup, `balance_ov_dir=True` `2.4x` `to_HOLD`, `win_ov_boost=3.0`, `win_board_w=1.5`, `lose_hi_board_w=0.0`, `tgt_kl=0.5`) stabilized anchor agreement while preserving search overrides (`v2_ep3`: `val_kl=0.0176, anc_agree=92.28%, anc_lr=33.42%, ov_flip=22.19%, ov_win_flip=23.63%, vsign=77.8%`).
+- **`Hold48` (`400–447`) & `20g` Mirror (`990–999`) Screen (`v2_ep3` selected):**
+  - `v2_ep3`: `Hold48` **`16–0–32 (33.3%, b400=8/24 b424=8/24)`**, `20g` Mirror vs `Gen 15B` **`10–0–10 (50.0%)`** (`v1_ep2`: `16–0–32 / 2–0–18`, `v1_ep8`: `15–0–33 / 4–0–16`, `v2_ep6`: `14–0–34 / 8–0–12`).
+- **`Unseen200` (`500–699`) vs `#2 Hober Malloc`:** **`Gen 21B Pure` (`v2_ep3`) `63–0–137 (31.5%, b500=15/50 b550=15/50 b600=17/50 b650=16/50, P0=27/100 P1=36/100, avg_t=178.8)`** vs `Gen 15B Pure` `60–0–140 (30.0%)`.
+- **Untouched `Lockbox200` (`seeds 700–899`) 5-Contender Showdown vs `#2 Hober Malloc`:**
+
+  | Contender | `Lockbox200` (`700–899`) | Block Splits (`700/750/800/850`) | Combined `400g` (`500–899`) | Combined `448g` (`400–447, 500–899`) |
+  |---|---|---|---|---|
+  | **`Gen 21AB Combo` (`v2_ep3` + `planet_value_gen21.pt`, `H=14, replan=(4,8)`)** | **`67–0–133 (33.5%)`** | `19 / 17 / 17 / 14` | — | — |
+  | **`Gen 21A valnet_deep`** | **`66–0–134 (33.0%)`** | `19 / 14 / 18 / 15` | **`132/400 (33.0%)`** | **`152/448 (33.9%)`** |
+  | **`Gen 21B Pure` (`v2_ep3`)** | **`63–0–137 (31.5%)`** | `19 / 15 / 17 / 12` | **`126/400 (31.5%)`** | **`142/448 (31.7%)`** |
+  | **`Gen 20 valcal_joint`** | `61–0–139 (30.5%)` | `11 / 19 / 17 / 14` | — | — |
+  | **`Gen 15B Pure` (`planet_transformer_best.pt`)** | `48–0–152 (24.0%)` | `13 / 13 / 12 / 10` | `108/400 (27.0%)` | `125/448 (27.9%)` |
+
+- **Solo 1-Thread Checks (`Gen 21B Pure` & `Gen 21AB Combo`):**
+  - `Gen 21B Pure` (`v2_ep3`): 2P vs `#2` `0–0–4` (`56.68 ms` mean / `74.50 ms` p95 / `125.46 ms` max); 4P FFA vs `3× subham_v14` `7–0–1 (87.5%, AvgRank=1.25)`.
+  - `Gen 21AB Combo`: 2P vs `#2` `2–0–2 (50.0%)` (`164.83 ms` mean / `259.64 ms` p95 / `292.22 ms` max); 4P FFA vs `3× subham_v14` **`8–0–0 (100.0%, AvgRank=1.00)`** (`190.99 ms` mean / `297.43 ms` p95 / `387.00 ms` max).
+- **Checkpoint Promotion:** `checkpoints/planet_transformer_best.pt` stays on `Gen 15B` to preserve the `100%` (`8–0–0`) 4P FFA Pure gate; `Gen 21B v2_ep3` is tracked separately as `checkpoints/planet_transformer_gen21b_ei.pt` (new 2P strictly-unseen Pure champion at `+4.5 pp` over `Gen 15B` across `500–899`, and policy backbone of `#1` `Gen 21AB Combo`).
